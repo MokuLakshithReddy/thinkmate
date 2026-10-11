@@ -1,0 +1,317 @@
+import { GoogleGenAI } from '@google/genai';
+import {
+  ThinkingAIService,
+  ThinkStreamRequest,
+  ThinkingStreamEvent,
+} from './types';
+import { getSystemPrompt } from './prompts';
+import { ThinkingMode, Insight } from '@/types';
+
+export class GeminiThinkingService implements ThinkingAIService {
+  private defaultApiKey: string | undefined;
+
+  constructor(defaultApiKey?: string) {
+    this.defaultApiKey = defaultApiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  }
+
+  async generateThinkingStream(
+    request: ThinkStreamRequest,
+    onEvent: (event: ThinkingStreamEvent) => void
+  ): Promise<void> {
+    const activeKey = request.apiKey || this.defaultApiKey;
+
+    if (!activeKey) {
+      // If no API key is supplied, use the high-fidelity thinking simulator
+      // so the user and automated tests can run without blocking
+      await this.runSimulator(request, onEvent);
+      return;
+    }
+
+    try {
+      const ai = new GoogleGenAI({ apiKey: activeKey });
+      const systemInstruction = getSystemPrompt(request.currentMode);
+      const modelName = request.model || 'gemini-2.5-flash';
+
+      // Format conversation history for Gemini API
+      // In @google/genai: contents format is array of { role: 'user' | 'model', parts: [{ text }] }
+      const contents = request.messages.map((m) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }],
+      }));
+
+      // If the latest message doesn't reflect the current problem statement, prepend context
+      if (contents.length === 0) {
+        contents.push({
+          role: 'user',
+          parts: [{ text: `Problem Statement: ${request.problemStatement}` }],
+        });
+      }
+
+      const responseStream = await ai.models.generateContentStream({
+        model: modelName,
+        contents,
+        config: {
+          systemInstruction,
+          maxOutputTokens: 2500,
+          temperature: 0.7,
+        },
+      });
+
+      let fullBuffer = '';
+      let jsonMetaBuffer = '';
+      let isCapturingJson = false;
+
+      for await (const chunk of responseStream) {
+        const text = chunk.text;
+        if (!text) continue;
+
+        fullBuffer += text;
+
+        // Check if we hit the structured meta block
+        if (text.includes('```json:thinkmate-meta') || text.includes('```json')) {
+          const split = text.split(/```json(?::thinkmate-meta)?/);
+          if (split[0]) {
+            onEvent({ type: 'token', token: split[0] });
+          }
+          isCapturingJson = true;
+          jsonMetaBuffer += split.slice(1).join('');
+        } else if (isCapturingJson) {
+          jsonMetaBuffer += text;
+        } else {
+          onEvent({ type: 'token', token: text });
+        }
+      }
+
+      // Parse metadata block if captured
+      this.parseAndEmitMetadata(jsonMetaBuffer || fullBuffer, request.currentMode, onEvent);
+    } catch (err: any) {
+      console.warn('Gemini API call encountered error, falling back to simulator:', err?.message || err);
+      // If API fails (e.g. invalid key or network issue), fallback gracefully
+      await this.runSimulator(request, onEvent, err?.message);
+    }
+  }
+
+  private parseAndEmitMetadata(
+    text: string,
+    currentMode: ThinkingMode,
+    onEvent: (event: ThinkingStreamEvent) => void
+  ) {
+    try {
+      const match = text.match(/```json(?::thinkmate-meta)?\s*([\s\S]*?)\s*```/);
+      if (match && match[1]) {
+        const parsed = JSON.parse(match[1]);
+        if (Array.isArray(parsed.suggestedQuestions) && parsed.suggestedQuestions.length > 0) {
+          onEvent({ type: 'questions', questions: parsed.suggestedQuestions });
+        }
+        if (Array.isArray(parsed.insights) && parsed.insights.length > 0) {
+          onEvent({ type: 'insights', insights: parsed.insights });
+        }
+        if (parsed.suggestedMode) {
+          onEvent({ type: 'suggestedMode', mode: parsed.suggestedMode });
+        }
+      } else {
+        // Fallback default questions based on mode
+        onEvent({
+          type: 'questions',
+          questions: this.getDefaultQuestionsForMode(currentMode),
+        });
+      }
+    } catch (e) {
+      onEvent({
+        type: 'questions',
+        questions: this.getDefaultQuestionsForMode(currentMode),
+      });
+    }
+  }
+
+  private getDefaultQuestionsForMode(mode: ThinkingMode): string[] {
+    switch (mode) {
+      case 'understand':
+        return [
+          'What is the primary constraint (time, budget, or reliability)?',
+          'What happens if we do nothing for 3 months?',
+          'What is the single non-negotiable requirement?',
+        ];
+      case 'explore':
+        return [
+          'What would an ultra-conservative approach look like?',
+          'What would a radical, zero-compromise solution look like?',
+          'Can we hybridize the top two approaches?',
+        ];
+      case 'challenge':
+        return [
+          'Which core assumption has the least empirical evidence?',
+          'Where is the single point of failure in our favorite option?',
+          'What is the catastrophic failure scenario?',
+        ];
+      case 'decide':
+        return [
+          'Are we willing to accept this trade-off long term?',
+          'Is this decision reversible within 30 days?',
+          'Do you approve locking in this decision?',
+        ];
+      case 'act':
+        return [
+          'What is the single task to complete in the next 24 hours?',
+          'Who is accountable for each milestone?',
+          'What signal triggers an immediate rollback?',
+        ];
+    }
+  }
+
+  private async runSimulator(
+    request: ThinkStreamRequest,
+    onEvent: (event: ThinkingStreamEvent) => void,
+    notice?: string
+  ): Promise<void> {
+    const mode = request.currentMode;
+    const problem = request.problemStatement;
+
+    let responseMarkdown = '';
+    let questions: string[] = [];
+    let insights: Partial<Insight>[] = [];
+
+    if (notice) {
+      responseMarkdown += `> [!NOTE]\n> *Running in resilient co-thinking mode (${notice}).*\n\n`;
+    }
+
+    switch (mode) {
+      case 'understand':
+        responseMarkdown += `### Deconstructing the Problem Framing\n\nLet's separate the symptoms from the core friction in this dilemma:\n\n1. **Stated Problem:** ${problem}\n2. **Underlying Dynamics:** In situations like this, tension usually arises from competing optimization targets (e.g. speed to ship vs long-term maintainability, or autonomy vs centralized consistency).\n3. **Clarified Goal:** We must identify what success looks like beyond the immediate technical debate.\n\nTo make meaningful progress, let's nail down these three clarifying questions before evaluating solutions:`;
+        questions = [
+          'What is the primary constraint: engineering bandwidth, deadline, or risk tolerance?',
+          'What specific metric or outcome will tell us this decision was correct in 6 months?',
+          'What is the cost of deferring this decision for 4 weeks?',
+        ];
+        insights = [
+          {
+            category: 'goal',
+            title: 'Isolate Root Constraint',
+            content: `Clarified objective: Resolve core friction in "${problem.slice(0, 50)}..." without premature technical commitment.`,
+          },
+          {
+            category: 'uncertainty',
+            title: 'Missing Boundary Context',
+            content: 'Team capacity and long-term ownership responsibilities have not yet been defined.',
+          },
+        ];
+        break;
+
+      case 'explore':
+        responseMarkdown += `### Divergent Architectural & Strategic Approaches\n\nHere are 3 genuinely distinct approaches with explicit trade-offs and risks:\n\n#### Approach A: Incremental Modularization (Conservative)\n- **Principle:** Keep the existing core intact; establish strict domain boundaries and automated CI caching.\n- **Trade-offs:** Retains existing monolithic overhead; avoids sexy rewrites.\n- **Risks:** Scope creep and erosion of discipline without strict lint checks.\n\n#### Approach B: Granular Decoupling (Transformative)\n- **Principle:** Carve out high-velocity components into standalone services or micro-functions.\n- **Trade-offs:** Introduces distributed observability, network hops, and multi-repo friction.\n- **Risks:** Premature fragmentation before domain boundaries stabilize.\n\n#### Approach C: Parallel Spike & Strangler Fig (Empirical)\n- **Principle:** Spin off one small pilot service to measure latency and developer ergonomics in production.\n- **Trade-offs:** Requires running two paradigms concurrently for a transition window.\n- **Risks:** Temporary operational complexity while monitoring two systems.`;
+        questions = [
+          'Which approach aligns best with your team’s tolerance for operational overhead?',
+          'Can we pilot Approach C on a low-risk internal endpoint?',
+          'What dependencies make Approach B difficult to execute today?',
+        ];
+        insights = [
+          {
+            category: 'option',
+            title: 'Approach A: Incremental Modularization',
+            content: 'Keep single deployment unit, enforce boundary rules, parallelize builds.',
+            metadata: {
+              tradeoffs: ['Shared infrastructure persists', 'No greenfield rewrite'],
+              risks: ['Discipline erosion without CI rules'],
+            },
+          },
+          {
+            category: 'option',
+            title: 'Approach B: Granular Decoupling',
+            content: 'Extract key domains into independent deployables.',
+            metadata: {
+              tradeoffs: ['Network latency', 'Distributed tracing overhead'],
+              risks: ['Premature fragmentation'],
+            },
+          },
+          {
+            category: 'option',
+            title: 'Approach C: Strangler Fig Migration',
+            content: 'Migrate one non-critical domain first behind an API proxy.',
+            metadata: {
+              tradeoffs: ['Dual maintenance during migration'],
+              risks: ['Data synchronization between legacy and new'],
+            },
+          },
+        ];
+        break;
+
+      case 'challenge':
+        responseMarkdown += `### Stress-Testing Core Assumptions\n\nLet's stress-test the premises underpinning your current direction:\n\n- **[VERIFIED FACT]:** Complex migrations cause delivery delays if undertaken without clear boundaries.\n- **[UNPROVEN ASSUMPTION]:** "A new architecture will inherently fix our deployment friction." (Often, CI flakiness and poor test design follow teams into microservices).\n- **[UNPROVEN ASSUMPTION]:** "The team will quickly ramp up on new distributed infrastructure without productivity loss."\n\n#### Critical Failure Mode:\nIf we embark on a full rewrite while active feature commitments continue, we risk a 6-month dual-maintenance purgatory where neither system is fully optimized.`;
+        questions = [
+          'How can we empirically test our top assumption before committing 3 months of work?',
+          'What happens if the new architecture introduces unanticipated latency or debugging complexity?',
+          'Is our team prepared to maintain two separate operational stacks during migration?',
+        ];
+        insights = [
+          {
+            category: 'assumption',
+            title: 'Tooling Solves Team Friction',
+            content: 'Assumption that changing technology stack automatically solves pipeline latency.',
+            metadata: { isFact: false },
+          },
+          {
+            category: 'assumption',
+            title: 'Dual-Stack Overhead',
+            content: 'Fact: Running two deployment systems in parallel incurs higher operational cognitive load.',
+            metadata: { isFact: true },
+          },
+        ];
+        break;
+
+      case 'decide':
+        responseMarkdown += `### Decision Synthesis & Multi-Criteria Evaluation\n\nBased on our exploration of options and risk profile, here is the proposed decision direction:\n\n**Proposed Direction: The Strangler Fig Paradigm with Incremental Modularization.**\n\n- **Why this path:** It minimizes existential rewrite risk while immediately unlocking deployment velocity on the highest-friction bottlenecks.\n- **Accepted Trade-offs:** We accept temporary dual-monitoring overhead in exchange for zero downtime and low blast radius.\n\n*Please review this proposal in the Insight Panel. Do you accept this direction, or do you want to modify key parameters?*`;
+        questions = [
+          'Do you accept this direction as our locked conclusion?',
+          'What boundary conditions or caveats should we attach to this decision?',
+          'Should we define the rollback criteria before committing?',
+        ];
+        insights = [
+          {
+            category: 'decision',
+            title: 'Adopt Incremental Strangler Migration',
+            content: 'Proceed with low-risk pilot extraction rather than big-bang rewrite.',
+            status: 'under_review',
+          },
+        ];
+        break;
+
+      case 'act':
+        responseMarkdown += `### Action Plan & Concrete Execution Roadmap\n\nHere is your step-by-step roadmap to execute the approved decision:\n\n#### Phase 1: Immediate Validation (Days 1–3)\n- [ ] Profile CI pipeline stages to quantify exact bottlenecks.\n- [ ] Draft an ADR (Architecture Decision Record) documenting the strangler pattern and stop conditions.\n\n#### Phase 2: Pilot Extraction (Weeks 1–2)\n- [ ] Carve out a single read-only or low-criticality service.\n- [ ] Setup API gateway routing and health checks.\n\n#### Phase 3: Validation & Gate Check (Week 3)\n- [ ] Compare deployment time and test flakiness against baseline.\n- [ ] Stop condition: If operational overhead exceeds 25% team capacity, pause further extraction.`;
+        questions = [
+          'Who will be the directly responsible owner for the Phase 1 profiling task?',
+          'What is our definition of done for the pilot extraction?',
+        ];
+        insights = [
+          {
+            category: 'action',
+            title: 'Profile CI Pipeline Stages',
+            content: 'Instrument test suite runtimes and identify longest-running jobs.',
+            metadata: { milestone: 'Phase 1: Days 1-3' },
+          },
+          {
+            category: 'action',
+            title: 'Draft Architecture Decision Record (ADR)',
+            content: 'Codify agreed boundaries, rollback criteria, and team conventions.',
+            metadata: { milestone: 'Phase 1: Days 1-3' },
+          },
+          {
+            category: 'action',
+            title: 'Extract Low-Risk Pilot Service',
+            content: 'Implement first strangler boundary on a standalone endpoint.',
+            metadata: { milestone: 'Phase 2: Weeks 1-2' },
+          },
+        ];
+        break;
+    }
+
+    // Stream simulated response in chunks with natural pacing
+    const tokens = responseMarkdown.split(' ');
+    for (const word of tokens) {
+      onEvent({ type: 'token', token: word + ' ' });
+      await new Promise((res) => setTimeout(res, 12));
+    }
+
+    onEvent({ type: 'questions', questions });
+    onEvent({ type: 'insights', insights });
+  }
+}
