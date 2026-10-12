@@ -79,9 +79,17 @@ export class WorkflowStateMachine {
   }
 
   /**
-   * Derives current flowchart stage from persisted mode and previous message count.
+   * Derives current flowchart stage. Prioritizes the authoritative persistedStage field.
+   * Message count is only used as a legacy fallback when persistedStage is absent.
    */
-  static deriveCurrentStage(currentMode: ThinkingMode, messageCount: number): CoThinkerStep {
+  static deriveCurrentStage(
+    currentMode: ThinkingMode,
+    messageCount: number,
+    persistedStage?: CoThinkerStep
+  ): CoThinkerStep {
+    if (persistedStage) {
+      return persistedStage;
+    }
     if (currentMode === 'understand') {
       if (messageCount === 0) return 'welcome';
       if (messageCount <= 2) return 'describe_problem';

@@ -97,4 +97,16 @@ describe('Workflow State Machine & Guardrails', () => {
     assert.strictEqual(WorkflowStateMachine.getModeForStage('summarize_insights'), 'decide');
     assert.strictEqual(WorkflowStateMachine.getModeForStage('choose_action'), 'act');
   });
+
+  test('deriveCurrentStage honors authoritative persistedStage across retries/loopbacks', () => {
+    // If the database has persisted describe_problem, even if messageCount > 2 (from retries),
+    // it must NEVER guess clarify_objective
+    const stage = WorkflowStateMachine.deriveCurrentStage('understand', 5, 'describe_problem');
+    assert.strictEqual(stage, 'describe_problem');
+
+    // Without persistedStage, it uses legacy message count derivation
+    assert.strictEqual(WorkflowStateMachine.deriveCurrentStage('understand', 0), 'welcome');
+    assert.strictEqual(WorkflowStateMachine.deriveCurrentStage('understand', 1), 'describe_problem');
+    assert.strictEqual(WorkflowStateMachine.deriveCurrentStage('understand', 3), 'clarify_objective');
+  });
 });

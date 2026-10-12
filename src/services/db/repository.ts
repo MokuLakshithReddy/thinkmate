@@ -1,12 +1,32 @@
 import { SupabaseClient } from '@supabase/supabase-js';
-import { ThinkingSession, SessionMessage, Insight, ThinkingMode, InsightCategory, InsightStatus } from '@/types';
+import { ThinkingSession, SessionMessage, Insight, ThinkingMode, CoThinkerStep, InsightCategory, InsightStatus } from '@/types';
 import { getServiceSupabaseClient } from './supabase-client';
+
+export interface RecordWorkflowStepParams {
+  sessionId: string;
+  userMessage?: string;
+  assistantMessage: string;
+  nextStage: CoThinkerStep;
+  nextMode: ThinkingMode;
+  problemStatement?: string;
+  suggestedQuestions?: string[];
+  clientRequestId?: string;
+}
+
+export interface RecordWorkflowStepResult {
+  sessionId: string;
+  userMessageId?: string;
+  assistantMessageId: string;
+  nextStage: CoThinkerStep;
+  nextMode: ThinkingMode;
+}
 
 export interface ThinkingRepository {
   getSessions(userId: string): Promise<ThinkingSession[]>;
   getSession(id: string, userId: string): Promise<ThinkingSession | null>;
   createSession(session: ThinkingSession, userId: string): Promise<ThinkingSession>;
   updateSession(id: string, updates: Partial<ThinkingSession>, userId: string): Promise<ThinkingSession>;
+  recordWorkflowStep(params: RecordWorkflowStepParams, userId: string): Promise<RecordWorkflowStepResult>;
   deleteSession(id: string, userId: string): Promise<void>;
   getMessages(sessionId: string, userId: string): Promise<SessionMessage[]>;
   addMessage(message: SessionMessage, userId: string): Promise<SessionMessage>;
@@ -47,6 +67,7 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       title: row.title as string,
       problemStatement: row.problem_statement as string,
       currentMode: row.current_mode as ThinkingMode,
+      currentStage: (row.current_stage as CoThinkerStep) || 'welcome',
       status: row.status as 'active' | 'archived',
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
@@ -84,6 +105,7 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       title: data.title,
       problemStatement: data.problem_statement,
       currentMode: data.current_mode,
+      currentStage: (data.current_stage as CoThinkerStep) || 'welcome',
       status: data.status,
       createdAt: data.created_at,
       updatedAt: data.updated_at,
@@ -103,6 +125,7 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       title: session.title,
       problem_statement: session.problemStatement,
       current_mode: session.currentMode,
+      current_stage: session.currentStage || 'welcome',
       status: session.status,
       user_id: userId,
       created_at: session.createdAt || new Date().toISOString(),
@@ -124,6 +147,7 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       ...session,
       id: data.id,
       userId: data.user_id,
+      currentStage: (data.current_stage as CoThinkerStep) || 'welcome',
       createdAt: data.created_at,
       updatedAt: data.updated_at,
     };
@@ -131,6 +155,7 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
 
   /**
    * Updates an existing session after verifying ownership.
+   * Explicitly persists problemStatement and currentStage.
    */
   async updateSession(
     id: string,
@@ -150,9 +175,11 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
     const payload: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
     };
-    if (updates.title) payload.title = updates.title;
-    if (updates.currentMode) payload.current_mode = updates.currentMode;
-    if (updates.status) payload.status = updates.status;
+    if (updates.title !== undefined) payload.title = updates.title;
+    if (updates.problemStatement !== undefined) payload.problem_statement = updates.problemStatement;
+    if (updates.currentMode !== undefined) payload.current_mode = updates.currentMode;
+    if (updates.currentStage !== undefined) payload.current_stage = updates.currentStage;
+    if (updates.status !== undefined) payload.status = updates.status;
 
     const { data, error } = await this.client
       .from('thinking_sessions')
@@ -173,10 +200,110 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       title: data.title,
       problemStatement: data.problem_statement,
       currentMode: data.current_mode,
+      currentStage: (data.current_stage as CoThinkerStep) || 'welcome',
       status: data.status,
       createdAt: data.created_at,
       updatedAt: data.updated_at,
     };
+  }
+
+  /**
+   * Records a complete workflow step atomically with transactional compensation.
+   * Ensures user message, assistant message, and session stage/mode update are committed together.
+   * If any step fails, rolls back newly inserted messages so partial conversation history is never left.
+   */
+  async recordWorkflowStep(
+    params: RecordWorkflowStepParams,
+    userId: string
+  ): Promise<RecordWorkflowStepResult> {
+    if (!userId) {
+      throw new Error('Mandatory authorization failure: userId is required to record workflow step');
+    }
+
+    // 1. Verify caller owns the session
+    const session = await this.getSession(params.sessionId, userId);
+    if (!session) {
+      throw new Error('Session not found or unauthorized');
+    }
+
+    const createdMessageIds: string[] = [];
+
+    try {
+      let userMessageId: string | undefined = undefined;
+
+      // 2. Persist user message if provided
+      if (params.userMessage && params.userMessage.trim()) {
+        userMessageId = crypto.randomUUID();
+        const { error: userErr } = await this.client.from('session_messages').insert({
+          id: userMessageId,
+          session_id: params.sessionId,
+          role: 'user',
+          content: params.userMessage.trim(),
+          mode: session.currentMode,
+          created_at: new Date().toISOString(),
+        });
+
+        if (userErr) {
+          throw new Error(`Failed to record user message: ${userErr.message}`);
+        }
+        createdMessageIds.push(userMessageId);
+      }
+
+      // 3. Persist assistant message
+      const assistantMessageId = crypto.randomUUID();
+      const { error: astErr } = await this.client.from('session_messages').insert({
+        id: assistantMessageId,
+        session_id: params.sessionId,
+        role: 'assistant',
+        content: params.assistantMessage,
+        mode: params.nextMode,
+        suggested_questions: params.suggestedQuestions || [],
+        created_at: new Date().toISOString(),
+      });
+
+      if (astErr) {
+        throw new Error(`Failed to record assistant message: ${astErr.message}`);
+      }
+      createdMessageIds.push(assistantMessageId);
+
+      // 4. Update session stage, mode, and problemStatement
+      const sessionUpdate: Record<string, unknown> = {
+        current_mode: params.nextMode,
+        current_stage: params.nextStage,
+        updated_at: new Date().toISOString(),
+      };
+      if (params.problemStatement !== undefined) {
+        sessionUpdate.problem_statement = params.problemStatement;
+      }
+
+      const { error: updateErr } = await this.client
+        .from('thinking_sessions')
+        .update(sessionUpdate)
+        .eq('id', params.sessionId)
+        .eq('user_id', userId);
+
+      if (updateErr) {
+        throw new Error(`Failed to commit workflow state: ${updateErr.message}`);
+      }
+
+      return {
+        sessionId: params.sessionId,
+        userMessageId,
+        assistantMessageId,
+        nextStage: params.nextStage,
+        nextMode: params.nextMode,
+      };
+    } catch (workflowErr) {
+      // Compensate: Delete any inserted messages to prevent corrupting conversation history
+      for (const msgId of createdMessageIds) {
+        try {
+          await this.client.from('session_messages').delete().eq('id', msgId);
+        } catch (cleanupErr) {
+          console.error(`Failed to compensate message ${msgId}:`, cleanupErr);
+        }
+      }
+      throw workflowErr;
+    }
   }
 
   /**

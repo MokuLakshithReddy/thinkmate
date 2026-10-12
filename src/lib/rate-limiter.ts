@@ -125,23 +125,72 @@ export class UpstashRedisRateLimitStore implements RateLimitStore {
 
   async checkAndRecord(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
     const now = Date.now();
-    const raw = await this.get(key);
-    const valid = raw.filter((t) => now - t < windowMs);
+    const uniqueMember = `${now}-${Math.random().toString(36).slice(2, 9)}`;
 
-    if (valid.length >= limit) {
-      const oldest = valid[0];
-      const resetMs = Math.max(0, windowMs - (now - oldest));
-      return { allowed: false, remaining: 0, resetMs };
+    // Atomic sliding window Lua script
+    const luaScript = `
+      local key = KEYS[1]
+      local now = tonumber(ARGV[1])
+      local window = tonumber(ARGV[2])
+      local limit = tonumber(ARGV[3])
+      local member = ARGV[4]
+      local clearBefore = now - window
+      redis.call('ZREMRANGEBYSCORE', key, 0, clearBefore)
+      local current = redis.call('ZCARD', key)
+      if current < limit then
+        redis.call('ZADD', key, now, member)
+        redis.call('EXPIRE', key, math.ceil(window / 1000) + 2)
+        return {1, limit - current - 1, window}
+      else
+        local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+        local resetMs = window
+        if oldest and #oldest >= 2 then
+          resetMs = math.max(0, window - (now - tonumber(oldest[2])))
+        end
+        return {0, 0, resetMs}
+      end
+    `;
+
+    try {
+      const res = await fetch(`${this.url}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify([
+          'EVAL',
+          luaScript,
+          1,
+          key,
+          String(now),
+          String(windowMs),
+          String(limit),
+          uniqueMember,
+        ]),
+      });
+
+      if (!res.ok) {
+        throw new Error(`Upstash returned HTTP status ${res.status}`);
+      }
+
+      const json = await res.json();
+      if (Array.isArray(json.result) && json.result.length >= 3) {
+        const allowed = Number(json.result[0]) === 1;
+        const remaining = Number(json.result[1]);
+        const resetMs = Number(json.result[2]);
+        return { allowed, remaining, resetMs };
+      }
+
+      throw new Error('Unexpected format in Redis EVAL response');
+    } catch (providerError) {
+      console.warn(
+        '[RateLimiter] Upstash Redis atomic execution failed. Engaging bounded local memory fallback:',
+        providerError
+      );
+      // Bounded local fallback: strictly bounded per instance, never fails open
+      return memoryStore.checkAndRecord(key, limit, windowMs);
     }
-
-    valid.push(now);
-    await this.set(key, valid);
-
-    return {
-      allowed: true,
-      remaining: limit - valid.length,
-      resetMs: windowMs,
-    };
   }
 }
 

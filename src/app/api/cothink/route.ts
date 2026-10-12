@@ -30,6 +30,7 @@ const CoThinkRequestSchema = z.object({
   userName: z.string().max(50).default('Thinker'),
   problemStatement: z.string().max(8000, 'Problem statement exceeds 8,000 character limit').optional(),
   clarifiedObjective: z.string().max(4000, 'Clarified objective exceeds 4,000 character limit').optional(),
+  clientRequestId: z.string().max(100).optional(),
 });
 
 const engine = new CoThinkEngine(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
@@ -83,6 +84,7 @@ export async function POST(req: NextRequest) {
       userName,
       problemStatement,
       clarifiedObjective,
+      clientRequestId,
     } = parsed.data;
 
     // 1. Authoritatively retrieve the persisted session owned by caller
@@ -116,8 +118,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. Derive current stage and validate stage transition server-side
-    const currentStage = WorkflowStateMachine.deriveCurrentStage(session.currentMode, dbMessages.length);
+    // 3. Derive current stage using authoritative persisted session.currentStage (avoid message count guessing)
+    const currentStage =
+      session.currentStage ||
+      WorkflowStateMachine.deriveCurrentStage(session.currentMode, dbMessages.length);
     const transitionValidation = WorkflowStateMachine.validateStageTransition(currentStage, step as CoThinkerStep);
 
     if (!transitionValidation.allowed) {
@@ -132,41 +136,19 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 4. Persist incoming user message into the database
-    if (userMessage.trim()) {
-      try {
-        await getRepository().addMessage(
-          {
-            id: crypto.randomUUID(),
-            sessionId,
-            role: 'user',
-            content: userMessage,
-            mode: WorkflowStateMachine.getModeForStage(step as CoThinkerStep),
-            createdAt: new Date().toISOString(),
-          },
-          authUser.id
-        );
-      } catch (saveUserMsgErr: unknown) {
-        console.error('Failed to persist user message:', saveUserMsgErr);
-        return NextResponse.json(
-          { error: 'Database error: failed to record message before thinking execution' },
-          { status: 503 }
-        );
-      }
-    }
-
-    // 5. Build authoritative conversation history from database
+    // 4. Build authoritative conversation history from database
     const authoritativeHistory = dbMessages.map((m) => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
     }));
 
-    // 6. Process stage via AI thinking engine
+    // 5. Process stage via AI thinking engine (run before persisting to avoid partial state if AI fails)
+    const activeProblem = problemStatement || session.problemStatement;
     const result = await engine.processStep(
       {
         userName: authUser.email || userName,
         step: step as CoThinkerStep,
-        problemStatement: problemStatement || session.problemStatement,
+        problemStatement: activeProblem,
         clarifiedObjective,
         conversationHistory: authoritativeHistory,
         activeSessionTitle: session.title,
@@ -182,27 +164,19 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 7. Authoritatively persist the assistant message and update session's workflow mode
+    // 6. Atomically persist user message, assistant message, stage transition, and problemStatement
     const nextMode = WorkflowStateMachine.getModeForStage(result.nextStep);
     try {
-      await getRepository().addMessage(
+      await getRepository().recordWorkflowStep(
         {
-          id: crypto.randomUUID(),
           sessionId,
-          role: 'assistant',
-          content: result.message,
-          mode: nextMode,
+          userMessage: userMessage.trim() ? userMessage : undefined,
+          assistantMessage: result.message,
+          nextStage: result.nextStep,
+          nextMode,
+          problemStatement: activeProblem,
           suggestedQuestions: result.options?.map((o) => o.label) || [],
-          createdAt: new Date().toISOString(),
-        },
-        authUser.id
-      );
-
-      await getRepository().updateSession(
-        sessionId,
-        {
-          currentMode: nextMode,
-          problemStatement: problemStatement || session.problemStatement,
+          clientRequestId,
         },
         authUser.id
       );

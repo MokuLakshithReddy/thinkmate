@@ -17,10 +17,13 @@ CREATE TABLE IF NOT EXISTS public.thinking_sessions (
   title TEXT NOT NULL,
   problem_statement TEXT NOT NULL,
   current_mode TEXT NOT NULL DEFAULT 'understand' CHECK (current_mode IN ('understand', 'explore', 'challenge', 'decide', 'act')),
+  current_stage TEXT NOT NULL DEFAULT 'welcome',
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
+
+ALTER TABLE public.thinking_sessions ADD COLUMN IF NOT EXISTS current_stage TEXT NOT NULL DEFAULT 'welcome';
 
 -- Trigger for thinking_sessions.updated_at
 DROP TRIGGER IF EXISTS trg_thinking_sessions_updated_at ON public.thinking_sessions;

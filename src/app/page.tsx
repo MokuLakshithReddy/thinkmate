@@ -123,8 +123,8 @@ export default function Home() {
   const [customMessages, setCustomMessages] = useState<ChatMessage[] | null>(null);
   const [customOptions, setCustomOptions] = useState<ChoiceOption[] | undefined>(undefined);
 
-  // Active sessions: prefers authoritative cloud sessions over local drafts
-  const availableSessions = isAuthenticated && cloudSessions.length > 0 ? cloudSessions : localDraftSessions;
+  // Active sessions: Authenticated users only see cloud sessions. Local drafts remain segregated for offline guests.
+  const availableSessions = isAuthenticated ? cloudSessions : localDraftSessions;
 
   // Active messages derived from cloud sessions, local drafts, or default welcome
   const messages: ChatMessage[] = React.useMemo(() => {
@@ -132,7 +132,7 @@ export default function Home() {
     if (availableSessions.length > 0) {
       const latest = availableSessions[0];
       const resumeOptionId = `resume_${latest.id}`;
-      const isCloud = isAuthenticated && cloudSessions.length > 0;
+      const isCloud = isAuthenticated;
       return [
         {
           id: 'msg-init-saved',
@@ -158,18 +158,26 @@ export default function Home() {
       ];
     }
     return [DEFAULT_NEUTRAL_WELCOME];
-  }, [customMessages, availableSessions, isAuthenticated, cloudSessions.length]);
+  }, [customMessages, availableSessions, isAuthenticated]);
 
   const currentOptions: ChoiceOption[] | undefined =
     customOptions !== undefined ? customOptions : messages[messages.length - 1]?.options;
 
-  // Authoritative Session ID state and ref (stores real database UUID for cloud sessions)
-  const [activeSessionId, setActiveSessionId] = useState<string>('');
-  const currentSessionIdRef = useRef<string>('');
+  // Authoritative Session ID state and ref
+  // Explicit session kind tracking ('cloud' for verified DB sessions, 'local' for unauthenticated drafts)
+  const isCloudUuid = (id: string | null | undefined): boolean =>
+    typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 
-  const updateSessionId = (id: string) => {
+  const [activeSessionId, setActiveSessionId] = useState<string>('');
+  const [sessionKind, setSessionKind] = useState<'cloud' | 'local' | null>(null);
+  const currentSessionIdRef = useRef<string>('');
+  const sessionKindRef = useRef<'cloud' | 'local' | null>(null);
+
+  const updateSessionState = (id: string, kind: 'cloud' | 'local' | null) => {
     currentSessionIdRef.current = id;
+    sessionKindRef.current = kind;
     setActiveSessionId(id);
+    setSessionKind(kind);
   };
 
   // Undo / Redo stacks
@@ -230,7 +238,7 @@ export default function Home() {
     if (selectedOptionId?.startsWith('resume_')) {
       const targetSessionId = selectedOptionId.replace('resume_', '');
 
-      if (authToken) {
+      if (authToken && isCloudUuid(targetSessionId)) {
         try {
           const detailRes = await fetch(`/api/sessions?id=${targetSessionId}`, {
             headers: { Authorization: `Bearer ${authToken}` },
@@ -239,7 +247,7 @@ export default function Home() {
             const detailData = await detailRes.json();
             const session = detailData.session;
             if (session) {
-              updateSessionId(session.id);
+              updateSessionState(session.id, 'cloud');
               setProblemStatement(session.problemStatement || '');
 
               if (Array.isArray(session.messages) && session.messages.length > 0) {
@@ -254,7 +262,7 @@ export default function Home() {
                 setCustomMessages(loadedChat);
               }
 
-              const resumedStage = WorkflowStateMachine.deriveCurrentStage(session.currentMode, session.messages?.length || 0);
+              const resumedStage = session.currentStage || WorkflowStateMachine.deriveCurrentStage(session.currentMode, session.messages?.length || 0);
               setCurrentStep(resumedStage);
             }
           }
@@ -264,16 +272,42 @@ export default function Home() {
       } else {
         const localMatch = localDraftSessions.find((s) => s.id === targetSessionId);
         if (localMatch) {
-          updateSessionId(localMatch.id);
+          updateSessionState(localMatch.id, 'local');
           setProblemStatement(localMatch.problemStatement || '');
         }
       }
     }
 
-    // P0: For authenticated users, ensure an authentic database session exists before calling /api/cothink
-    if (authToken && (!currentSessionIdRef.current || !currentSessionIdRef.current.includes('-'))) {
+    // Special kickoff handling: clicking "Start a new problem" transitions from welcome to describe_problem
+    if (currentStep === 'welcome' && selectedOptionId === 'start_new') {
+      const userKickoffMsg: ChatMessage = {
+        id: `msg-user-${Date.now()}`,
+        role: 'user',
+        content: text || 'Start a new problem',
+        step: 'welcome',
+        timestamp: new Date().toISOString(),
+        selectedOptionId,
+      };
+      const assistantIntroMsg: ChatMessage = {
+        id: `msg-ast-${Date.now()}`,
+        role: 'assistant',
+        content: "What is the core dilemma or problem you are trying to understand and solve? Describe the situation, tension, or challenge you're facing.",
+        step: 'describe_problem',
+        timestamp: new Date().toISOString(),
+        executionMode: authToken ? 'gemini' : 'simulator',
+      };
+      setCurrentStep('describe_problem');
+      setProgressPercent(20);
+      setProblemStatement('');
+      setClarifiedObjective('');
+      setCustomMessages([userKickoffMsg, assistantIntroMsg]);
+      return;
+    }
+
+    // P0/P1: For authenticated users, create an authentic database session once problem description is provided
+    if (authToken && sessionKindRef.current !== 'cloud' && (currentStep === 'describe_problem' || (!currentSessionIdRef.current && text.trim().length > 0))) {
       try {
-        const activeProblem = currentStep === 'describe_problem' ? text : (problemStatement || text);
+        const activeProblem = text.trim();
         const title =
           activeProblem.length > 0
             ? activeProblem.slice(0, 48) + (activeProblem.length > 48 ? '...' : '')
@@ -289,13 +323,14 @@ export default function Home() {
             title,
             problemStatement: activeProblem,
             currentMode: 'understand',
+            currentStage: 'describe_problem',
           }),
         });
 
         if (createRes.ok) {
           const createData = await createRes.json();
-          if (createData.session?.id) {
-            updateSessionId(createData.session.id);
+          if (createData.session?.id && isCloudUuid(createData.session.id)) {
+            updateSessionState(createData.session.id, 'cloud');
             refreshCloudSessions();
           }
         }
@@ -303,7 +338,7 @@ export default function Home() {
         console.warn('Failed to pre-create session in database:', err);
       }
     } else if (!authToken && !currentSessionIdRef.current) {
-      updateSessionId(`demo-${Date.now()}`);
+      updateSessionState(`demo-${Date.now()}`, 'local');
     }
 
     const userMsg: ChatMessage = {
@@ -324,7 +359,8 @@ export default function Home() {
     }
 
     try {
-      const endpoint = authToken ? '/api/cothink' : '/api/demo/cothink';
+      const isCloud = Boolean(authToken && sessionKindRef.current === 'cloud' && isCloudUuid(currentSessionIdRef.current));
+      const endpoint = isCloud ? '/api/cothink' : '/api/demo/cothink';
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (authToken) {
         headers['Authorization'] = `Bearer ${authToken}`;
@@ -456,7 +492,7 @@ export default function Home() {
   };
 
   const handleRestart = () => {
-    updateSessionId('');
+    updateSessionState('', null);
     setCurrentStep('welcome');
     setProgressPercent(10);
     setProblemStatement('');
@@ -521,7 +557,7 @@ export default function Home() {
             isLoading={isLoading}
             onSendMessage={handleSendMessage}
             onRestart={handleRestart}
-            userName={isAuthenticated ? 'Cloud Thinker' : 'Guest Thinker'}
+            userName={isAuthenticated && sessionKind === 'cloud' ? 'Cloud Thinker' : 'Guest Thinker'}
             activeSessionId={activeSessionId}
           />
         </section>

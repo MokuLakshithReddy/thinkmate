@@ -236,4 +236,138 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
       }
     );
   });
+
+  test('updateSession persists problemStatement and currentStage', async () => {
+    let capturedPayload: Record<string, unknown> = {};
+    const mockClient = {
+      from: (table: string) => {
+        if (table === 'thinking_sessions') {
+          return {
+            update: (payload: Record<string, unknown>) => {
+              capturedPayload = payload;
+              return {
+                eq: () => ({
+                  eq: () => ({
+                    select: () => ({
+                      single: async () => ({
+                        data: {
+                          id: 'sess-123',
+                          user_id: 'user-123',
+                          title: 'Updated Title',
+                          problem_statement: payload.problem_statement,
+                          current_mode: 'explore',
+                          current_stage: payload.current_stage,
+                          status: 'active',
+                          created_at: new Date().toISOString(),
+                          updated_at: new Date().toISOString(),
+                        },
+                        error: null,
+                      }),
+                    }),
+                  }),
+                }),
+              };
+            },
+          };
+        }
+        return {};
+      },
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+    (repo as unknown as { getSession: unknown }).getSession = async () => ({
+      id: 'sess-123',
+      userId: 'user-123',
+      title: 'Initial',
+      problemStatement: 'Initial problem',
+      currentMode: 'understand',
+      currentStage: 'welcome',
+      status: 'active',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const updated = await repo.updateSession(
+      'sess-123',
+      {
+        problemStatement: 'New authentic problem dilemma',
+        currentStage: 'explore_perspectives',
+        currentMode: 'explore',
+      },
+      'user-123'
+    );
+
+    assert.equal(capturedPayload.problem_statement, 'New authentic problem dilemma');
+    assert.equal(capturedPayload.current_stage, 'explore_perspectives');
+    assert.equal(updated.problemStatement, 'New authentic problem dilemma');
+    assert.equal(updated.currentStage, 'explore_perspectives');
+  });
+
+  test('recordWorkflowStep commits workflow transition and compensates on failure', async () => {
+    const deletedMessageIds: string[] = [];
+    const mockClient = {
+      from: (table: string) => {
+        if (table === 'session_messages') {
+          return {
+            insert: async (row: { id: string }) => {
+              return { data: row, error: null };
+            },
+            delete: () => ({
+              eq: async (col: string, val: string) => {
+                if (col === 'id') deletedMessageIds.push(val);
+                return { error: null };
+              },
+            }),
+          };
+        }
+        if (table === 'thinking_sessions') {
+          return {
+            update: () => ({
+              eq: () => ({
+                eq: async () => {
+                  // Simulate database update failure
+                  return { error: { message: 'Database connection dropped' } };
+                },
+              }),
+            }),
+          };
+        }
+        return {};
+      },
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+    (repo as unknown as { getSession: unknown }).getSession = async () => ({
+      id: 'sess-abc',
+      userId: 'user-abc',
+      title: 'Test',
+      problemStatement: 'Problem',
+      currentMode: 'understand',
+      currentStage: 'describe_problem',
+      status: 'active',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    await assert.rejects(
+      async () => {
+        await repo.recordWorkflowStep(
+          {
+            sessionId: 'sess-abc',
+            userMessage: 'My input',
+            assistantMessage: 'AI answer',
+            nextStage: 'clarify_objective',
+            nextMode: 'understand',
+          },
+          'user-abc'
+        );
+      },
+      {
+        message: 'Failed to commit workflow state: Database connection dropped',
+      }
+    );
+
+    // Assert that inserted messages were rolled back
+    assert.equal(deletedMessageIds.length, 2);
+  });
 });

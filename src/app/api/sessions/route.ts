@@ -7,6 +7,17 @@ const CreateSessionSchema = z.object({
   title: z.string().min(1, 'Title is required').max(120),
   problemStatement: z.string().min(1, 'Problem statement is required'),
   currentMode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']).default('understand'),
+  currentStage: z.enum([
+    'welcome',
+    'describe_problem',
+    'clarify_objective',
+    'break_subproblems',
+    'explore_perspectives',
+    'challenge_assumptions',
+    'check_satisfaction',
+    'summarize_insights',
+    'choose_action',
+  ]).default('welcome'),
 });
 
 function getRepository() {
@@ -74,7 +85,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { title, problemStatement, currentMode } = parsed.data;
+    const { title, problemStatement, currentMode, currentStage } = parsed.data;
     const session = await getRepository().createSession(
       {
         id: crypto.randomUUID(),
@@ -82,6 +93,7 @@ export async function POST(req: NextRequest) {
         title,
         problemStatement,
         currentMode,
+        currentStage,
         status: 'active',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),

@@ -149,4 +149,45 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     assert.strictEqual(WorkflowStateMachine.deriveCurrentStage('decide', 2), 'summarize_insights');
     assert.strictEqual(WorkflowStateMachine.deriveCurrentStage('act', 2), 'choose_action');
   });
+
+  test('UpstashRedisRateLimitStore executes atomic Lua check and engages bounded fallback on error', async () => {
+    let calledPayload: unknown = null;
+    const { UpstashRedisRateLimitStore } = await import('@/lib/rate-limiter');
+    const mockStore = new UpstashRedisRateLimitStore('https://mock-upstash.redis.com', 'mock-token');
+
+    const originalFetch = global.fetch;
+    try {
+      global.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).includes('mock-upstash')) {
+          calledPayload = JSON.parse(init?.body as string);
+          return {
+            ok: true,
+            json: async () => ({ result: [1, 4, 60000] }),
+          } as unknown as Response;
+        }
+        return originalFetch(url, init);
+      }) as typeof global.fetch;
+
+      const result = await mockStore.checkAndRecord('test-redis-user', 5, 60000);
+      assert.strictEqual(result.allowed, true);
+      assert.strictEqual(result.remaining, 4);
+      assert.ok(Array.isArray(calledPayload));
+      assert.strictEqual(calledPayload[0], 'EVAL');
+
+      // Test fallback on Upstash error: must not fail open
+      global.fetch = (async (url: string | URL | Request) => {
+        if (String(url).includes('mock-upstash')) {
+          throw new Error('Upstash connection timeout');
+        }
+        return originalFetch(url);
+      }) as typeof global.fetch;
+
+      const fallbackResult = await mockStore.checkAndRecord('test-redis-fallback', 1, 60000);
+      assert.strictEqual(fallbackResult.allowed, true);
+      const secondResult = await mockStore.checkAndRecord('test-redis-fallback', 1, 60000);
+      assert.strictEqual(secondResult.allowed, false, 'Bounded fallback must reject excess requests');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
 });

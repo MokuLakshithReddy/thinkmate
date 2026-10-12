@@ -258,6 +258,7 @@ export interface ThinkingSession {
   title: string;
   problemStatement: string;
   currentMode: ThinkingMode;
+  currentStage?: CoThinkerStep;
   status: SessionStatus;
   createdAt: string;
   updatedAt: string;
