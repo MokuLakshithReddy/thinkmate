@@ -196,10 +196,12 @@ CREATE TABLE IF NOT EXISTS public.workflow_idempotency_keys (
 
 ALTER TABLE public.workflow_idempotency_keys ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view own idempotency keys" ON public.workflow_idempotency_keys;
 CREATE POLICY "Users can view own idempotency keys"
   ON public.workflow_idempotency_keys FOR SELECT
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can insert own idempotency keys" ON public.workflow_idempotency_keys;
 CREATE POLICY "Users can insert own idempotency keys"
   ON public.workflow_idempotency_keys FOR INSERT
   WITH CHECK (auth.uid() = user_id);
@@ -219,6 +221,7 @@ CREATE OR REPLACE FUNCTION public.record_workflow_step_tx(
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_session RECORD;
@@ -226,6 +229,12 @@ DECLARE
   v_ast_msg_id UUID := gen_random_uuid();
   v_result JSONB;
 BEGIN
+  -- Strict caller identity validation (defense-in-depth):
+  -- If invoked within a Supabase auth JWT context (e.g. PostgREST), ensure caller cannot spoof p_user_id
+  IF auth.uid() IS NOT NULL AND auth.uid() != p_user_id THEN
+    RAISE EXCEPTION 'Forbidden: caller auth.uid (%) does not match target p_user_id (%)', auth.uid(), p_user_id;
+  END IF;
+
   -- 1. Idempotency check if client_request_id is provided
   IF p_client_request_id IS NOT NULL AND length(p_client_request_id) > 0 THEN
     SELECT response_payload INTO v_result
@@ -287,3 +296,15 @@ BEGIN
   RETURN v_result;
 END;
 $$;
+
+-- 8. Explicit Privilege Restrictions for SECURITY DEFINER RPC
+-- Revoke execution from PUBLIC, anon, and authenticated; grant exclusively to service_role
+REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) FROM anon;
+REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) TO service_role;
+
+-- Restrict workflow_idempotency_keys table from anonymous / unprivileged roles
+REVOKE ALL ON TABLE public.workflow_idempotency_keys FROM PUBLIC;
+REVOKE ALL ON TABLE public.workflow_idempotency_keys FROM anon;
+GRANT ALL ON TABLE public.workflow_idempotency_keys TO service_role;

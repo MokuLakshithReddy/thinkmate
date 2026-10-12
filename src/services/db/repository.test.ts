@@ -468,4 +468,34 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
     assert.strictEqual(count, 2);
     assert.strictEqual(deletedUserId, 'user-target-123');
   });
+
+  test('recordWorkflowStep fails immediately if RPC rejects with identity or authorization failure', async () => {
+    const mockClient = {
+      rpc: async () => ({
+        data: null,
+        error: { message: 'Forbidden: caller auth.uid does not match target p_user_id' },
+      }),
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+    (repo as unknown as { getSession: unknown }).getSession = async () => null;
+
+    await assert.rejects(
+      async () => {
+        await repo.recordWorkflowStep(
+          {
+            sessionId: '00000000-0000-0000-0000-000000000001',
+            userMessage: 'test',
+            assistantMessage: 'test',
+            nextStage: 'describe_problem',
+            nextMode: 'understand',
+          },
+          '00000000-0000-0000-0000-000000000002'
+        );
+      },
+      {
+        message: 'Session not found or unauthorized',
+      }
+    );
+  });
 });
