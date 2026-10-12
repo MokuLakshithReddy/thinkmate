@@ -9,13 +9,21 @@ const CreateSessionSchema = z.object({
   currentMode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']).default('understand'),
 });
 
-const repository = new SupabaseThinkingRepository();
+function getRepository() {
+  return new SupabaseThinkingRepository();
+}
 
 export async function GET(req: NextRequest) {
   try {
     const authUser = await getAuthenticatedUser(req);
-    // Only return sessions scoped to the verified caller
-    const sessions = await repository.getSessions(authUser?.id);
+    if (!authUser) {
+      return NextResponse.json(
+        { error: 'Authentication required: please provide a valid Supabase bearer token' },
+        { status: 401 }
+      );
+    }
+
+    const sessions = await getRepository().getSessions(authUser.id);
     return NextResponse.json({ sessions });
   } catch (err: unknown) {
     console.error('Error fetching sessions:', err);
@@ -29,6 +37,13 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const authUser = await getAuthenticatedUser(req);
+    if (!authUser) {
+      return NextResponse.json(
+        { error: 'Authentication required: please provide a valid Supabase bearer token' },
+        { status: 401 }
+      );
+    }
+
     const body = await req.json();
     const parsed = CreateSessionSchema.safeParse(body);
 
@@ -40,16 +55,19 @@ export async function POST(req: NextRequest) {
     }
 
     const { title, problemStatement, currentMode } = parsed.data;
-    const session = await repository.createSession({
-      id: crypto.randomUUID(),
-      userId: authUser?.id || 'anonymous',
-      title,
-      problemStatement,
-      currentMode,
-      status: 'active',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
+    const session = await getRepository().createSession(
+      {
+        id: crypto.randomUUID(),
+        userId: authUser.id,
+        title,
+        problemStatement,
+        currentMode,
+        status: 'active',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      authUser.id
+    );
 
     return NextResponse.json({ session });
   } catch (err: unknown) {
@@ -63,14 +81,20 @@ export async function POST(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   try {
-    const id = req.nextUrl.searchParams.get('id');
     const authUser = await getAuthenticatedUser(req);
+    if (!authUser) {
+      return NextResponse.json(
+        { error: 'Authentication required: please provide a valid Supabase bearer token' },
+        { status: 401 }
+      );
+    }
 
+    const id = req.nextUrl.searchParams.get('id');
     if (!id) {
       return NextResponse.json({ error: 'Session ID is required' }, { status: 400 });
     }
 
-    await repository.deleteSession(id, authUser?.id);
+    await getRepository().deleteSession(id, authUser.id);
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     const errorMessage = (err as Error)?.message || '';

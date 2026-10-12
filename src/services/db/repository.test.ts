@@ -2,12 +2,56 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert';
 import { SupabaseThinkingRepository } from './repository';
 import { ThinkingSession } from '@/types';
+import { SupabaseClient } from '@supabase/supabase-js';
 
-describe('Persistence, Security & Ownership Verification', () => {
+function createMockClient(data: unknown = null) {
+  return {
+    from: () => ({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => ({
+            data,
+            error: null,
+          }),
+          order: () => ({
+            data: data ? [data] : [],
+            error: null,
+          }),
+        }),
+      }),
+      insert: () => ({
+        select: () => ({
+          single: async () => ({
+            data,
+            error: null,
+          }),
+        }),
+      }),
+      update: () => ({
+        eq: () => ({
+          eq: () => ({
+            select: () => ({
+              single: async () => ({
+                data,
+                error: null,
+              }),
+            }),
+          }),
+        }),
+      }),
+      delete: () => ({
+        eq: () => ({
+          eq: async () => ({
+            error: null,
+          }),
+        }),
+      }),
+    }),
+  } as unknown as SupabaseClient;
+}
+
+describe('Persistence, Security & Mandatory Ownership Verification', () => {
   test('IDOR Protection: throws when accessing session belonging to another user', async () => {
-    const repo = new SupabaseThinkingRepository();
-
-    // Mock getSession call simulating foreign user
     const foreignSession: ThinkingSession = {
       id: '00000000-0000-0000-0000-000000000001',
       userId: 'user-alice-1234',
@@ -19,26 +63,16 @@ describe('Persistence, Security & Ownership Verification', () => {
       updatedAt: new Date().toISOString(),
     };
 
-    // Override client get method for hermetic test
-    (repo as unknown as { client: unknown }).client = {
-      from: () => ({
-        select: () => ({
-          eq: () => ({
-            maybeSingle: async () => ({
-              data: {
-                id: foreignSession.id,
-                user_id: foreignSession.userId,
-                title: foreignSession.title,
-                problem_statement: foreignSession.problemStatement,
-                current_mode: foreignSession.currentMode,
-                status: foreignSession.status,
-              },
-              error: null,
-            }),
-          }),
-        }),
-      }),
-    };
+    const mockClient = createMockClient({
+      id: foreignSession.id,
+      user_id: foreignSession.userId,
+      title: foreignSession.title,
+      problem_statement: foreignSession.problemStatement,
+      current_mode: foreignSession.currentMode,
+      status: foreignSession.status,
+    });
+
+    const repo = new SupabaseThinkingRepository(mockClient);
 
     // Alice accessing her own session succeeds
     const aliceAccess = await repo.getSession(foreignSession.id, 'user-alice-1234');
@@ -56,12 +90,38 @@ describe('Persistence, Security & Ownership Verification', () => {
     );
   });
 
+  test('Mandatory Ownership: throws immediately when userId is missing', async () => {
+    const mockClient = createMockClient();
+    const repo = new SupabaseThinkingRepository(mockClient);
+
+    await assert.rejects(
+      async () => {
+        await repo.getSessions('');
+      },
+      {
+        name: 'Error',
+        message: 'Mandatory authorization failure: userId is required to fetch sessions',
+      }
+    );
+
+    await assert.rejects(
+      async () => {
+        await repo.getSession('some-id', '');
+      },
+      {
+        name: 'Error',
+        message: 'Mandatory authorization failure: userId is required to access session',
+      }
+    );
+  });
+
   test('Session update enforces ownership validation before applying modifications', async () => {
-    const repo = new SupabaseThinkingRepository();
+    const mockClient = createMockClient();
+    const repo = new SupabaseThinkingRepository(mockClient);
 
     (repo as unknown as { getSession: unknown }).getSession = async (
       id: string,
-      userId?: string
+      userId: string
     ) => {
       if (userId === 'attacker-user') {
         throw new Error('Session not found or unauthorized');
@@ -80,11 +140,12 @@ describe('Persistence, Security & Ownership Verification', () => {
   });
 
   test('Messages and insights retrieval rejects unauthorized access to foreign sessions', async () => {
-    const repo = new SupabaseThinkingRepository();
+    const mockClient = createMockClient();
+    const repo = new SupabaseThinkingRepository(mockClient);
 
     (repo as unknown as { getSession: unknown }).getSession = async (
       id: string,
-      userId?: string
+      userId: string
     ) => {
       if (userId === 'foreign-user') {
         throw new Error('Session not found or unauthorized');

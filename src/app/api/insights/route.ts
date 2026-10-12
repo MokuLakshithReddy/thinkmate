@@ -23,6 +23,13 @@ const repository = new SupabaseThinkingRepository();
 export async function POST(req: NextRequest) {
   try {
     const authUser = await getAuthenticatedUser(req);
+    if (!authUser) {
+      return NextResponse.json(
+        { error: 'Authentication required: please provide a valid Supabase bearer token' },
+        { status: 401 }
+      );
+    }
+
     const body = await req.json();
     const parsed = InsightMutationSchema.safeParse(body);
 
@@ -46,7 +53,7 @@ export async function POST(req: NextRequest) {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       },
-      authUser?.id
+      authUser.id
     );
 
     return NextResponse.json({ insight });
@@ -63,13 +70,19 @@ export async function POST(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   try {
     const authUser = await getAuthenticatedUser(req);
-    const id = req.nextUrl.searchParams.get('id');
+    if (!authUser) {
+      return NextResponse.json(
+        { error: 'Authentication required: please provide a valid Supabase bearer token' },
+        { status: 401 }
+      );
+    }
 
+    const id = req.nextUrl.searchParams.get('id');
     if (!id) {
       return NextResponse.json({ error: 'Insight ID is required' }, { status: 400 });
     }
 
-    await repository.deleteInsight(id, authUser?.id);
+    await repository.deleteInsight(id, authUser.id);
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     const msg = (err as Error)?.message || '';

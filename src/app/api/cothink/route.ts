@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { CoThinkEngine } from '@/services/ai/cothink-engine';
 import { CoThinkerStep } from '@/types';
+import { getAuthenticatedUser } from '@/lib/server-auth';
+import { checkRateLimit } from '@/lib/rate-limiter';
+import { SupabaseThinkingRepository } from '@/services/db/repository';
 
 /**
  * Main Co-Thinker Stage Progression Endpoint.
@@ -9,6 +12,7 @@ import { CoThinkerStep } from '@/types';
  * returning structured step choices, stage transitions, and explicit execution mode stamping.
  */
 const CoThinkRequestSchema = z.object({
+  sessionId: z.string().max(100).optional(),
   step: z.enum([
     'welcome',
     'describe_problem',
@@ -37,9 +41,27 @@ const CoThinkRequestSchema = z.object({
 });
 
 const engine = new CoThinkEngine(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+const repository = new SupabaseThinkingRepository();
 
 export async function POST(req: NextRequest) {
   try {
+    const authUser = await getAuthenticatedUser(req);
+
+    // Rate Limiting: 60 req/min for authenticated users, 20 req/min for anonymous callers
+    const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0].trim() || '127.0.0.1';
+    const rateLimitKey = authUser ? `usr:${authUser.id}` : `ip:${clientIp}`;
+    const rateCheck = checkRateLimit(rateLimitKey, authUser ? 60 : 20, 60000);
+
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded. Please wait a moment before sending more messages.' },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
+        }
+      );
+    }
+
     const json = await req.json();
     const parsed = CoThinkRequestSchema.safeParse(json);
 
@@ -51,6 +73,7 @@ export async function POST(req: NextRequest) {
     }
 
     const {
+      sessionId,
       step,
       userMessage,
       selectedOptionId,
@@ -60,9 +83,20 @@ export async function POST(req: NextRequest) {
       history,
     } = parsed.data;
 
+    // If caller requests updates for an existing cloud session, verify caller owns it
+    if (sessionId && authUser) {
+      const session = await repository.getSession(sessionId, authUser.id);
+      if (!session) {
+        return NextResponse.json(
+          { error: 'Unauthorized or non-existent session' },
+          { status: 404 }
+        );
+      }
+    }
+
     const result = await engine.processStep(
       {
-        userName,
+        userName: authUser?.email || userName,
         step: step as CoThinkerStep,
         problemStatement,
         clarifiedObjective,
