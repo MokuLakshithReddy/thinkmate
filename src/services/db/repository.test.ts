@@ -171,4 +171,69 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
       }
     );
   });
+
+  test('Cross-User Insight Overwrite: rejects attempting to overwrite insight belonging to another user', async () => {
+    const mockClient = {
+      from: (table: string) => {
+        if (table === 'session_insights') {
+          return {
+            select: () => ({
+              eq: (col: string, val: string) => ({
+                maybeSingle: async () => {
+                  // Simulates finding the existing insight belonging to Alice's session
+                  if (val === '00000000-0000-0000-0000-000000000099') {
+                    return {
+                      data: {
+                        id: '00000000-0000-0000-0000-000000000099',
+                        session_id: 'alice-session-uuid-1',
+                      },
+                      error: null,
+                    };
+                  }
+                  return { data: null, error: null };
+                },
+              }),
+            }),
+          };
+        }
+        return {};
+      },
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+
+    // Mock getSession to authorize Eve only for eve-session, not alice-session
+    (repo as unknown as { getSession: unknown }).getSession = async (
+      sessionId: string,
+      userId: string
+    ) => {
+      if (userId === 'user-eve' && sessionId === 'eve-session-uuid-2') {
+        return { id: 'eve-session-uuid-2', userId: 'user-eve', title: 'Eve Session' };
+      }
+      return null;
+    };
+
+    // Eve passes Alice's insight ID while referencing Eve's session
+    await assert.rejects(
+      async () => {
+        await repo.upsertInsight(
+          {
+            id: '00000000-0000-0000-0000-000000000099',
+            sessionId: 'eve-session-uuid-2',
+            category: 'goal',
+            title: 'Hijacked Goal',
+            content: 'Malicious modification',
+            status: 'accepted',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+          'user-eve'
+        );
+      },
+      {
+        name: 'Error',
+        message: 'Security violation: Cannot reassign insight belonging to another session',
+      }
+    );
+  });
 });

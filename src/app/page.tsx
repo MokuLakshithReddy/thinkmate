@@ -1,11 +1,12 @@
 'use client';
 
-import React, { useState, useRef, useSyncExternalStore } from 'react';
+import React, { useState, useRef, useSyncExternalStore, useEffect, useCallback } from 'react';
 import { CoThinkerStep, ChatMessage, ChoiceOption, ThinkingSession } from '@/types';
 import { TopNav } from '@/components/cothinker/TopNav';
 import { WorkflowCanvas } from '@/components/cothinker/WorkflowCanvas';
 import { PreviewPanel } from '@/components/cothinker/PreviewPanel';
 import { SettingsModal } from '@/components/modals/SettingsModal';
+import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import {
   getStoredSessions,
   saveStoredSessions,
@@ -57,20 +58,62 @@ export default function Home() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Read stored sessions via useSyncExternalStore (React 19 / Next 16 compliant)
+  // Cloud Sessions State (Authoritative source of truth for authenticated users)
+  const [cloudSessions, setCloudSessions] = useState<ThinkingSession[]>([]);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+
+  // Read stored offline sessions via useSyncExternalStore
   const storedSessionsJson = useSyncExternalStore(
     subscribeToStorage,
     getStoredSessionsSnapshot,
     getServerSessionsSnapshot
   );
 
-  const persistedSessions: ThinkingSession[] = React.useMemo(() => {
+  const localDraftSessions: ThinkingSession[] = React.useMemo(() => {
     try {
       return JSON.parse(storedSessionsJson);
     } catch {
       return [];
     }
   }, [storedSessionsJson]);
+
+  const [refreshCloudTrigger, setRefreshCloudTrigger] = useState(0);
+  const refreshCloudSessions = useCallback(() => {
+    setRefreshCloudTrigger((prev) => prev + 1);
+  }, []);
+
+  // Synchronize authoritative cloud sessions from Supabase
+  useEffect(() => {
+    let ignore = false;
+    const token = typeof window !== 'undefined' ? localStorage.getItem('thinkmate_auth_token') : null;
+    if (!token) return;
+
+    fetch('/api/sessions', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((res) => {
+        if (ignore) return;
+        if (res.ok) {
+          return res.json().then((data) => {
+            if (!ignore) {
+              setIsAuthenticated(true);
+              if (Array.isArray(data.sessions)) {
+                setCloudSessions(data.sessions);
+              }
+            }
+          });
+        } else if (res.status === 401) {
+          setIsAuthenticated(false);
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to fetch cloud sessions from server:', err);
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [isSettingsOpen, refreshCloudTrigger]);
 
   // Workflow State
   const [currentStep, setCurrentStep] = useState<CoThinkerStep>('welcome');
@@ -80,19 +123,23 @@ export default function Home() {
   const [customMessages, setCustomMessages] = useState<ChatMessage[] | null>(null);
   const [customOptions, setCustomOptions] = useState<ChoiceOption[] | undefined>(undefined);
 
-  // Active messages derived from persisted sessions or active thread
+  // Active sessions: prefers authoritative cloud sessions over local drafts
+  const availableSessions = isAuthenticated && cloudSessions.length > 0 ? cloudSessions : localDraftSessions;
+
+  // Active messages derived from cloud sessions, local drafts, or default welcome
   const messages: ChatMessage[] = React.useMemo(() => {
     if (customMessages) return customMessages;
-    if (persistedSessions.length > 0) {
-      const latest = persistedSessions[0];
+    if (availableSessions.length > 0) {
+      const latest = availableSessions[0];
       const resumeOptionId = `resume_${latest.id}`;
+      const isCloud = isAuthenticated && cloudSessions.length > 0;
       return [
         {
           id: 'msg-init-saved',
           role: 'assistant',
           step: 'welcome',
           timestamp: '2026-10-12T00:00:00.000Z',
-          content: `Welcome back to ThinkMate.\n\nI found ${persistedSessions.length} saved session(s) in your local memory:\n\n${persistedSessions
+          content: `Welcome back to ThinkMate.\n\nI found ${availableSessions.length} ${isCloud ? 'cloud-synced' : 'saved'} session(s) in your account:\n\n${availableSessions
             .slice(0, 3)
             .map((s, idx) => `${idx + 1}. **${s.title}** (*${s.currentMode} mode*)`)
             .join('\n')}\n\nWould you like to resume **${latest.title}** or start a new problem?`,
@@ -103,19 +150,27 @@ export default function Home() {
             },
             { id: 'start_new', label: 'Start a new problem' },
           ],
-          executionMode: 'simulator',
-          simulatedNotice: 'Verified session history retrieved from local storage.',
+          executionMode: isCloud ? 'gemini' : 'simulator',
+          simulatedNotice: isCloud
+            ? 'Authoritative session history loaded from Supabase PostgreSQL.'
+            : 'Offline draft session history loaded from browser storage.',
         },
       ];
     }
     return [DEFAULT_NEUTRAL_WELCOME];
-  }, [customMessages, persistedSessions]);
+  }, [customMessages, availableSessions, isAuthenticated, cloudSessions.length]);
 
   const currentOptions: ChoiceOption[] | undefined =
     customOptions !== undefined ? customOptions : messages[messages.length - 1]?.options;
 
-  // Session tracking ref (purely assigned in event handlers)
+  // Authoritative Session ID state and ref (stores real database UUID for cloud sessions)
+  const [activeSessionId, setActiveSessionId] = useState<string>('');
   const currentSessionIdRef = useRef<string>('');
+
+  const updateSessionId = (id: string) => {
+    currentSessionIdRef.current = id;
+    setActiveSessionId(id);
+  };
 
   // Undo / Redo stacks
   const [pastSnapshots, setPastSnapshots] = useState<HistorySnapshot[]>([]);
@@ -165,23 +220,90 @@ export default function Home() {
   };
 
   const handleSendMessage = async (text: string, selectedOptionId?: string) => {
-    if (!currentSessionIdRef.current) {
-      currentSessionIdRef.current = `session-${Date.now()}`;
-    }
+    const authToken = typeof window !== 'undefined' ? localStorage.getItem('thinkmate_auth_token') : null;
 
     // Record current state into undo stack
     setPastSnapshots((prev) => [...prev, takeSnapshot()]);
     setFutureSnapshots([]); // Clear redo stack on new action
 
-    // If user clicked resume on a verified session, load its title
+    // If user clicked resume on an existing session, load authoritative records
     if (selectedOptionId?.startsWith('resume_')) {
       const targetSessionId = selectedOptionId.replace('resume_', '');
-      const sessions = getStoredSessions();
-      const match = sessions.find((s) => s.id === targetSessionId);
-      if (match) {
-        currentSessionIdRef.current = match.id;
-        setProblemStatement(match.problemStatement || '');
+
+      if (authToken) {
+        try {
+          const detailRes = await fetch(`/api/sessions?id=${targetSessionId}`, {
+            headers: { Authorization: `Bearer ${authToken}` },
+          });
+          if (detailRes.ok) {
+            const detailData = await detailRes.json();
+            const session = detailData.session;
+            if (session) {
+              updateSessionId(session.id);
+              setProblemStatement(session.problemStatement || '');
+
+              if (Array.isArray(session.messages) && session.messages.length > 0) {
+                const loadedChat: ChatMessage[] = session.messages.map((m: { id: string; role: 'user' | 'assistant'; content: string; mode?: string; createdAt?: string; suggestedQuestions?: string[] }) => ({
+                  id: m.id,
+                  role: m.role,
+                  content: m.content,
+                  step: m.mode ? WorkflowStateMachine.deriveCurrentStage(m.mode as 'understand' | 'explore' | 'challenge' | 'decide' | 'act', 0) : 'describe_problem',
+                  timestamp: m.createdAt || new Date().toISOString(),
+                  options: m.suggestedQuestions?.map((q: string, i: number) => ({ id: `opt_${i}`, label: q })),
+                }));
+                setCustomMessages(loadedChat);
+              }
+
+              const resumedStage = WorkflowStateMachine.deriveCurrentStage(session.currentMode, session.messages?.length || 0);
+              setCurrentStep(resumedStage);
+            }
+          }
+        } catch (fetchErr) {
+          console.warn('Failed to load session details from server:', fetchErr);
+        }
+      } else {
+        const localMatch = localDraftSessions.find((s) => s.id === targetSessionId);
+        if (localMatch) {
+          updateSessionId(localMatch.id);
+          setProblemStatement(localMatch.problemStatement || '');
+        }
       }
+    }
+
+    // P0: For authenticated users, ensure an authentic database session exists before calling /api/cothink
+    if (authToken && (!currentSessionIdRef.current || !currentSessionIdRef.current.includes('-'))) {
+      try {
+        const activeProblem = currentStep === 'describe_problem' ? text : (problemStatement || text);
+        const title =
+          activeProblem.length > 0
+            ? activeProblem.slice(0, 48) + (activeProblem.length > 48 ? '...' : '')
+            : 'New Thinking Session';
+
+        const createRes = await fetch('/api/sessions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({
+            title,
+            problemStatement: activeProblem,
+            currentMode: 'understand',
+          }),
+        });
+
+        if (createRes.ok) {
+          const createData = await createRes.json();
+          if (createData.session?.id) {
+            updateSessionId(createData.session.id);
+            refreshCloudSessions();
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to pre-create session in database:', err);
+      }
+    } else if (!authToken && !currentSessionIdRef.current) {
+      updateSessionId(`demo-${Date.now()}`);
     }
 
     const userMsg: ChatMessage = {
@@ -202,7 +324,6 @@ export default function Home() {
     }
 
     try {
-      const authToken = typeof window !== 'undefined' ? localStorage.getItem('thinkmate_auth_token') : null;
       const endpoint = authToken ? '/api/cothink' : '/api/demo/cothink';
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (authToken) {
@@ -222,7 +343,7 @@ export default function Home() {
         }),
       });
 
-      // If authenticated call fails with 401 (e.g. expired token), fall back gracefully to demo endpoint
+      // If authenticated call fails with 401, fall back gracefully to demo endpoint
       if (res.status === 401 && endpoint !== '/api/demo/cothink') {
         res = await fetch('/api/demo/cothink', {
           method: 'POST',
@@ -239,7 +360,8 @@ export default function Home() {
       }
 
       if (!res.ok) {
-        throw new Error(`Co-think API failed with status ${res.status}`);
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || `Co-think API failed with status ${res.status}`);
       }
 
       const data = await res.json();
@@ -265,61 +387,67 @@ export default function Home() {
         setClarifiedObjective(text);
       }
 
-      // Persist session into storage
-      const activeProblem = currentStep === 'describe_problem' ? text : problemStatement;
-      const title =
-        activeProblem.length > 0
-          ? activeProblem.slice(0, 48) + (activeProblem.length > 48 ? '...' : '')
-          : 'Active Thinking Session';
+      // If in unauthenticated offline mode, save local draft
+      if (!authToken) {
+        const activeProblem = currentStep === 'describe_problem' ? text : problemStatement;
+        const title =
+          activeProblem.length > 0
+            ? activeProblem.slice(0, 48) + (activeProblem.length > 48 ? '...' : '')
+            : 'Offline Demo Session';
 
-      const existingSessions = getStoredSessions();
-      const sessionIndex = existingSessions.findIndex((s) => s.id === currentSessionIdRef.current);
-      const updatedSession: ThinkingSession = {
-        id: currentSessionIdRef.current,
-        userId: 'local-user',
-        title,
-        problemStatement: activeProblem,
-        currentMode: 'understand',
-        status: 'active',
-        createdAt:
-          sessionIndex >= 0 ? existingSessions[sessionIndex].createdAt : new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
+        const existingSessions = getStoredSessions();
+        const sessionIndex = existingSessions.findIndex((s) => s.id === currentSessionIdRef.current);
+        const updatedSession: ThinkingSession = {
+          id: currentSessionIdRef.current,
+          userId: 'demo-local',
+          title,
+          problemStatement: activeProblem,
+          currentMode: WorkflowStateMachine.getModeForStage(data.nextStep),
+          status: 'active',
+          createdAt:
+            sessionIndex >= 0 ? existingSessions[sessionIndex].createdAt : new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
 
-      if (sessionIndex >= 0) {
-        existingSessions[sessionIndex] = updatedSession;
+        if (sessionIndex >= 0) {
+          existingSessions[sessionIndex] = updatedSession;
+        } else {
+          existingSessions.unshift(updatedSession);
+        }
+        saveStoredSessions(existingSessions);
+
+        appendStoredMessage(currentSessionIdRef.current, {
+          id: userMsg.id,
+          sessionId: currentSessionIdRef.current,
+          role: 'user',
+          content: userMsg.content,
+          mode: WorkflowStateMachine.getModeForStage(currentStep),
+          createdAt: userMsg.timestamp,
+        });
+
+        appendStoredMessage(currentSessionIdRef.current, {
+          id: assistantMsg.id,
+          sessionId: currentSessionIdRef.current,
+          role: 'assistant',
+          content: assistantMsg.content,
+          mode: WorkflowStateMachine.getModeForStage(data.nextStep),
+          createdAt: assistantMsg.timestamp,
+        });
       } else {
-        existingSessions.unshift(updatedSession);
+        // Authenticated mode: refresh cloud sessions list to reflect updated timestamps
+        refreshCloudSessions();
       }
-      saveStoredSessions(existingSessions);
-
-      appendStoredMessage(currentSessionIdRef.current, {
-        id: userMsg.id,
-        sessionId: currentSessionIdRef.current,
-        role: 'user',
-        content: userMsg.content,
-        mode: 'understand',
-        createdAt: userMsg.timestamp,
-      });
-
-      appendStoredMessage(currentSessionIdRef.current, {
-        id: assistantMsg.id,
-        sessionId: currentSessionIdRef.current,
-        role: 'assistant',
-        content: assistantMsg.content,
-        mode: 'understand',
-        createdAt: assistantMsg.timestamp,
-      });
-    } catch (err) {
+    } catch (err: unknown) {
       console.error('Co-think communication error:', err);
+      const errMsg = (err as Error)?.message || 'Network or API error occurred.';
       const fallbackMsg: ChatMessage = {
         id: `msg-err-${Date.now()}`,
         role: 'assistant',
-        content: `I encountered an issue connecting to the thinking service. Your input ("${text}") has been retained. Please retry or verify your network.`,
+        content: `I encountered an issue processing this workflow stage: **${errMsg}**\n\nYour input ("${text}") has been retained. Please retry or check your connection.`,
         step: currentStep,
         timestamp: new Date().toISOString(),
         executionMode: 'error',
-        simulatedNotice: 'Network or API error occurred. Live reasoning could not be completed.',
+        simulatedNotice: errMsg,
       };
       setCustomMessages([...nextHistory, fallbackMsg]);
     } finally {
@@ -328,54 +456,63 @@ export default function Home() {
   };
 
   const handleRestart = () => {
-    setPastSnapshots((prev) => [...prev, takeSnapshot()]);
-    setFutureSnapshots([]);
-    currentSessionIdRef.current = `session-${Date.now()}`;
+    updateSessionId('');
     setCurrentStep('welcome');
     setProgressPercent(10);
     setProblemStatement('');
     setClarifiedObjective('');
-    setCustomMessages([DEFAULT_NEUTRAL_WELCOME]);
-    setCustomOptions(DEFAULT_NEUTRAL_WELCOME.options);
+    setCustomMessages(null);
+    setCustomOptions(undefined);
+    setPastSnapshots([]);
+    setFutureSnapshots([]);
+  };
+
+  const handleShare = () => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(window.location.href);
+      alert('ThinkMate session link copied to clipboard!');
+    }
   };
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden bg-white text-slate-900 font-sans">
-      {/* Top Navigation */}
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 font-sans antialiased">
+      {/* Top Header */}
       <TopNav
         viewMode={viewMode}
         onViewModeChange={setViewMode}
         onOpenSettings={() => setIsSettingsOpen(true)}
-        onShare={async () => {
-          try {
-            if (typeof navigator !== 'undefined' && navigator.clipboard) {
-              await navigator.clipboard.writeText(window.location.href);
-              alert('Session link copied to clipboard!');
-            } else {
-              alert('Clipboard access unavailable.');
-            }
-          } catch (e) {
-            console.warn('Clipboard write error:', e);
-          }
-        }}
+        onShare={handleShare}
+        userName={isAuthenticated ? 'Cloud User' : 'Guest Thinker'}
       />
 
-      {/* Main Dual-Pane Body */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left: Interactive 8-Stage Flowchart Canvas */}
-        {viewMode === 'editor' && (
+      {/* Main Dual-Pane Workspace */}
+      <main className="flex-1 flex overflow-hidden">
+        {/* Left Pane: Flowchart Canvas */}
+        <section
+          className={
+            viewMode === 'editor'
+              ? 'flex-1 lg:flex-[1.1] border-r border-slate-800 flex flex-col h-full bg-[#0d1321] transition-all'
+              : 'hidden lg:flex lg:flex-[1.1] border-r border-slate-800 flex-col h-full bg-[#0d1321]'
+          }
+        >
           <WorkflowCanvas
             currentStep={currentStep}
             isLoading={isLoading}
-            onUndo={handleUndo}
-            onRedo={handleRedo}
             canUndo={pastSnapshots.length > 0}
             canRedo={futureSnapshots.length > 0}
+            onUndo={handleUndo}
+            onRedo={handleRedo}
           />
-        )}
+        </section>
 
-        {/* Right: Interactive Co-Thinker Chat / Preview Panel */}
-        <div className={viewMode === 'app' ? 'flex-1 flex justify-center bg-[#f0f9fb]' : ''}>
+        {/* Right Pane: Interactive Chat Preview Panel */}
+        <section
+          className={
+            viewMode === 'app'
+              ? 'flex-1 flex flex-col h-full bg-[#0b0f19] transition-all'
+              : 'hidden lg:flex flex-1 flex-col h-full bg-[#0b0f19]'
+          }
+        >
           <PreviewPanel
             currentStep={currentStep}
             progressPercent={progressPercent}
@@ -384,9 +521,11 @@ export default function Home() {
             isLoading={isLoading}
             onSendMessage={handleSendMessage}
             onRestart={handleRestart}
+            userName={isAuthenticated ? 'Cloud Thinker' : 'Guest Thinker'}
+            activeSessionId={activeSessionId}
           />
-        </div>
-      </div>
+        </section>
+      </main>
 
       {/* Settings Modal */}
       <SettingsModal

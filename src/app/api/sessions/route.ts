@@ -23,6 +23,26 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const id = req.nextUrl.searchParams.get('id');
+    if (id) {
+      const session = await getRepository().getSession(id, authUser.id);
+      if (!session) {
+        return NextResponse.json(
+          { error: 'Session not found or unauthorized' },
+          { status: 404 }
+        );
+      }
+      const messages = await getRepository().getMessages(id, authUser.id);
+      const insights = await getRepository().getInsights(id, authUser.id);
+      return NextResponse.json({
+        session: {
+          ...session,
+          messages,
+          insights,
+        },
+      });
+    }
+
     const sessions = await getRepository().getSessions(authUser.id);
     return NextResponse.json({ sessions });
   } catch (err: unknown) {

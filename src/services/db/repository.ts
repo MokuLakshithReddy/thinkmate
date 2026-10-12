@@ -319,19 +319,74 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
 
   /**
    * Upserts an insight strictly scoped to the user's session.
+   * If an existing insight ID is provided, strictly validates that the existing record
+   * belongs to a session owned by the caller before applying any updates.
    */
   async upsertInsight(insight: Insight, userId: string): Promise<Insight> {
     if (!userId) {
       throw new Error('Mandatory authorization failure: userId is required to upsert insight');
     }
 
-    const session = await this.getSession(insight.sessionId, userId);
-    if (!session) {
-      throw new Error('Session not found or unauthorized');
+    // 1. Verify caller owns the destination session
+    const targetSession = await this.getSession(insight.sessionId, userId);
+    if (!targetSession) {
+      throw new Error('Target session not found or unauthorized');
     }
 
-    const payload = {
-      id: insight.id.includes('-') && insight.id.length === 36 ? insight.id : undefined,
+    // 2. If an existing ID is supplied, check whether it already exists in the database
+    if (insight.id && insight.id.includes('-') && insight.id.length === 36) {
+      const { data: existing, error: checkErr } = await this.client
+        .from('session_insights')
+        .select('id, session_id')
+        .eq('id', insight.id)
+        .maybeSingle();
+
+      if (checkErr) {
+        throw new Error(`Database error verifying existing insight: ${checkErr.message}`);
+      }
+
+      if (existing) {
+        // Cross-session / cross-user IDOR protection:
+        // Ensure existing insight belongs to the caller's target session
+        if (existing.session_id !== insight.sessionId) {
+          throw new Error('Security violation: Cannot reassign insight belonging to another session');
+        }
+
+        const existingSession = await this.getSession(existing.session_id, userId);
+        if (!existingSession) {
+          throw new Error('Security violation: Cannot overwrite insight belonging to another user');
+        }
+
+        // Perform explicit safe update
+        const { data, error } = await this.client
+          .from('session_insights')
+          .update({
+            category: insight.category,
+            title: insight.title,
+            content: insight.content,
+            status: insight.status,
+            metadata: insight.metadata || {},
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', insight.id)
+          .eq('session_id', insight.sessionId)
+          .select()
+          .single();
+
+        if (error) {
+          throw new Error(`Failed to update insight: ${error.message}`);
+        }
+
+        return {
+          ...insight,
+          id: data.id,
+        };
+      }
+    }
+
+    // 3. New insight insert
+    const insertPayload = {
+      id: (insight.id && insight.id.includes('-') && insight.id.length === 36) ? insight.id : undefined,
       session_id: insight.sessionId,
       category: insight.category,
       title: insight.title,
@@ -344,12 +399,12 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
 
     const { data, error } = await this.client
       .from('session_insights')
-      .upsert(payload, { onConflict: 'id' })
+      .insert(insertPayload)
       .select()
       .single();
 
     if (error) {
-      console.error('Failed to upsert insight:', error.message);
+      console.error('Failed to create insight:', error.message);
       throw new Error(`Failed to save insight: ${error.message}`);
     }
 
