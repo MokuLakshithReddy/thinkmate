@@ -109,13 +109,16 @@ export function deleteStoredSessionData(sessionId: string): void {
   }
 }
 
-export function clearAllLocalData(): void {
+export function clearAllLocalData(includeAuthToken: boolean = false): void {
   if (typeof window === 'undefined') return;
   localStorage.removeItem(SESSIONS_KEY);
   localStorage.removeItem(MESSAGES_KEY);
   localStorage.removeItem(INSIGHTS_KEY);
   localStorage.removeItem('thinkmate_gemini_key');
   localStorage.removeItem('thinkmate_model');
+  if (includeAuthToken) {
+    localStorage.removeItem('thinkmate_auth_token');
+  }
 }
 
 export function createInitialDemoSession(): {

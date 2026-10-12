@@ -10,6 +10,7 @@ import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import {
   getStoredSessions,
   saveStoredSessions,
+  getStoredMessages,
   appendStoredMessage,
   clearAllLocalData,
 } from '@/lib/storage';
@@ -180,6 +181,89 @@ export default function Home() {
     setSessionKind(kind);
   };
 
+  // Load session records by ID (supports cloud database and offline drafts)
+  const loadSessionById = useCallback(
+    async (targetSessionId: string) => {
+      const authToken = typeof window !== 'undefined' ? localStorage.getItem('thinkmate_auth_token') : null;
+      if (authToken && isCloudUuid(targetSessionId)) {
+        try {
+          const detailRes = await fetch(`/api/sessions?id=${targetSessionId}`, {
+            headers: { Authorization: `Bearer ${authToken}` },
+          });
+          if (detailRes.ok) {
+            const detailData = await detailRes.json();
+            const session = detailData.session;
+            if (session) {
+              updateSessionState(session.id, 'cloud');
+              setProblemStatement(session.problemStatement || '');
+
+              if (Array.isArray(session.messages) && session.messages.length > 0) {
+                const loadedChat: ChatMessage[] = session.messages.map(
+                  (m: { id: string; role: 'user' | 'assistant'; content: string; mode?: string; createdAt?: string; suggestedQuestions?: string[] }) => ({
+                    id: m.id,
+                    role: m.role,
+                    content: m.content,
+                    step: m.mode
+                      ? WorkflowStateMachine.deriveCurrentStage(m.mode as 'understand' | 'explore' | 'challenge' | 'decide' | 'act', 0)
+                      : 'describe_problem',
+                    timestamp: m.createdAt || new Date().toISOString(),
+                    options: m.suggestedQuestions?.map((q: string, i: number) => ({ id: `opt_${i}`, label: q })),
+                  })
+                );
+                setCustomMessages(loadedChat);
+              }
+
+              const resumedStage =
+                session.currentStage ||
+                WorkflowStateMachine.deriveCurrentStage(session.currentMode, session.messages?.length || 0);
+              setCurrentStep(resumedStage);
+              return true;
+            }
+          }
+        } catch (fetchErr) {
+          console.warn('Failed to load session details from server:', fetchErr);
+        }
+      }
+
+      // Check local drafts
+      const localMatch = localDraftSessions.find((s) => s.id === targetSessionId);
+      if (localMatch) {
+        updateSessionState(localMatch.id, 'local');
+        setProblemStatement(localMatch.problemStatement || '');
+        const localMessages = getStoredMessages(localMatch.id);
+        if (localMessages.length > 0) {
+          const loadedChat: ChatMessage[] = localMessages.map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            step: m.mode
+              ? WorkflowStateMachine.deriveCurrentStage(m.mode as 'understand' | 'explore' | 'challenge' | 'decide' | 'act', 0)
+              : 'describe_problem',
+            timestamp: m.createdAt,
+            options: m.suggestedQuestions?.map((q: string, i: number) => ({ id: `opt_${i}`, label: q })),
+          }));
+          setCustomMessages(loadedChat);
+        }
+        return true;
+      }
+      return false;
+    },
+    [localDraftSessions]
+  );
+
+  // Resume session from URL search query parameter ?session=UUID
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const sessionParam = params.get('session');
+    if (sessionParam) {
+      const timer = setTimeout(() => {
+        loadSessionById(sessionParam);
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [loadSessionById]);
+
   // Undo / Redo stacks
   const [pastSnapshots, setPastSnapshots] = useState<HistorySnapshot[]>([]);
   const [futureSnapshots, setFutureSnapshots] = useState<HistorySnapshot[]>([]);
@@ -237,45 +321,7 @@ export default function Home() {
     // If user clicked resume on an existing session, load authoritative records
     if (selectedOptionId?.startsWith('resume_')) {
       const targetSessionId = selectedOptionId.replace('resume_', '');
-
-      if (authToken && isCloudUuid(targetSessionId)) {
-        try {
-          const detailRes = await fetch(`/api/sessions?id=${targetSessionId}`, {
-            headers: { Authorization: `Bearer ${authToken}` },
-          });
-          if (detailRes.ok) {
-            const detailData = await detailRes.json();
-            const session = detailData.session;
-            if (session) {
-              updateSessionState(session.id, 'cloud');
-              setProblemStatement(session.problemStatement || '');
-
-              if (Array.isArray(session.messages) && session.messages.length > 0) {
-                const loadedChat: ChatMessage[] = session.messages.map((m: { id: string; role: 'user' | 'assistant'; content: string; mode?: string; createdAt?: string; suggestedQuestions?: string[] }) => ({
-                  id: m.id,
-                  role: m.role,
-                  content: m.content,
-                  step: m.mode ? WorkflowStateMachine.deriveCurrentStage(m.mode as 'understand' | 'explore' | 'challenge' | 'decide' | 'act', 0) : 'describe_problem',
-                  timestamp: m.createdAt || new Date().toISOString(),
-                  options: m.suggestedQuestions?.map((q: string, i: number) => ({ id: `opt_${i}`, label: q })),
-                }));
-                setCustomMessages(loadedChat);
-              }
-
-              const resumedStage = session.currentStage || WorkflowStateMachine.deriveCurrentStage(session.currentMode, session.messages?.length || 0);
-              setCurrentStep(resumedStage);
-            }
-          }
-        } catch (fetchErr) {
-          console.warn('Failed to load session details from server:', fetchErr);
-        }
-      } else {
-        const localMatch = localDraftSessions.find((s) => s.id === targetSessionId);
-        if (localMatch) {
-          updateSessionState(localMatch.id, 'local');
-          setProblemStatement(localMatch.problemStatement || '');
-        }
-      }
+      await loadSessionById(targetSessionId);
     }
 
     // Special kickoff handling: clicking "Start a new problem" transitions from welcome to describe_problem
@@ -333,9 +379,17 @@ export default function Home() {
             updateSessionState(createData.session.id, 'cloud');
             refreshCloudSessions();
           }
+        } else {
+          console.warn('Cloud session creation returned status', createRes.status);
+          if (createRes.status === 401) {
+            setIsAuthenticated(false);
+            localStorage.removeItem('thinkmate_auth_token');
+          }
+          updateSessionState(`local-${Date.now()}`, 'local');
         }
       } catch (err) {
         console.warn('Failed to pre-create session in database:', err);
+        updateSessionState(`local-${Date.now()}`, 'local');
       }
     } else if (!authToken && !currentSessionIdRef.current) {
       updateSessionState(`demo-${Date.now()}`, 'local');
@@ -379,8 +433,12 @@ export default function Home() {
         }),
       });
 
-      // If authenticated call fails with 401, fall back gracefully to demo endpoint
+      // If authenticated call fails with 401, fall back gracefully to demo simulator and convert to local draft
       if (res.status === 401 && endpoint !== '/api/demo/cothink') {
+        setIsAuthenticated(false);
+        localStorage.removeItem('thinkmate_auth_token');
+        updateSessionState(`draft-${Date.now()}`, 'local');
+
         res = await fetch('/api/demo/cothink', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -423,18 +481,24 @@ export default function Home() {
         setClarifiedObjective(text);
       }
 
-      // If in unauthenticated offline mode, save local draft
-      if (!authToken) {
+      // If session is NOT cloud-persisted (offline guest, or degraded/fallen-back draft),
+      // persist it into localStorage immediately so no conversation is ever lost
+      if (sessionKindRef.current !== 'cloud') {
         const activeProblem = currentStep === 'describe_problem' ? text : problemStatement;
         const title =
           activeProblem.length > 0
             ? activeProblem.slice(0, 48) + (activeProblem.length > 48 ? '...' : '')
-            : 'Offline Demo Session';
+            : 'Local Draft Session';
+
+        const localId = currentSessionIdRef.current || `local-${Date.now()}`;
+        if (!currentSessionIdRef.current) {
+          updateSessionState(localId, 'local');
+        }
 
         const existingSessions = getStoredSessions();
-        const sessionIndex = existingSessions.findIndex((s) => s.id === currentSessionIdRef.current);
+        const sessionIndex = existingSessions.findIndex((s) => s.id === localId);
         const updatedSession: ThinkingSession = {
-          id: currentSessionIdRef.current,
+          id: localId,
           userId: 'demo-local',
           title,
           problemStatement: activeProblem,
@@ -452,18 +516,18 @@ export default function Home() {
         }
         saveStoredSessions(existingSessions);
 
-        appendStoredMessage(currentSessionIdRef.current, {
+        appendStoredMessage(localId, {
           id: userMsg.id,
-          sessionId: currentSessionIdRef.current,
+          sessionId: localId,
           role: 'user',
           content: userMsg.content,
           mode: WorkflowStateMachine.getModeForStage(currentStep),
           createdAt: userMsg.timestamp,
         });
 
-        appendStoredMessage(currentSessionIdRef.current, {
+        appendStoredMessage(localId, {
           id: assistantMsg.id,
-          sessionId: currentSessionIdRef.current,
+          sessionId: localId,
           role: 'assistant',
           content: assistantMsg.content,
           mode: WorkflowStateMachine.getModeForStage(data.nextStep),
@@ -504,9 +568,14 @@ export default function Home() {
   };
 
   const handleShare = () => {
-    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+    if (typeof window === 'undefined' || !navigator.clipboard) return;
+    if (activeSessionId) {
+      const shareUrl = `${window.location.origin}/?session=${encodeURIComponent(activeSessionId)}`;
+      navigator.clipboard.writeText(shareUrl);
+      alert(`ThinkMate session link copied to clipboard:\n${shareUrl}`);
+    } else {
       navigator.clipboard.writeText(window.location.href);
-      alert('ThinkMate session link copied to clipboard!');
+      alert('ThinkMate application link copied to clipboard!');
     }
   };
 
@@ -567,8 +636,14 @@ export default function Home() {
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
-        onClearAllData={() => {
-          clearAllLocalData();
+        onClearAllData={async (options) => {
+          if (options?.wipeCloud) {
+            clearAllLocalData(true);
+            setIsAuthenticated(false);
+            setCloudSessions([]);
+          } else {
+            clearAllLocalData(false);
+          }
           handleRestart();
         }}
       />

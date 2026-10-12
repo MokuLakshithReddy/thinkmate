@@ -370,4 +370,102 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
     // Assert that inserted messages were rolled back
     assert.equal(deletedMessageIds.length, 2);
   });
+
+  test('recordWorkflowStep returns cached result idempotently for duplicate clientRequestId', async () => {
+    const mockClient = {
+      rpc: async () => ({
+        data: [{
+          session_id: 'sess-idem',
+          user_message_id: 'msg-u1',
+          assistant_message_id: 'msg-a1',
+          next_stage: 'clarify_objective',
+          next_mode: 'understand',
+        }],
+        error: null,
+      }),
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+    (repo as unknown as { getSession: unknown }).getSession = async () => ({
+      id: 'sess-idem',
+      userId: 'user-idem',
+      title: 'Idempotency Test',
+      problemStatement: 'Problem',
+      currentMode: 'understand',
+      currentStage: 'describe_problem',
+      status: 'active',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const clientRequestId = `req-test-${Date.now()}`;
+    const firstCall = await repo.recordWorkflowStep(
+      {
+        sessionId: 'sess-idem',
+        userMessage: 'Test prompt',
+        assistantMessage: 'Test response',
+        nextStage: 'clarify_objective',
+        nextMode: 'understand',
+        clientRequestId,
+      },
+      'user-idem'
+    );
+
+    assert.strictEqual(firstCall.sessionId, 'sess-idem');
+
+    // Second call with same clientRequestId must return cached result
+    const secondCall = await repo.recordWorkflowStep(
+      {
+        sessionId: 'sess-idem',
+        userMessage: 'Test prompt duplicate',
+        assistantMessage: 'Test response duplicate',
+        nextStage: 'clarify_objective',
+        nextMode: 'understand',
+        clientRequestId,
+      },
+      'user-idem'
+    );
+
+    assert.deepStrictEqual(firstCall, secondCall);
+  });
+
+  test('deleteAllUserSessions deletes all sessions for the authenticated user and rejects unauthorized callers', async () => {
+    let deletedUserId: string | null = null;
+    const mockClient = {
+      from: (table: string) => {
+        if (table === 'thinking_sessions') {
+          return {
+            select: () => ({
+              eq: async () => ({
+                data: [{ id: 'sess-1' }, { id: 'sess-2' }],
+                error: null,
+              }),
+            }),
+            delete: () => ({
+              eq: async (_col: string, val: string) => {
+                deletedUserId = val;
+                return { error: null };
+              },
+            }),
+          };
+        }
+        return {};
+      },
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+
+    await assert.rejects(
+      async () => {
+        await repo.deleteAllUserSessions('');
+      },
+      {
+        message: 'Mandatory authorization failure: userId is required to delete all sessions',
+      }
+    );
+
+    const count = await repo.deleteAllUserSessions('user-target-123');
+    assert.strictEqual(count, 2);
+    assert.strictEqual(deletedUserId, 'user-target-123');
+  });
 });

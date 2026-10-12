@@ -186,8 +186,56 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       assert.strictEqual(fallbackResult.allowed, true);
       const secondResult = await mockStore.checkAndRecord('test-redis-fallback', 1, 60000);
       assert.strictEqual(secondResult.allowed, false, 'Bounded fallback must reject excess requests');
+
+      // Test fail-closed policy when RATE_LIMIT_FAIL_CLOSED=true
+      const oldEnv = process.env.RATE_LIMIT_FAIL_CLOSED;
+      try {
+        process.env.RATE_LIMIT_FAIL_CLOSED = 'true';
+        const failClosedResult = await mockStore.checkAndRecord('test-fail-closed', 10, 60000);
+        assert.strictEqual(failClosedResult.allowed, false, 'Fail-closed policy must deny requests on Redis outage');
+      } finally {
+        if (oldEnv !== undefined) {
+          process.env.RATE_LIMIT_FAIL_CLOSED = oldEnv;
+        } else {
+          delete process.env.RATE_LIMIT_FAIL_CLOSED;
+        }
+      }
     } finally {
       global.fetch = originalFetch;
     }
+  });
+
+  test('getClientIp sanitizes proxy headers and prioritizes verified edge headers', async () => {
+    const { getClientIp } = await import('@/lib/rate-limiter');
+
+    // CF header priority
+    const cfReq = new Request('https://thinkmate.test', {
+      headers: {
+        'cf-connecting-ip': '203.0.113.195',
+        'x-forwarded-for': '198.51.100.1, 10.0.0.1',
+      },
+    });
+    assert.strictEqual(getClientIp(cfReq), '203.0.113.195');
+
+    // Real-IP header priority
+    const realIpReq = new Request('https://thinkmate.test', {
+      headers: {
+        'x-real-ip': '198.51.100.42:8080',
+        'x-forwarded-for': 'attacker-spoofed-string, 198.51.100.42',
+      },
+    });
+    assert.strictEqual(getClientIp(realIpReq), '198.51.100.42');
+
+    // X-Forwarded-For extracts valid IP and filters invalid input
+    const xffReq = new Request('https://thinkmate.test', {
+      headers: {
+        'x-forwarded-for': 'invalid-domain-ip, 203.0.113.50',
+      },
+    });
+    assert.strictEqual(getClientIp(xffReq), '203.0.113.50');
+
+    // Fallback when headers missing
+    const emptyReq = new Request('https://thinkmate.test');
+    assert.strictEqual(getClientIp(emptyReq), '127.0.0.1');
   });
 });

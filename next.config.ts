@@ -7,10 +7,12 @@ const cspHeader = `
   font-src 'self' https://fonts.gstatic.com data:;
   img-src 'self' data: https: blob:;
   connect-src 'self' https://*.supabase.co wss://*.supabase.co https://generativelanguage.googleapis.com;
+  worker-src 'self' blob:;
   object-src 'none';
   frame-ancestors 'none';
   base-uri 'self';
   form-action 'self';
+  upgrade-insecure-requests;
 `.replace(/\s{2,}/g, ' ').trim();
 
 const nextConfig: NextConfig = {

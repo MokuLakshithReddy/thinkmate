@@ -8,7 +8,7 @@ import { ShieldCheck, Database, Trash2, Cpu, Check, Lock } from 'lucide-react';
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onClearAllData: () => void;
+  onClearAllData: (options?: { wipeCloud?: boolean }) => void | Promise<void>;
 }
 
 export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModalProps) {
@@ -25,7 +25,8 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
     return 'gemini-2.5-flash';
   });
   const [savedSuccess, setSavedSuccess] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<'local' | 'all' | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const handleSave = () => {
     if (typeof window !== 'undefined') {
@@ -40,10 +41,33 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
     setTimeout(() => setSavedSuccess(false), 2500);
   };
 
-  const handleDeleteAll = () => {
-    onClearAllData();
-    setConfirmDelete(false);
-    onClose();
+  const handleClearLocal = async () => {
+    setIsDeleting(true);
+    try {
+      await onClearAllData({ wipeCloud: false });
+      setConfirmDelete(null);
+      onClose();
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleWipeAll = async () => {
+    setIsDeleting(true);
+    try {
+      if (authToken.trim()) {
+        await fetch('/api/sessions?all=true', {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${authToken.trim()}` },
+        }).catch((err) => console.warn('Cloud wipe error:', err));
+      }
+      await onClearAllData({ wipeCloud: true });
+      setAuthToken('');
+      setConfirmDelete(null);
+      onClose();
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   return (
@@ -118,33 +142,76 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
             )}
           </Button>
 
-          {/* Delete all data */}
-          {confirmDelete ? (
-            <div className="flex items-center gap-1.5">
-              <span className="text-[11px] text-rose-400">Are you sure?</span>
-              <Button variant="danger" size="sm" onClick={handleDeleteAll} className="h-7 text-xs">
-                Yes, Wipe All
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setConfirmDelete(false)}
-                className="h-7 text-xs"
-              >
-                Cancel
-              </Button>
-            </div>
-          ) : (
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={() => setConfirmDelete(true)}
-              className="text-xs"
-            >
-              <Trash2 className="h-3.5 w-3.5 mr-1" />
-              Wipe All Data
-            </Button>
-          )}
+          {/* Data Cleanup Actions */}
+          <div className="flex items-center gap-2">
+            {confirmDelete === 'local' ? (
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-amber-400">Clear offline drafts?</span>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={handleClearLocal}
+                  disabled={isDeleting}
+                  className="h-7 text-xs bg-amber-600 hover:bg-amber-500"
+                >
+                  Confirm
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setConfirmDelete(null)}
+                  disabled={isDeleting}
+                  className="h-7 text-xs"
+                >
+                  Cancel
+                </Button>
+              </div>
+            ) : confirmDelete === 'all' ? (
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-rose-400">Permanently wipe cloud & local?</span>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={handleWipeAll}
+                  disabled={isDeleting}
+                  className="h-7 text-xs"
+                >
+                  {isDeleting ? 'Wiping...' : 'Yes, Wipe All'}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setConfirmDelete(null)}
+                  disabled={isDeleting}
+                  className="h-7 text-xs"
+                >
+                  Cancel
+                </Button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setConfirmDelete('local')}
+                  className="text-xs text-slate-400 hover:text-slate-200"
+                  title="Remove local draft sessions and cached browser data"
+                >
+                  Clear Local Drafts
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={() => setConfirmDelete('all')}
+                  className="text-xs"
+                  title="Permanently delete all cloud sessions from Supabase and clear local credentials"
+                >
+                  <Trash2 className="h-3.5 w-3.5 mr-1" />
+                  Wipe All Data
+                </Button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </Modal>

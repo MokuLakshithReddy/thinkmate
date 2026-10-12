@@ -42,6 +42,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Verify fromMode matches the database source of truth
+    if (fromMode && fromMode !== session.currentMode) {
+      return NextResponse.json(
+        {
+          error: `Workflow mode mismatch: request claimed fromMode "${fromMode}", but session is currently in "${session.currentMode}".`,
+          currentMode: session.currentMode,
+          requestedFromMode: fromMode,
+        },
+        { status: 400 }
+      );
+    }
+
+    const authoritativeFromMode = session.currentMode;
+
     // Authoritatively retrieve persisted insights for this user's session
     let insights;
     try {
@@ -59,12 +73,36 @@ export async function POST(req: NextRequest) {
       (i) => i.category === 'decision' && i.status === 'accepted'
     );
 
-    const validation = WorkflowStateMachine.validateTransition(fromMode, toMode, {
+    const validation = WorkflowStateMachine.validateTransition(authoritativeFromMode, toMode, {
       hasAcceptedDecision,
       insights,
     });
 
-    return NextResponse.json(validation);
+    if (validation.allowed) {
+      // Persist the transition to Supabase
+      const defaultStageForMode = WorkflowStateMachine.deriveCurrentStage(toMode, 0);
+      try {
+        await getRepository().updateSession(
+          sessionId,
+          {
+            currentMode: toMode,
+            currentStage: defaultStageForMode,
+          },
+          authUser.id
+        );
+      } catch (updateErr) {
+        console.error('Failed to persist mode transition:', updateErr);
+        return NextResponse.json(
+          { error: 'Failed to persist validated workflow transition to database' },
+          { status: 503 }
+        );
+      }
+    }
+
+    return NextResponse.json({
+      ...validation,
+      persistedMode: validation.allowed ? toMode : session.currentMode,
+    });
   } catch (err: unknown) {
     const msg = (err as Error)?.message || '';
     if (msg.includes('unauthorized') || msg.includes('ownership')) {

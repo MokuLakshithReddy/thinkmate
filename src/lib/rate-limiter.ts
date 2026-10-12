@@ -184,11 +184,26 @@ export class UpstashRedisRateLimitStore implements RateLimitStore {
 
       throw new Error('Unexpected format in Redis EVAL response');
     } catch (providerError) {
+      // Degraded-mode policy:
+      // If RATE_LIMIT_FAIL_CLOSED=true is configured, reject traffic during Redis outages to guarantee strict DDoS/quota enforcement.
+      // Default: engages bounded local in-memory sliding window fallback per node instance to prevent availability outages while restricting individual node floods.
+      const failClosed = process.env.RATE_LIMIT_FAIL_CLOSED === 'true';
+      if (failClosed) {
+        console.error(
+          '[RateLimiter] Upstash Redis execution failed and RATE_LIMIT_FAIL_CLOSED is true. Rejecting request to fail closed:',
+          providerError
+        );
+        return {
+          allowed: false,
+          remaining: 0,
+          resetMs: windowMs,
+        };
+      }
+
       console.warn(
-        '[RateLimiter] Upstash Redis atomic execution failed. Engaging bounded local memory fallback:',
+        '[RateLimiter] Upstash Redis execution failed. Engaging degraded in-memory sliding window fallback (per-node bounded):',
         providerError
       );
-      // Bounded local fallback: strictly bounded per instance, never fails open
       return memoryStore.checkAndRecord(key, limit, windowMs);
     }
   }
@@ -295,22 +310,43 @@ export function checkRateLimit(
 }
 
 /**
+ * Validates whether a candidate string is a syntactic IPv4 or IPv6 address.
+ */
+function isValidIp(ip: string): boolean {
+  const ipv4Regex = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+  const ipv6Regex = /^([0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}$|^::1$|^::$/;
+  return ipv4Regex.test(ip) || ipv6Regex.test(ip);
+}
+
+/**
  * Safely extracts client IP from request headers according to trusted proxy guidelines.
- * Strips port numbers and checks x-forwarded-for, x-real-ip, or falls back to loopback.
+ * Prioritizes trusted edge headers (cf-connecting-ip, x-real-ip) over easily spoofed x-forwarded-for entries.
  */
 export function getClientIp(req: Request): string {
-  const forwardedFor = req.headers.get('x-forwarded-for');
-  if (forwardedFor) {
-    const parts = forwardedFor.split(',').map((p) => p.trim());
-    if (parts.length > 0 && parts[0]) {
-      const cleanIp = parts[0].replace(/:\d+$/, '');
-      if (cleanIp) return cleanIp;
+  // 1. Cloudflare edge verified client IP
+  const cfConnectingIp = req.headers.get('cf-connecting-ip')?.trim();
+  if (cfConnectingIp && isValidIp(cfConnectingIp)) {
+    return cfConnectingIp;
+  }
+
+  // 2. Reverse proxy verified single IP
+  const realIp = req.headers.get('x-real-ip')?.trim();
+  if (realIp) {
+    const cleanReal = realIp.replace(/:\d+$/, '');
+    if (isValidIp(cleanReal)) {
+      return cleanReal;
     }
   }
 
-  const realIp = req.headers.get('x-real-ip');
-  if (realIp) {
-    return realIp.trim().replace(/:\d+$/, '');
+  // 3. X-Forwarded-For: find first valid syntactic IP
+  const forwardedFor = req.headers.get('x-forwarded-for');
+  if (forwardedFor) {
+    const parts = forwardedFor.split(',').map((p) => p.trim().replace(/:\d+$/, ''));
+    for (const part of parts) {
+      if (isValidIp(part)) {
+        return part;
+      }
+    }
   }
 
   return '127.0.0.1';

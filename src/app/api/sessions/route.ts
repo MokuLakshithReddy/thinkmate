@@ -121,9 +121,15 @@ export async function DELETE(req: NextRequest) {
       );
     }
 
+    const all = req.nextUrl.searchParams.get('all') === 'true';
+    if (all) {
+      const count = await getRepository().deleteAllUserSessions(authUser.id);
+      return NextResponse.json({ success: true, count, wiped: true });
+    }
+
     const id = req.nextUrl.searchParams.get('id');
     if (!id) {
-      return NextResponse.json({ error: 'Session ID is required' }, { status: 400 });
+      return NextResponse.json({ error: 'Session ID or ?all=true is required' }, { status: 400 });
     }
 
     await getRepository().deleteSession(id, authUser.id);

@@ -32,7 +32,7 @@ export const STAGE_TO_MODE: Record<CoThinkerStep, ThinkingMode> = {
 };
 
 export const ALLOWED_STAGE_TRANSITIONS: Record<CoThinkerStep, CoThinkerStep[]> = {
-  welcome: ['welcome', 'describe_problem', 'explore_perspectives'],
+  welcome: ['welcome', 'describe_problem'],
   describe_problem: ['describe_problem', 'clarify_objective', 'welcome'],
   clarify_objective: ['clarify_objective', 'break_subproblems', 'describe_problem'],
   break_subproblems: ['break_subproblems', 'explore_perspectives', 'clarify_objective'],
