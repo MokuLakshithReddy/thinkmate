@@ -20,18 +20,19 @@ const CoThinkRequestSchema = z.object({
     'summarize_insights',
     'choose_action',
   ]),
-  userMessage: z.string().default(''),
-  selectedOptionId: z.string().optional(),
-  userName: z.string().default('Thinker'),
-  problemStatement: z.string().optional(),
-  clarifiedObjective: z.string().optional(),
+  userMessage: z.string().max(8000, 'User message exceeds 8,000 character limit').default(''),
+  selectedOptionId: z.string().max(100).optional(),
+  userName: z.string().max(50).default('Thinker'),
+  problemStatement: z.string().max(8000, 'Problem statement exceeds 8,000 character limit').optional(),
+  clarifiedObjective: z.string().max(4000, 'Clarified objective exceeds 4,000 character limit').optional(),
   history: z
     .array(
       z.object({
         role: z.enum(['user', 'assistant']),
-        content: z.string(),
+        content: z.string().max(8000),
       })
     )
+    .max(50, 'Conversation history cannot exceed 50 turns')
     .default([]),
 });
 
@@ -75,7 +76,7 @@ export async function POST(req: NextRequest) {
   } catch (err: unknown) {
     console.error('Co-think error:', err);
     return NextResponse.json(
-      { error: (err as Error)?.message || 'Co-think processing failure' },
+      { error: 'An unexpected error occurred during thinking processing. Please retry.' },
       { status: 500 }
     );
   }

@@ -7,13 +7,19 @@ export const MessageSchema = z.object({
   mode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']).optional(),
 });
 
+export const SUPPORTED_GEMINI_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
+] as const;
+
 export const ThinkStreamRequestSchema = z.object({
-  sessionId: z.string().min(1),
-  problemStatement: z.string().min(1),
+  sessionId: z.string().min(1).max(100),
+  problemStatement: z.string().min(1).max(10000),
   currentMode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']),
-  messages: z.array(MessageSchema),
-  apiKey: z.string().optional(),
-  model: z.string().optional().default('gemini-2.5-flash'),
+  messages: z.array(MessageSchema).max(50),
+  apiKey: z.string().max(200).optional(),
+  model: z.enum(SUPPORTED_GEMINI_MODELS).default('gemini-2.5-flash'),
 });
 
 export type ThinkStreamRequest = z.infer<typeof ThinkStreamRequestSchema>;

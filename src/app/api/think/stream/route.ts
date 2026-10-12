@@ -61,7 +61,7 @@ export async function POST(req: NextRequest) {
   } catch (error: unknown) {
     console.error('API route error in /api/think/stream:', error);
     return NextResponse.json(
-      { error: (error as Error)?.message || 'Internal server error processing thinking stream' },
+      { error: 'Internal server error processing thinking stream' },
       { status: 500 }
     );
   }

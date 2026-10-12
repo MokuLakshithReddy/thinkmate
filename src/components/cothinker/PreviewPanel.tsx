@@ -75,7 +75,7 @@ export function PreviewPanel({
   const currentStageInfo = WORKFLOW_STAGES[currentStep];
 
   return (
-    <div className="w-full lg:w-[480px] xl:w-[540px] flex flex-col h-[calc(100vh-3.5rem)] bg-[#e6f4f8] text-slate-800 shrink-0 select-none border-l border-slate-200">
+    <div className="w-full lg:w-[480px] xl:w-[540px] flex flex-col h-[calc(100vh-3.5rem)] bg-[#e6f4f8] text-slate-800 shrink-0 border-l border-slate-200">
       {/* Top Tabs: Preview | Console | Step | Theme (Matching Image 1) */}
       <div className="pt-2 px-4 flex items-center justify-center border-b border-sky-100 bg-[#e0f1f6]/60">
         <div className="flex items-center gap-1 p-1 bg-sky-200/50 rounded-xl text-xs font-medium text-slate-700">
@@ -129,9 +129,9 @@ export function PreviewPanel({
       {/* Action Header: Hamburger Menu, Progress Line, Reload (Matching Image 1) */}
       <div className="px-4 py-2.5 flex items-center justify-between border-b border-sky-100 bg-[#e6f4f8]">
         <button
-          onClick={() => {}}
-          className="p-1 rounded text-slate-600 hover:text-slate-900 cursor-pointer"
-          title="Workflow stages"
+          onClick={() => setActiveTab('step')}
+          className="p-1 rounded text-slate-600 hover:text-slate-900 cursor-pointer transition-colors"
+          title="View workflow stage details"
         >
           <Menu className="h-4 w-4" />
         </button>
@@ -271,11 +271,14 @@ export function PreviewPanel({
                 {currentOptions.map((opt) => {
                   const isSelected = effectiveSelectedOption === opt.id;
                   return (
-                    <div
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
                       key={opt.id}
                       onClick={() => setSelectedOption(opt.id)}
                       className={cn(
-                        'flex items-center gap-3 p-3 rounded-2xl bg-white border transition-all cursor-pointer shadow-xs select-none',
+                        'flex items-center text-left gap-3 p-3 rounded-2xl bg-white border transition-all cursor-pointer shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500',
                         isSelected
                           ? 'border-slate-800 ring-1 ring-slate-800'
                           : 'border-slate-200/80 hover:border-slate-400'
@@ -289,6 +292,7 @@ export function PreviewPanel({
                             ? 'border-slate-900 bg-white'
                             : 'border-slate-300 bg-white'
                         )}
+                        aria-hidden="true"
                       >
                         {isSelected && (
                           <div className="h-2 w-2 rounded-full bg-slate-900" />
@@ -298,7 +302,7 @@ export function PreviewPanel({
                       <div className="text-xs font-medium text-slate-800 leading-tight">
                         {opt.label}
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>

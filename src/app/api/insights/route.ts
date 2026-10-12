@@ -5,12 +5,17 @@ import { getAuthenticatedUser } from '@/lib/server-auth';
 
 const InsightMutationSchema = z.object({
   id: z.string().optional(),
-  sessionId: z.string().min(1),
+  sessionId: z.string().min(1).max(100),
   category: z.enum(['goal', 'assumption', 'option', 'decision', 'action', 'uncertainty']),
   title: z.string().min(1).max(200),
   content: z.string().min(1).max(5000),
   status: z.enum(['accepted', 'rejected', 'under_review']).default('under_review'),
-  metadata: z.record(z.string(), z.any()).optional(),
+  metadata: z
+    .record(
+      z.string().max(50),
+      z.union([z.string().max(1000), z.number(), z.boolean(), z.array(z.string().max(500)).max(20)])
+    )
+    .optional(),
 });
 
 const repository = new SupabaseThinkingRepository();
