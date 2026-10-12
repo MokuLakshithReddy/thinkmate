@@ -5,11 +5,12 @@ import { CoThinkerStep } from '@/types';
 import { getAuthenticatedUser } from '@/lib/server-auth';
 import { checkRateLimit } from '@/lib/rate-limiter';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
+import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 
 /**
  * Main Co-Thinker Stage Progression Endpoint.
- * Powers the interactive dual-pane workflow UI through the 8 flowchart stages,
- * returning structured step choices, stage transitions, and explicit execution mode stamping.
+ * Strictly requires authentication to prevent unauthenticated resource consumption.
+ * Validates session ownership and authoritatively updates persisted workflow mode.
  */
 const CoThinkRequestSchema = z.object({
   sessionId: z.string().max(100).optional(),
@@ -41,17 +42,28 @@ const CoThinkRequestSchema = z.object({
 });
 
 const engine = new CoThinkEngine(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
-const repository = new SupabaseThinkingRepository();
+let repositoryInstance: SupabaseThinkingRepository | null = null;
+function getRepository() {
+  if (!repositoryInstance) {
+    repositoryInstance = new SupabaseThinkingRepository();
+  }
+  return repositoryInstance;
+}
 
 export async function POST(req: NextRequest) {
   try {
     const authUser = await getAuthenticatedUser(req);
+    if (!authUser) {
+      return NextResponse.json(
+        {
+          error: 'Authentication required: please provide a valid Supabase bearer token. For unauthenticated demos, use /api/demo/cothink.',
+        },
+        { status: 401 }
+      );
+    }
 
-    // Rate Limiting: 60 req/min for authenticated users, 20 req/min for anonymous callers
-    const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0].trim() || '127.0.0.1';
-    const rateLimitKey = authUser ? `usr:${authUser.id}` : `ip:${clientIp}`;
-    const rateCheck = checkRateLimit(rateLimitKey, authUser ? 60 : 20, 60000);
-
+    // Rate Limiting: 60 req/min for authenticated user
+    const rateCheck = checkRateLimit(`usr:${authUser.id}`, 60, 60000);
     if (!rateCheck.allowed) {
       return NextResponse.json(
         { error: 'Rate limit exceeded. Please wait a moment before sending more messages.' },
@@ -83,9 +95,9 @@ export async function POST(req: NextRequest) {
       history,
     } = parsed.data;
 
-    // If caller requests updates for an existing cloud session, verify caller owns it
-    if (sessionId && authUser) {
-      const session = await repository.getSession(sessionId, authUser.id);
+    // Verify session ownership if sessionId is supplied
+    if (sessionId) {
+      const session = await getRepository().getSession(sessionId, authUser.id);
       if (!session) {
         return NextResponse.json(
           { error: 'Unauthorized or non-existent session' },
@@ -96,7 +108,7 @@ export async function POST(req: NextRequest) {
 
     const result = await engine.processStep(
       {
-        userName: authUser?.email || userName,
+        userName: authUser.email || userName,
         step: step as CoThinkerStep,
         problemStatement,
         clarifiedObjective,
@@ -105,6 +117,16 @@ export async function POST(req: NextRequest) {
       userMessage,
       selectedOptionId
     );
+
+    // If caller owns this session, authoritatively update currentMode in the database
+    if (sessionId && result.nextStep) {
+      try {
+        const nextMode = WorkflowStateMachine.getModeForStage(result.nextStep);
+        await getRepository().updateSession(sessionId, { currentMode: nextMode }, authUser.id);
+      } catch (err: unknown) {
+        console.warn('Could not persist stage update to session:', err);
+      }
+    }
 
     return NextResponse.json(result);
   } catch (err: unknown) {

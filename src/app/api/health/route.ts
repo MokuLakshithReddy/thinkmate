@@ -1,30 +1,68 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
+import { getServiceSupabaseClient } from '@/services/db/supabase-client';
 
-export async function GET() {
+/**
+ * Health & Readiness Probe.
+ * Distinguishes between liveness (process alive) and readiness (dependencies reachable).
+ * Safely verifies database reachability and AI provider configuration without exposing secrets.
+ */
+export async function GET(req: NextRequest) {
+  const isReadiness = req.nextUrl.searchParams.get('readiness') === 'true';
+
+  let dbStatus: 'ready' | 'degraded' | 'unavailable' = 'unavailable';
+  let dbReachable = false;
+  let dbMessage = 'Database service unconfigured';
+
+  if (process.env.SUPABASE_SERVICE_ROLE_KEY && process.env.NEXT_PUBLIC_SUPABASE_URL) {
+    try {
+      const client = getServiceSupabaseClient();
+      const { error } = await client.from('thinking_sessions').select('id').limit(1);
+      if (!error) {
+        dbStatus = 'ready';
+        dbReachable = true;
+        dbMessage = 'Connected and verified';
+      } else {
+        dbStatus = 'degraded';
+        dbMessage = 'Connected but table query returned error';
+      }
+    } catch {
+      dbStatus = 'unavailable';
+      dbMessage = 'Connection refused or unreachable';
+    }
+  }
+
   const hasGeminiKey = !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
-  const hasSupabaseUrl = !!process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const hasSupabaseKey = !!(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY);
+  const aiStatus: 'ready' | 'unconfigured' = hasGeminiKey ? 'ready' : 'unconfigured';
+
+  const overallReadiness: 'ready' | 'degraded' | 'unavailable' =
+    dbStatus === 'ready' && aiStatus === 'ready'
+      ? 'ready'
+      : dbStatus === 'ready' || aiStatus === 'ready'
+      ? 'degraded'
+      : 'unavailable';
 
   const status = {
-    status: 'healthy',
+    liveness: 'up',
+    readiness: overallReadiness,
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
-    services: {
-      api: {
-        status: 'up',
+    dependencies: {
+      database: {
+        provider: 'Supabase PostgreSQL',
+        status: dbStatus,
+        reachable: dbReachable,
+        message: dbMessage,
       },
       aiProvider: {
         provider: 'Google GenAI (Gemini)',
-        status: hasGeminiKey ? 'configured' : 'fallback_simulator_mode',
+        status: aiStatus,
         model: 'gemini-2.5-flash',
-      },
-      database: {
-        provider: 'Supabase PostgreSQL',
-        status: hasSupabaseUrl && hasSupabaseKey ? 'configured' : 'local_storage_mode',
       },
     },
     version: '0.1.0',
   };
 
-  return NextResponse.json(status, { status: 200 });
+  const httpStatus = isReadiness && overallReadiness === 'unavailable' ? 503 : 200;
+
+  return NextResponse.json(status, { status: httpStatus });
 }

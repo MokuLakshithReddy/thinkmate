@@ -18,11 +18,17 @@ export class GeminiThinkingService implements ThinkingAIService {
     request: ThinkStreamRequest,
     onEvent: (event: ThinkingStreamEvent) => void
   ): Promise<void> {
-    const activeKey = request.apiKey || this.defaultApiKey;
+    const activeKey = this.defaultApiKey;
 
     if (!activeKey) {
-      // If no API key is supplied, use the high-fidelity thinking simulator
-      // so the user and automated tests can run without blocking
+      if (process.env.NODE_ENV === 'production') {
+        onEvent({
+          type: 'error',
+          error: 'AI thinking provider is not configured. Please contact the administrator.',
+        });
+        return;
+      }
+      // If no API key is supplied in non-production, use the high-fidelity thinking simulator
       await this.runSimulator(request, onEvent);
       return;
     }
@@ -86,8 +92,15 @@ export class GeminiThinkingService implements ThinkingAIService {
       this.parseAndEmitMetadata(jsonMetaBuffer || fullBuffer, request.currentMode, onEvent);
     } catch (err: unknown) {
       const errMsg = (err as Error)?.message || String(err);
-      console.warn('Gemini API call encountered error, falling back to simulator:', errMsg);
-      // If API fails (e.g. invalid key or network issue), fallback gracefully
+      console.warn('Gemini API call encountered error:', errMsg);
+      if (process.env.NODE_ENV === 'production') {
+        onEvent({
+          type: 'error',
+          error: 'AI thinking provider temporarily unavailable. Please retry in a few moments.',
+        });
+        return;
+      }
+      // In development or test environments, fallback to simulator with explicit warning
       await this.runSimulator(request, onEvent, errMsg);
     }
   }

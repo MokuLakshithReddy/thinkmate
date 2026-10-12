@@ -7,20 +7,31 @@ import { SupabaseThinkingRepository } from '@/services/db/repository';
 
 /**
  * SSE Token Streaming Endpoint for Freeform Generative Thinking.
- * Used for streaming live tokens, granular insight extraction, and mode switches
- * when streaming response chunks are requested.
+ * Strictly requires authentication to prevent unauthenticated resource consumption.
+ * Verifies session ownership and streams real reasoning tokens.
  */
-const repository = new SupabaseThinkingRepository();
+let repositoryInstance: SupabaseThinkingRepository | null = null;
+function getRepository() {
+  if (!repositoryInstance) {
+    repositoryInstance = new SupabaseThinkingRepository();
+  }
+  return repositoryInstance;
+}
 
 export async function POST(req: NextRequest) {
   try {
     const authUser = await getAuthenticatedUser(req);
+    if (!authUser) {
+      return NextResponse.json(
+        {
+          error: 'Authentication required: please provide a valid Supabase bearer token.',
+        },
+        { status: 401 }
+      );
+    }
 
-    // Rate Limiting: 40 req/min for authenticated, 15 req/min for anonymous
-    const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0].trim() || '127.0.0.1';
-    const rateLimitKey = authUser ? `stream:usr:${authUser.id}` : `stream:ip:${clientIp}`;
-    const rateCheck = checkRateLimit(rateLimitKey, authUser ? 40 : 15, 60000);
-
+    // Rate Limiting: 40 req/min for authenticated user
+    const rateCheck = checkRateLimit(`stream:usr:${authUser.id}`, 40, 60000);
     if (!rateCheck.allowed) {
       return NextResponse.json(
         { error: 'Rate limit exceeded for streaming requests. Please wait a moment.' },
@@ -46,9 +57,9 @@ export async function POST(req: NextRequest) {
 
     const requestData = validation.data;
 
-    // Verify session ownership if authenticated caller references a persisted session
-    if (requestData.sessionId && authUser) {
-      const session = await repository.getSession(requestData.sessionId, authUser.id);
+    // Verify session ownership for persisted session
+    if (requestData.sessionId) {
+      const session = await getRepository().getSession(requestData.sessionId, authUser.id);
       if (!session) {
         return NextResponse.json(
           { error: 'Unauthorized or non-existent session' },
@@ -73,7 +84,6 @@ export async function POST(req: NextRequest) {
           controller.close();
         } catch (streamErr: unknown) {
           console.error('Error during streaming execution:', streamErr);
-          // API-01 Sanitized client error
           const errPayload = `data: ${JSON.stringify({
             type: 'error',
             error: 'Streaming generation encountered a temporary failure. Please retry.',

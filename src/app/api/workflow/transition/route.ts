@@ -3,7 +3,13 @@ import { ModeTransitionRequestSchema, WorkflowStateMachine } from '@/services/wo
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { getAuthenticatedUser } from '@/lib/server-auth';
 
-const repository = new SupabaseThinkingRepository();
+let repositoryInstance: SupabaseThinkingRepository | null = null;
+function getRepository() {
+  if (!repositoryInstance) {
+    repositoryInstance = new SupabaseThinkingRepository();
+  }
+  return repositoryInstance;
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -28,7 +34,7 @@ export async function POST(req: NextRequest) {
     const { sessionId, fromMode, toMode } = parsed.data;
 
     // Verify session exists and is owned by the authenticated caller
-    const session = await repository.getSession(sessionId, authUser.id);
+    const session = await getRepository().getSession(sessionId, authUser.id);
     if (!session) {
       return NextResponse.json(
         { error: 'Unauthorized or non-existent session' },
@@ -39,7 +45,7 @@ export async function POST(req: NextRequest) {
     // Authoritatively retrieve persisted insights for this user's session
     let insights;
     try {
-      insights = await repository.getInsights(sessionId, authUser.id);
+      insights = await getRepository().getInsights(sessionId, authUser.id);
     } catch (err: unknown) {
       console.error('Failed to retrieve session insights for transition:', err);
       // Fail closed when database is unavailable: never allow client-supplied state to forge transitions

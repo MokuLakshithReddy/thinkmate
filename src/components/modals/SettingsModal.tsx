@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
-import { Key, ShieldCheck, Database, Trash2, Cpu, Check } from 'lucide-react';
+import { ShieldCheck, Database, Trash2, Cpu, Check, Lock } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -12,9 +12,9 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModalProps) {
-  const [apiKey, setApiKey] = useState(() => {
+  const [authToken, setAuthToken] = useState(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('thinkmate_gemini_key') || '';
+      return localStorage.getItem('thinkmate_auth_token') || '';
     }
     return '';
   });
@@ -29,10 +29,10 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
 
   const handleSave = () => {
     if (typeof window !== 'undefined') {
-      if (apiKey.trim()) {
-        localStorage.setItem('thinkmate_gemini_key', apiKey.trim());
+      if (authToken.trim()) {
+        localStorage.setItem('thinkmate_auth_token', authToken.trim());
       } else {
-        localStorage.removeItem('thinkmate_gemini_key');
+        localStorage.removeItem('thinkmate_auth_token');
       }
       localStorage.setItem('thinkmate_model', model);
     }
@@ -50,12 +50,12 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title="Settings & Privacy"
+      title="Settings & Authentication"
       description="Configure your Gemini model, credentials, and data retention preferences."
       maxWidth="md"
     >
       <div className="space-y-5">
-        {/* Model Selection */}
+        {/* Model Architecture */}
         <div>
           <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center gap-1.5">
             <Cpu className="h-3.5 w-3.5 text-sky-400" />
@@ -67,40 +67,40 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
             className="w-full bg-[#101728] border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-sky-500 cursor-pointer"
           >
             <option value="gemini-2.5-flash">Gemini 2.5 Flash (Recommended: Fast & Deep Reasoning)</option>
-            <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite (Low Latency Thinking)</option>
-            <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+            <option value="gemini-1.5-pro">Gemini 1.5 Pro (Deep Multi-Hop Synthesis)</option>
+            <option value="gemini-1.5-flash">Gemini 1.5 Flash (Standard Latency)</option>
           </select>
           <p className="text-[11px] text-slate-500 mt-1">
-            Official Google GenAI SDK (`@google/genai`) powers all thinking modes.
+            Official Google GenAI SDK (`@google/genai`) with server-managed credentials.
           </p>
         </div>
 
-        {/* API Key */}
+        {/* Supabase Bearer Auth Token */}
         <div>
           <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center gap-1.5">
-            <Key className="h-3.5 w-3.5 text-sky-400" />
-            Custom Gemini API Key <span className="text-slate-500 font-normal">(Optional)</span>
+            <Lock className="h-3.5 w-3.5 text-sky-400" />
+            Supabase Bearer Token <span className="text-slate-500 font-normal">(For Authenticated Cloud Sessions)</span>
           </label>
           <input
             type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="AIzaSy... (Leave blank to use server environment key)"
+            value={authToken}
+            onChange={(e) => setAuthToken(e.target.value)}
+            placeholder="eyJhbGciOi... (Leave empty for interactive demo simulator)"
             className="w-full bg-[#101728] border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-sky-500 font-mono"
           />
           <div className="flex items-center gap-1.5 mt-1.5 text-[11px] text-slate-400">
             <ShieldCheck className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-            <span>Credentials are strictly relayed to server-side endpoints and never leaked.</span>
+            <span>AI endpoints strictly require verified authentication to access private cloud sessions.</span>
           </div>
         </div>
 
-        {/* Supabase Storage Info */}
+        {/* Server-Side Key Management Architecture Note */}
         <div className="p-3 bg-slate-900/60 rounded-xl border border-slate-800 flex items-start gap-3">
           <Database className="h-4 w-4 text-sky-400 shrink-0 mt-0.5" />
           <div className="text-xs">
-            <span className="font-semibold text-slate-200">Persistence & Sync</span>
+            <span className="font-semibold text-slate-200">Server-Side Security & Key Policy</span>
             <p className="text-[11px] text-slate-400 mt-0.5">
-              Sessions are persisted locally with instant recovery, and can synchronize with Supabase PostgreSQL with Row Level Security.
+              Gemini API keys are managed exclusively on the server to prevent credential leakage and model relaying. Unauthenticated traffic runs within an isolated sandbox.
             </p>
           </div>
         </div>

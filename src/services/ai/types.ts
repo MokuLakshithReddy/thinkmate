@@ -18,7 +18,6 @@ export const ThinkStreamRequestSchema = z.object({
   problemStatement: z.string().min(1).max(10000),
   currentMode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']),
   messages: z.array(MessageSchema).max(50),
-  apiKey: z.string().max(200).optional(),
   model: z.enum(SUPPORTED_GEMINI_MODELS).default('gemini-2.5-flash'),
 });
 

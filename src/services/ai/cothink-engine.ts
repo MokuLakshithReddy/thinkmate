@@ -8,6 +8,7 @@ export interface CoThinkPromptContext {
   clarifiedObjective?: string;
   conversationHistory: { role: 'user' | 'assistant'; content: string }[];
   activeSessionTitle?: string;
+  isDemo?: boolean;
 }
 
 export interface CoThinkStepResponse {
@@ -37,6 +38,16 @@ export class CoThinkEngine {
     userMessage: string,
     selectedOptionId?: string
   ): Promise<CoThinkStepResponse> {
+    // If explicitly marked as an isolated interactive demo request
+    if (context.isDemo) {
+      const simulated = this.runFlowchartStep(context.step, userMessage, selectedOptionId, context);
+      return {
+        ...simulated,
+        executionMode: 'simulator',
+        simulatedNotice: 'Interactive Demo Mode: Running deterministic offline thinking simulator.',
+      };
+    }
+
     // If Gemini client is available, attempt real live model generation
     if (this.ai && this.hasApiKey) {
       try {
@@ -46,23 +57,60 @@ export class CoThinkEngine {
         const errorMessage = err instanceof Error ? err.message : String(err);
         console.warn('Gemini API call failed:', errorMessage);
 
-        // Explicitly return simulator response with an explicit notice, NEVER silently faking live output
+        // In production, return an explicit retryable provider error instead of faking success
+        if (process.env.NODE_ENV === 'production') {
+          return {
+            message: 'The AI thinking provider is temporarily unavailable. Please retry in a few moments.',
+            nextStep: context.step,
+            progressPercent: this.getProgressPercent(context.step),
+            executionMode: 'error',
+            simulatedNotice: `AI provider error: ${errorMessage}. Please retry.`,
+          };
+        }
+
+        // In non-production development/test fallback:
         const simulated = this.runFlowchartStep(context.step, userMessage, selectedOptionId, context);
         return {
           ...simulated,
           executionMode: 'simulator',
-          simulatedNotice: `API Fallback: Live model call failed (${errorMessage}). Running deterministic flowchart engine.`,
+          simulatedNotice: `Development Fallback: Live model call failed (${errorMessage}). Running deterministic flowchart engine.`,
         };
       }
     }
 
-    // Explicit simulator response when no API key is configured
+    // No API key configured
+    if (process.env.NODE_ENV === 'production') {
+      return {
+        message: 'The AI thinking provider is not configured on this server.',
+        nextStep: context.step,
+        progressPercent: this.getProgressPercent(context.step),
+        executionMode: 'error',
+        simulatedNotice: 'Configuration error: GEMINI_API_KEY is not set.',
+      };
+    }
+
+    // Non-production offline fallback
     const simulated = this.runFlowchartStep(context.step, userMessage, selectedOptionId, context);
     return {
       ...simulated,
       executionMode: 'simulator',
       simulatedNotice: 'Offline Demo Mode: Running deterministic co-thinking simulator (no GEMINI_API_KEY detected).',
     };
+  }
+
+  private getProgressPercent(step: CoThinkerStep): number {
+    const percentages: Record<CoThinkerStep, number> = {
+      welcome: 0,
+      describe_problem: 12,
+      clarify_objective: 25,
+      break_subproblems: 37,
+      explore_perspectives: 50,
+      challenge_assumptions: 65,
+      check_satisfaction: 75,
+      summarize_insights: 88,
+      choose_action: 100,
+    };
+    return percentages[step] ?? 50;
   }
 
   private runFlowchartStep(

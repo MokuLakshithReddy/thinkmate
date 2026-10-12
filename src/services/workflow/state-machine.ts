@@ -1,4 +1,4 @@
-import { ThinkingMode, Insight } from '@/types';
+import { CoThinkerStep, ThinkingMode, Insight } from '@/types';
 import { z } from 'zod';
 
 export interface TransitionValidationResult {
@@ -19,6 +19,30 @@ export const ModeTransitionRequestSchema = z.object({
 
 export type ModeTransitionRequest = z.infer<typeof ModeTransitionRequestSchema>;
 
+export const STAGE_TO_MODE: Record<CoThinkerStep, ThinkingMode> = {
+  welcome: 'understand',
+  describe_problem: 'understand',
+  clarify_objective: 'understand',
+  break_subproblems: 'explore',
+  explore_perspectives: 'explore',
+  challenge_assumptions: 'challenge',
+  check_satisfaction: 'challenge',
+  summarize_insights: 'decide',
+  choose_action: 'act',
+};
+
+export const ALLOWED_STAGE_TRANSITIONS: Record<CoThinkerStep, CoThinkerStep[]> = {
+  welcome: ['welcome', 'describe_problem', 'explore_perspectives'],
+  describe_problem: ['describe_problem', 'clarify_objective', 'welcome'],
+  clarify_objective: ['clarify_objective', 'break_subproblems', 'describe_problem'],
+  break_subproblems: ['break_subproblems', 'explore_perspectives', 'clarify_objective'],
+  explore_perspectives: ['explore_perspectives', 'challenge_assumptions', 'break_subproblems'],
+  challenge_assumptions: ['challenge_assumptions', 'check_satisfaction', 'explore_perspectives'],
+  check_satisfaction: ['check_satisfaction', 'summarize_insights', 'explore_perspectives', 'challenge_assumptions'],
+  summarize_insights: ['summarize_insights', 'choose_action', 'explore_perspectives'],
+  choose_action: ['choose_action', 'summarize_insights'],
+};
+
 const ALLOWED_DIRECT_TRANSITIONS: Record<ThinkingMode, ThinkingMode[]> = {
   understand: ['explore', 'challenge'],
   explore: ['challenge', 'decide', 'understand'],
@@ -28,6 +52,31 @@ const ALLOWED_DIRECT_TRANSITIONS: Record<ThinkingMode, ThinkingMode[]> = {
 };
 
 export class WorkflowStateMachine {
+  /**
+   * Authoritatively checks if transitioning from one flowchart stage to another is legal.
+   */
+  static validateStageTransition(
+    fromStep: CoThinkerStep,
+    toStep: CoThinkerStep
+  ): { allowed: boolean; reason?: string } {
+    if (fromStep === toStep) return { allowed: true };
+    const allowed = ALLOWED_STAGE_TRANSITIONS[fromStep] || [];
+    if (allowed.includes(toStep)) {
+      return { allowed: true };
+    }
+    return {
+      allowed: false,
+      reason: `Illegal workflow stage jump from "${fromStep}" to "${toStep}". Stages must progress through the Co-Thinker reasoning pipeline.`,
+    };
+  }
+
+  /**
+   * Resolves the authoritative mode corresponding to a flowchart stage.
+   */
+  static getModeForStage(step: CoThinkerStep): ThinkingMode {
+    return STAGE_TO_MODE[step] || 'understand';
+  }
+
   /**
    * Validates whether a transition from fromMode to toMode is sound,
    * checking workflow guardrails and business rules.

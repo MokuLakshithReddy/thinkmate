@@ -204,9 +204,16 @@ export default function Home() {
     }
 
     try {
-      const res = await fetch('/api/cothink', {
+      const authToken = typeof window !== 'undefined' ? localStorage.getItem('thinkmate_auth_token') : null;
+      const endpoint = authToken ? '/api/cothink' : '/api/demo/cothink';
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`;
+      }
+
+      let res = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           step: currentStep,
           userMessage: text,
@@ -217,6 +224,22 @@ export default function Home() {
           history: nextHistory.map((m) => ({ role: m.role, content: m.content })),
         }),
       });
+
+      // If authenticated call fails with 401 (e.g. expired token), fall back gracefully to demo endpoint
+      if (res.status === 401 && endpoint !== '/api/demo/cothink') {
+        res = await fetch('/api/demo/cothink', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            step: currentStep,
+            userMessage: text,
+            selectedOptionId,
+            problemStatement: currentStep === 'describe_problem' ? text : problemStatement,
+            clarifiedObjective,
+            history: nextHistory.map((m) => ({ role: m.role, content: m.content })),
+          }),
+        });
+      }
 
       if (!res.ok) {
         throw new Error(`Co-think API failed with status ${res.status}`);

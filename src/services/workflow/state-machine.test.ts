@@ -71,4 +71,30 @@ describe('Workflow State Machine & Guardrails', () => {
     assert.strictEqual(res.allowed, false);
     assert.ok(res.reason?.includes('disallowed by state machine guardrails'));
   });
+
+  test('Validates authoritative stage progression transitions', () => {
+    assert.strictEqual(WorkflowStateMachine.validateStageTransition('welcome', 'describe_problem').allowed, true);
+    assert.strictEqual(WorkflowStateMachine.validateStageTransition('describe_problem', 'clarify_objective').allowed, true);
+    assert.strictEqual(WorkflowStateMachine.validateStageTransition('break_subproblems', 'explore_perspectives').allowed, true);
+    assert.strictEqual(WorkflowStateMachine.validateStageTransition('challenge_assumptions', 'check_satisfaction').allowed, true);
+    assert.strictEqual(WorkflowStateMachine.validateStageTransition('check_satisfaction', 'summarize_insights').allowed, true);
+    assert.strictEqual(WorkflowStateMachine.validateStageTransition('summarize_insights', 'choose_action').allowed, true);
+
+    // Illegal skip from welcome to choose_action
+    const invalidSkip = WorkflowStateMachine.validateStageTransition('welcome', 'choose_action');
+    assert.strictEqual(invalidSkip.allowed, false);
+    assert.ok(invalidSkip.reason?.includes('Illegal workflow stage jump'));
+  });
+
+  test('Maps stages to authoritative 5 thinking modes', () => {
+    assert.strictEqual(WorkflowStateMachine.getModeForStage('welcome'), 'understand');
+    assert.strictEqual(WorkflowStateMachine.getModeForStage('describe_problem'), 'understand');
+    assert.strictEqual(WorkflowStateMachine.getModeForStage('clarify_objective'), 'understand');
+    assert.strictEqual(WorkflowStateMachine.getModeForStage('break_subproblems'), 'explore');
+    assert.strictEqual(WorkflowStateMachine.getModeForStage('explore_perspectives'), 'explore');
+    assert.strictEqual(WorkflowStateMachine.getModeForStage('challenge_assumptions'), 'challenge');
+    assert.strictEqual(WorkflowStateMachine.getModeForStage('check_satisfaction'), 'challenge');
+    assert.strictEqual(WorkflowStateMachine.getModeForStage('summarize_insights'), 'decide');
+    assert.strictEqual(WorkflowStateMachine.getModeForStage('choose_action'), 'act');
+  });
 });
