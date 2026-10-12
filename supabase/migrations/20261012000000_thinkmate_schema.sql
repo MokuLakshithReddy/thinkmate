@@ -186,13 +186,19 @@ CREATE POLICY "Users can insert transitions for own sessions"
   );
 
 -- 6. Workflow Idempotency Keys (Deduplication across retries)
+-- Composite key: scoped to (user_id, session_id, client_request_id) to prevent cross-session collisions
 CREATE TABLE IF NOT EXISTS public.workflow_idempotency_keys (
-  client_request_id TEXT PRIMARY KEY,
-  session_id UUID NOT NULL REFERENCES public.thinking_sessions(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  session_id UUID NOT NULL REFERENCES public.thinking_sessions(id) ON DELETE CASCADE,
+  client_request_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
   response_payload JSONB NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+  created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  PRIMARY KEY (user_id, session_id, client_request_id)
 );
+
+-- Auto-expire stale idempotency keys (older than 24h) to bound table growth
+CREATE INDEX IF NOT EXISTS idx_idempotency_created_at ON public.workflow_idempotency_keys(created_at);
 
 ALTER TABLE public.workflow_idempotency_keys ENABLE ROW LEVEL SECURITY;
 
@@ -207,6 +213,10 @@ CREATE POLICY "Users can insert own idempotency keys"
   WITH CHECK (auth.uid() = user_id);
 
 -- 7. Atomic Transaction Function for Workflow Step Recording
+-- Enforces optimistic concurrency control: caller must supply expected_stage and expected_mode.
+-- If the session's current state has diverged (concurrent mutation), the RPC rejects the request
+-- with a descriptive error that maps to HTTP 409 Conflict at the API layer.
+-- Idempotency check is performed AFTER acquiring the FOR UPDATE lock to prevent TOCTOU races.
 CREATE OR REPLACE FUNCTION public.record_workflow_step_tx(
   p_session_id UUID,
   p_user_id UUID,
@@ -214,9 +224,12 @@ CREATE OR REPLACE FUNCTION public.record_workflow_step_tx(
   p_assistant_message TEXT,
   p_next_stage TEXT,
   p_next_mode TEXT,
+  p_expected_stage TEXT,
+  p_expected_mode TEXT,
   p_problem_statement TEXT DEFAULT NULL,
   p_suggested_questions JSONB DEFAULT '[]'::jsonb,
-  p_client_request_id TEXT DEFAULT NULL
+  p_client_request_id TEXT DEFAULT NULL,
+  p_request_hash TEXT DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -228,6 +241,8 @@ DECLARE
   v_user_msg_id UUID := gen_random_uuid();
   v_ast_msg_id UUID := gen_random_uuid();
   v_result JSONB;
+  v_existing_payload JSONB;
+  v_existing_hash TEXT;
 BEGIN
   -- Strict caller identity validation (defense-in-depth):
   -- If invoked within a Supabase auth JWT context (e.g. PostgREST), ensure caller cannot spoof p_user_id
@@ -235,18 +250,7 @@ BEGIN
     RAISE EXCEPTION 'Forbidden: caller auth.uid (%) does not match target p_user_id (%)', auth.uid(), p_user_id;
   END IF;
 
-  -- 1. Idempotency check if client_request_id is provided
-  IF p_client_request_id IS NOT NULL AND length(p_client_request_id) > 0 THEN
-    SELECT response_payload INTO v_result
-    FROM public.workflow_idempotency_keys
-    WHERE client_request_id = p_client_request_id AND user_id = p_user_id;
-
-    IF v_result IS NOT NULL THEN
-      RETURN v_result;
-    END IF;
-  END IF;
-
-  -- 2. Verify session ownership with exclusive lock to serialize concurrent transitions
+  -- 1. Verify session ownership with exclusive lock to serialize concurrent transitions
   SELECT * INTO v_session
   FROM public.thinking_sessions
   WHERE id = p_session_id AND user_id = p_user_id
@@ -256,7 +260,37 @@ BEGIN
     RAISE EXCEPTION 'Unauthorized or session not found: %', p_session_id;
   END IF;
 
-  -- 3. Insert user message if provided
+  -- 2. Optimistic concurrency control: compare expected state against locked row
+  -- This prevents two concurrent requests from both advancing the session.
+  IF v_session.current_stage != p_expected_stage THEN
+    RAISE EXCEPTION 'CONFLICT: expected stage "%" but session is at "%". Reload the session.',
+      p_expected_stage, v_session.current_stage;
+  END IF;
+
+  IF v_session.current_mode != p_expected_mode THEN
+    RAISE EXCEPTION 'CONFLICT: expected mode "%" but session is at "%". Reload the session.',
+      p_expected_mode, v_session.current_mode;
+  END IF;
+
+  -- 3. Idempotency check AFTER lock acquisition (prevents TOCTOU race)
+  IF p_client_request_id IS NOT NULL AND length(p_client_request_id) > 0 THEN
+    SELECT response_payload, request_hash INTO v_existing_payload, v_existing_hash
+    FROM public.workflow_idempotency_keys
+    WHERE user_id = p_user_id
+      AND session_id = p_session_id
+      AND client_request_id = p_client_request_id;
+
+    IF v_existing_payload IS NOT NULL THEN
+      -- Enforce payload consistency: reject if same key is reused with different content
+      IF p_request_hash IS NOT NULL AND v_existing_hash IS NOT NULL AND p_request_hash != v_existing_hash THEN
+        RAISE EXCEPTION 'Idempotency key reuse violation: request_id "%" was previously used with different payload',
+          p_client_request_id;
+      END IF;
+      RETURN v_existing_payload;
+    END IF;
+  END IF;
+
+  -- 4. Insert user message if provided
   IF p_user_message IS NOT NULL AND length(trim(p_user_message)) > 0 THEN
     INSERT INTO public.session_messages (id, session_id, role, content, mode)
     VALUES (v_user_msg_id, p_session_id, 'user', trim(p_user_message), v_session.current_mode);
@@ -264,11 +298,11 @@ BEGIN
     v_user_msg_id := NULL;
   END IF;
 
-  -- 4. Insert assistant message
+  -- 5. Insert assistant message
   INSERT INTO public.session_messages (id, session_id, role, content, mode, suggested_questions)
   VALUES (v_ast_msg_id, p_session_id, 'assistant', p_assistant_message, p_next_mode, p_suggested_questions);
 
-  -- 5. Update session stage, mode, and problem_statement in the same transaction
+  -- 6. Update session stage, mode, and problem_statement in the same transaction
   UPDATE public.thinking_sessions
   SET current_mode = p_next_mode,
       current_stage = p_next_stage,
@@ -276,7 +310,7 @@ BEGIN
       updated_at = timezone('utc'::text, now())
   WHERE id = p_session_id AND user_id = p_user_id;
 
-  -- 6. Build response payload
+  -- 7. Build response payload
   v_result := jsonb_build_object(
     'sessionId', p_session_id,
     'userMessageId', v_user_msg_id,
@@ -286,11 +320,11 @@ BEGIN
     'isIdempotentReplay', false
   );
 
-  -- 7. Persist idempotency record
+  -- 8. Persist idempotency record (scoped to user + session + request)
   IF p_client_request_id IS NOT NULL AND length(p_client_request_id) > 0 THEN
-    INSERT INTO public.workflow_idempotency_keys (client_request_id, session_id, user_id, response_payload)
-    VALUES (p_client_request_id, p_session_id, p_user_id, jsonb_set(v_result, '{isIdempotentReplay}', 'true'::jsonb))
-    ON CONFLICT (client_request_id) DO NOTHING;
+    INSERT INTO public.workflow_idempotency_keys (user_id, session_id, client_request_id, request_hash, response_payload)
+    VALUES (p_user_id, p_session_id, p_client_request_id, COALESCE(p_request_hash, ''), jsonb_set(v_result, '{isIdempotentReplay}', 'true'::jsonb))
+    ON CONFLICT (user_id, session_id, client_request_id) DO NOTHING;
   END IF;
 
   RETURN v_result;
@@ -299,10 +333,10 @@ $$;
 
 -- 8. Explicit Privilege Restrictions for SECURITY DEFINER RPC
 -- Revoke execution from PUBLIC, anon, and authenticated; grant exclusively to service_role
-REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) FROM anon;
-REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) FROM authenticated;
-GRANT EXECUTE ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) TO service_role;
+REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT) FROM anon;
+REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT) TO service_role;
 
 -- Restrict workflow_idempotency_keys table from anonymous / unprivileged roles
 REVOKE ALL ON TABLE public.workflow_idempotency_keys FROM PUBLIC;

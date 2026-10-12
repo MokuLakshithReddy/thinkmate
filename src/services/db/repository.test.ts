@@ -358,6 +358,8 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
             assistantMessage: 'AI answer',
             nextStage: 'clarify_objective',
             nextMode: 'understand',
+            expectedStage: 'describe_problem',
+            expectedMode: 'understand',
           },
           'user-abc'
         );
@@ -406,6 +408,8 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
         assistantMessage: 'Test response',
         nextStage: 'clarify_objective',
         nextMode: 'understand',
+        expectedStage: 'describe_problem',
+        expectedMode: 'understand',
         clientRequestId,
       },
       'user-idem'
@@ -421,6 +425,8 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
         assistantMessage: 'Test response duplicate',
         nextStage: 'clarify_objective',
         nextMode: 'understand',
+        expectedStage: 'describe_problem',
+        expectedMode: 'understand',
         clientRequestId,
       },
       'user-idem'
@@ -489,6 +495,8 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
             assistantMessage: 'test',
             nextStage: 'describe_problem',
             nextMode: 'understand',
+            expectedStage: 'describe_problem',
+            expectedMode: 'understand',
           },
           '00000000-0000-0000-0000-000000000002'
         );

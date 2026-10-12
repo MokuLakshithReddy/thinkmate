@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
-import { ShieldCheck, Database, Trash2, Cpu, Check, Lock } from 'lucide-react';
+import { ShieldCheck, Database, Trash2, Cpu, Check, Lock, AlertTriangle } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -27,6 +27,7 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<'local' | 'all' | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [wipeError, setWipeError] = useState<string | null>(null);
 
   const handleSave = () => {
     if (typeof window !== 'undefined') {
@@ -43,6 +44,7 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
 
   const handleClearLocal = async () => {
     setIsDeleting(true);
+    setWipeError(null);
     try {
       await onClearAllData({ wipeCloud: false });
       setConfirmDelete(null);
@@ -54,20 +56,64 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
 
   const handleWipeAll = async () => {
     setIsDeleting(true);
-    try {
-      if (authToken.trim()) {
-        await fetch('/api/sessions?all=true', {
+    setWipeError(null);
+
+    let cloudDeleteSucceeded = false;
+    let localDeleteSucceeded = false;
+
+    // Step 1: Attempt cloud deletion and verify the response
+    if (authToken.trim()) {
+      try {
+        const response = await fetch('/api/sessions?all=true', {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${authToken.trim()}` },
-        }).catch((err) => console.warn('Cloud wipe error:', err));
+        });
+
+        if (response.ok) {
+          cloudDeleteSucceeded = true;
+        } else {
+          // Read server error message for actionable feedback
+          const errorBody = await response.json().catch(() => ({}));
+          const serverMessage = errorBody.error || `Server returned status ${response.status}`;
+          setWipeError(`Cloud deletion failed: ${serverMessage}. Your cloud sessions are still intact. Please try again or check your connection.`);
+          setIsDeleting(false);
+          // Do NOT clear local state or close modal — retain everything
+          return;
+        }
+      } catch (networkErr) {
+        setWipeError(
+          'Cloud deletion failed: unable to reach the server. Your cloud sessions and local data have not been modified. Please check your network connection and try again.'
+        );
+        setIsDeleting(false);
+        return;
       }
+    } else {
+      // No auth token — no cloud data to delete, skip
+      cloudDeleteSucceeded = true;
+    }
+
+    // Step 2: Clear local state only after cloud deletion confirms
+    try {
       await onClearAllData({ wipeCloud: true });
+      localDeleteSucceeded = true;
+    } catch (localErr) {
+      console.error('Local data clear failed:', localErr);
+      setWipeError(
+        'Cloud sessions were deleted, but clearing local data failed. Please try clearing browser storage manually.'
+      );
+      setIsDeleting(false);
+      return;
+    }
+
+    // Step 3: Full success — clear credentials and close
+    if (cloudDeleteSucceeded && localDeleteSucceeded) {
       setAuthToken('');
       setConfirmDelete(null);
+      setWipeError(null);
       onClose();
-    } finally {
-      setIsDeleting(false);
     }
+
+    setIsDeleting(false);
   };
 
   return (
@@ -129,6 +175,17 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
           </div>
         </div>
 
+        {/* Wipe Error Banner */}
+        {wipeError && (
+          <div className="p-3 bg-rose-950/50 rounded-xl border border-rose-800/60 flex items-start gap-2.5">
+            <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+            <div className="text-xs text-rose-300">
+              <span className="font-semibold block mb-0.5">Data Wipe Error</span>
+              <p className="text-[11px] text-rose-400/90">{wipeError}</p>
+            </div>
+          </div>
+        )}
+
         {/* Save Settings */}
         <div className="flex items-center justify-between pt-2">
           <Button variant="primary" size="sm" onClick={handleSave} className="text-xs">
@@ -159,7 +216,7 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setConfirmDelete(null)}
+                  onClick={() => { setConfirmDelete(null); setWipeError(null); }}
                   disabled={isDeleting}
                   className="h-7 text-xs"
                 >
@@ -181,7 +238,7 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setConfirmDelete(null)}
+                  onClick={() => { setConfirmDelete(null); setWipeError(null); }}
                   disabled={isDeleting}
                   className="h-7 text-xs"
                 >
@@ -193,7 +250,7 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setConfirmDelete('local')}
+                  onClick={() => { setConfirmDelete('local'); setWipeError(null); }}
                   className="text-xs text-slate-400 hover:text-slate-200"
                   title="Remove local draft sessions and cached browser data"
                 >
@@ -202,7 +259,7 @@ export function SettingsModal({ isOpen, onClose, onClearAllData }: SettingsModal
                 <Button
                   variant="danger"
                   size="sm"
-                  onClick={() => setConfirmDelete('all')}
+                  onClick={() => { setConfirmDelete('all'); setWipeError(null); }}
                   className="text-xs"
                   title="Permanently delete all cloud sessions from Supabase and clear local credentials"
                 >

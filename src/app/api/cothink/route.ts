@@ -10,7 +10,8 @@ import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 /**
  * Main Co-Thinker Stage Progression Endpoint.
  * Strictly requires authentication and an authoritative database-persisted session.
- * Enforces server-side transition guardrails, authoritative message history, and fails closed on DB failures.
+ * Enforces server-side transition guardrails, optimistic concurrency control,
+ * authoritative message history, and fails closed on DB failures.
  */
 const CoThinkRequestSchema = z.object({
   sessionId: z.string().min(1, 'Session ID is required for authenticated workflow execution'),
@@ -119,10 +120,13 @@ export async function POST(req: NextRequest) {
     }
 
     // 3. Authoritative stage alignment:
+    // The persisted session stage is the single source of truth.
     // Requested processing stage must match current active stage (or welcome -> describe_problem on kickoff)
     const currentStage =
       session.currentStage ||
       WorkflowStateMachine.deriveCurrentStage(session.currentMode, dbMessages.length);
+
+    const currentMode = session.currentMode;
 
     const isAllowedProcessingStage =
       step === currentStage || (currentStage === 'welcome' && step === 'describe_problem');
@@ -185,22 +189,40 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 7. Atomically persist user message, assistant message, stage transition, and problemStatement
+    // 7. Atomically persist with optimistic concurrency control.
+    // Pass the expected (pre-read) stage and mode so the RPC can detect concurrent mutations
+    // under the FOR UPDATE lock and reject stale requests.
     const nextMode = WorkflowStateMachine.getModeForStage(result.nextStep);
     try {
-      await getRepository().recordWorkflowStep(
+      const writeResult = await getRepository().recordWorkflowStep(
         {
           sessionId,
           userMessage: userMessage.trim() ? userMessage : undefined,
           assistantMessage: result.message,
           nextStage: result.nextStep,
           nextMode,
+          expectedStage: currentStage as CoThinkerStep,
+          expectedMode: currentMode,
           problemStatement: activeProblem,
           suggestedQuestions: result.options?.map((o) => o.label) || [],
           clientRequestId,
         },
         authUser.id
       );
+
+      // Handle concurrency conflict: another request already advanced the session
+      if (writeResult.isConflict) {
+        // Reload the authoritative session state for the client
+        const freshSession = await getRepository().getSession(sessionId, authUser.id);
+        return NextResponse.json(
+          {
+            error: 'Session state has changed since your request was sent. Please reload the session.',
+            currentStage: freshSession?.currentStage || currentStage,
+            currentMode: freshSession?.currentMode || currentMode,
+          },
+          { status: 409 }
+        );
+      }
     } catch (persistErr: unknown) {
       console.error('Critical database persistence failure during workflow transition:', persistErr);
       // Fail closed: never return success if database persistence fails

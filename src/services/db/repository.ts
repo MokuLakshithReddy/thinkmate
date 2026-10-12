@@ -8,6 +8,8 @@ export interface RecordWorkflowStepParams {
   assistantMessage: string;
   nextStage: CoThinkerStep;
   nextMode: ThinkingMode;
+  expectedStage: CoThinkerStep;
+  expectedMode: ThinkingMode;
   problemStatement?: string;
   suggestedQuestions?: string[];
   clientRequestId?: string;
@@ -19,6 +21,7 @@ export interface RecordWorkflowStepResult {
   assistantMessageId: string;
   nextStage: CoThinkerStep;
   nextMode: ThinkingMode;
+  isConflict?: boolean;
 }
 
 export interface ThinkingRepository {
@@ -36,9 +39,31 @@ export interface ThinkingRepository {
   deleteInsight(id: string, userId: string): Promise<void>;
 }
 
+/**
+ * Generates a deterministic hash for idempotency payload consistency enforcement.
+ * Ensures the same clientRequestId cannot be reused with different message content.
+ */
+function computeRequestHash(params: RecordWorkflowStepParams): string {
+  const payload = `${params.sessionId}:${params.userMessage || ''}:${params.nextStage}:${params.nextMode}`;
+  // Simple FNV-1a-like hash for fast deterministic fingerprinting
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < payload.length; i++) {
+    hash ^= payload.charCodeAt(i);
+    hash = (hash * 0x01000193) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+/**
+ * Whether the current runtime is considered production.
+ * In production, the non-transactional fallback is disabled (fail closed).
+ */
+function isProductionRuntime(): boolean {
+  return process.env.NODE_ENV === 'production' || process.env.FAIL_CLOSED_WORKFLOW === 'true';
+}
+
 export class SupabaseThinkingRepository implements ThinkingRepository {
   private client: SupabaseClient;
-  public static idempotencyCache = new Map<string, RecordWorkflowStepResult>();
 
   constructor(customClient?: SupabaseClient) {
     this.client = customClient || getServiceSupabaseClient();
@@ -210,16 +235,16 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
   }
 
   /**
-   * Records a complete workflow step atomically with transactional compensation.
-   * Ensures user message, assistant message, and session stage/mode update are committed together.
-   * If any step fails, rolls back newly inserted messages so partial conversation history is never left.
-  private static idempotencyCache = new Map<string, RecordWorkflowStepResult>();
-
-  /**
    * Records a complete workflow step atomically with transactional database execution.
-   * Leverages PostgreSQL RPC `record_workflow_step_tx` with row-level locking for true transactional guarantees.
-   * If RPC is unavailable (e.g. mock test environment), executes client-coordinated write with rollback compensation.
-   * Fully deduplicates retried requests via clientRequestId.
+   * Leverages PostgreSQL RPC `record_workflow_step_tx` with:
+   *   - Row-level FOR UPDATE locking for serialized transitions
+   *   - Optimistic concurrency control via expectedStage/expectedMode comparison
+   *   - Post-lock idempotency check to prevent TOCTOU races
+   *   - Payload consistency enforcement on idempotency keys
+   *
+   * In production, fails closed if the transactional RPC is unavailable.
+   * The non-transactional compensating fallback is restricted to explicitly
+   * non-production environments (test doubles, local development).
    */
   async recordWorkflowStep(
     params: RecordWorkflowStepParams,
@@ -229,54 +254,98 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       throw new Error('Mandatory authorization failure: userId is required to record workflow step');
     }
 
-    // Idempotency deduplication check
-    if (params.clientRequestId && SupabaseThinkingRepository.idempotencyCache.has(params.clientRequestId)) {
-      return SupabaseThinkingRepository.idempotencyCache.get(params.clientRequestId)!;
-    }
+    const requestHash = params.clientRequestId ? computeRequestHash(params) : null;
 
-    // 1. First attempt true PostgreSQL atomic transaction via RPC if client supports rpc
+    // 1. Attempt true PostgreSQL atomic transaction via RPC
     if (this.client && typeof (this.client as unknown as Record<string, unknown>).rpc === 'function') {
-      try {
-        const { data: rpcData, error: rpcError } = await this.client.rpc(
-          'record_workflow_step_tx',
-          {
-            p_session_id: params.sessionId,
-            p_user_id: userId,
-            p_user_message: params.userMessage?.trim() || null,
-            p_assistant_message: params.assistantMessage,
-            p_next_stage: params.nextStage,
-            p_next_mode: params.nextMode,
-            p_problem_statement: params.problemStatement || null,
-            p_suggested_questions: params.suggestedQuestions || [],
-            p_client_request_id: params.clientRequestId || null,
-          }
-        );
-
-        if (!rpcError && rpcData) {
-          const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
-          if (row) {
-            const res: RecordWorkflowStepResult = {
-              sessionId: row.sessionId || row.session_id || params.sessionId,
-              userMessageId: row.userMessageId || row.user_message_id,
-              assistantMessageId: row.assistantMessageId || row.assistant_message_id,
-              nextStage: row.nextStage || row.next_stage || params.nextStage,
-              nextMode: row.nextMode || row.next_mode || params.nextMode,
-            };
-            if (params.clientRequestId) {
-              SupabaseThinkingRepository.idempotencyCache.set(params.clientRequestId, res);
-            }
-            return res;
-          }
+      const { data: rpcData, error: rpcError } = await this.client.rpc(
+        'record_workflow_step_tx',
+        {
+          p_session_id: params.sessionId,
+          p_user_id: userId,
+          p_user_message: params.userMessage?.trim() || null,
+          p_assistant_message: params.assistantMessage,
+          p_next_stage: params.nextStage,
+          p_next_mode: params.nextMode,
+          p_expected_stage: params.expectedStage,
+          p_expected_mode: params.expectedMode,
+          p_problem_statement: params.problemStatement || null,
+          p_suggested_questions: params.suggestedQuestions || [],
+          p_client_request_id: params.clientRequestId || null,
+          p_request_hash: requestHash,
         }
-      } catch {
-        // Fall back to client-coordinated rollback if RPC is not deployed in test environment
+      );
+
+      if (rpcError) {
+        // Map CONFLICT exceptions from RPC to a structured conflict result
+        if (rpcError.message && rpcError.message.includes('CONFLICT:')) {
+          const conflictResult: RecordWorkflowStepResult = {
+            sessionId: params.sessionId,
+            assistantMessageId: '',
+            nextStage: params.nextStage,
+            nextMode: params.nextMode,
+            isConflict: true,
+          };
+          return conflictResult;
+        }
+        if (
+          rpcError.message &&
+          (rpcError.message.includes('Forbidden') ||
+            rpcError.message.includes('Unauthorized') ||
+            rpcError.message.includes('not found'))
+        ) {
+          throw new Error('Session not found or unauthorized');
+        }
+        // Re-throw all other RPC errors (auth failures, constraint violations, etc.)
+        throw new Error(`Workflow RPC failed: ${rpcError.message}`);
       }
+
+      if (rpcData) {
+        const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+        if (row) {
+          return {
+            sessionId: row.sessionId || row.session_id || params.sessionId,
+            userMessageId: row.userMessageId || row.user_message_id,
+            assistantMessageId: row.assistantMessageId || row.assistant_message_id,
+            nextStage: row.nextStage || row.next_stage || params.nextStage,
+            nextMode: row.nextMode || row.next_mode || params.nextMode,
+          };
+        }
+      }
+
+      // RPC returned no data and no error — treat as unexpected failure
+      throw new Error('Workflow RPC returned empty result');
     }
 
-    // 2. Verify caller owns the session
+    // 2. Production fail-closed: refuse to use non-transactional fallback
+    if (isProductionRuntime()) {
+      throw new Error(
+        'FATAL: Transactional RPC record_workflow_step_tx is not available. ' +
+        'Non-transactional fallback is disabled in production to prevent partial state corruption. ' +
+        'Ensure the migration has been applied and the RPC is executable by service_role.'
+      );
+    }
+
+    // 3. Non-production fallback: compensating writes for test environments only
+    console.warn(
+      '[WARN] Using non-transactional compensating fallback for recordWorkflowStep. ' +
+      'This path is disabled in production (NODE_ENV=production or FAIL_CLOSED_WORKFLOW=true).'
+    );
+
     const session = await this.getSession(params.sessionId, userId);
     if (!session) {
       throw new Error('Session not found or unauthorized');
+    }
+
+    // Concurrency check in fallback path (best-effort, not serialized)
+    if (params.expectedStage && session.currentStage !== params.expectedStage) {
+      return {
+        sessionId: params.sessionId,
+        assistantMessageId: '',
+        nextStage: params.nextStage,
+        nextMode: params.nextMode,
+        isConflict: true,
+      };
     }
 
     const createdMessageIds: string[] = [];
@@ -284,7 +353,7 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
     try {
       let userMessageId: string | undefined = undefined;
 
-      // 3. Persist user message if provided
+      // Persist user message if provided
       if (params.userMessage && params.userMessage.trim()) {
         userMessageId = crypto.randomUUID();
         const { error: userErr } = await this.client.from('session_messages').insert({
@@ -302,7 +371,7 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
         createdMessageIds.push(userMessageId);
       }
 
-      // 4. Persist assistant message
+      // Persist assistant message
       const assistantMessageId = crypto.randomUUID();
       const { error: astErr } = await this.client.from('session_messages').insert({
         id: assistantMessageId,
@@ -319,7 +388,7 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       }
       createdMessageIds.push(assistantMessageId);
 
-      // 5. Update session stage, mode, and problemStatement
+      // Update session stage, mode, and problemStatement
       const sessionUpdate: Record<string, unknown> = {
         current_mode: params.nextMode,
         current_stage: params.nextStage,
@@ -339,19 +408,13 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
         throw new Error(`Failed to commit workflow state: ${updateErr.message}`);
       }
 
-      const result: RecordWorkflowStepResult = {
+      return {
         sessionId: params.sessionId,
         userMessageId,
         assistantMessageId,
         nextStage: params.nextStage,
         nextMode: params.nextMode,
       };
-
-      if (params.clientRequestId) {
-        SupabaseThinkingRepository.idempotencyCache.set(params.clientRequestId, result);
-      }
-
-      return result;
     } catch (workflowErr) {
       // Compensate: Delete any inserted messages to prevent corrupting conversation history
       for (const msgId of createdMessageIds) {
