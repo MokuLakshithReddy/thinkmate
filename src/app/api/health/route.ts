@@ -62,7 +62,12 @@ export async function GET(req: NextRequest) {
     version: '0.1.0',
   };
 
-  const httpStatus = isReadiness && overallReadiness === 'unavailable' ? 503 : 200;
+  // Production Readiness Rule:
+  // When readiness is probed, ALL required dependencies (database and AI provider) must be fully ready.
+  // Any degraded or unavailable state returns HTTP 503 Service Unavailable.
+  // Standard liveness probe (without ?readiness=true) returns HTTP 200 to indicate process health.
+  const isHealthyReadiness = overallReadiness === 'ready';
+  const httpStatus = isReadiness ? (isHealthyReadiness ? 200 : 503) : 200;
 
   return NextResponse.json(status, { status: httpStatus });
 }

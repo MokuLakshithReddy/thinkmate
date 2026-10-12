@@ -8,6 +8,8 @@ import { POST as thinkStreamPost } from './think/stream/route';
 import { POST as workflowTransitionPost } from './workflow/transition/route';
 import { POST as demoCoThinkPost } from './demo/cothink/route';
 import { GET as healthGet } from './health/route';
+import { checkRateLimitAsync, MemoryRateLimitStore } from '@/lib/rate-limiter';
+import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 
 describe('API Security Boundaries & Authentication Enforcement', () => {
   test('POST /api/cothink rejects unauthenticated callers with 401', async () => {
@@ -15,6 +17,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        sessionId: 'test-session-1',
         step: 'welcome',
         userMessage: 'Hello',
       }),
@@ -94,5 +97,56 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     // Ensure no secrets leaked
     assert.strictEqual(json.dependencies.database.serviceKey, undefined);
     assert.strictEqual(json.dependencies.aiProvider.apiKey, undefined);
+  });
+
+  test('GET /api/health?readiness=true fails closed with 503 when dependencies are unconfigured', async () => {
+    const req = new NextRequest('http://localhost:3000/api/health?readiness=true', {
+      method: 'GET',
+    });
+
+    const res = await healthGet(req);
+    // In test environment without live credentials, readiness MUST return 503
+    assert.strictEqual(res.status, 503, 'Readiness should return 503 when unready');
+    const json = await res.json();
+    assert.strictEqual(json.liveness, 'up');
+    assert.notStrictEqual(json.readiness, 'ready');
+  });
+
+  test('Simultaneous rate limit requests atomic sliding window enforcement', async () => {
+    const testStore = new MemoryRateLimitStore();
+    const testKey = 'test-concurrent-user';
+    const limit = 5;
+
+    // Fire 8 concurrent requests simultaneously
+    const results = await Promise.all(
+      Array.from({ length: 8 }).map(() =>
+        checkRateLimitAsync(testKey, limit, 60000, testStore)
+      )
+    );
+
+    const allowedCount = results.filter((r) => r.allowed).length;
+    const blockedCount = results.filter((r) => !r.allowed).length;
+
+    assert.strictEqual(allowedCount, 5, 'Exactly 5 requests should be allowed');
+    assert.strictEqual(blockedCount, 3, 'Excess 3 requests should be rejected');
+  });
+
+  test('Server-side workflow state machine rejects illegal stage jumps', () => {
+    const illegalJump = WorkflowStateMachine.validateStageTransition('welcome', 'choose_action');
+    assert.strictEqual(illegalJump.allowed, false);
+    assert.ok(illegalJump.reason?.includes('Illegal workflow stage jump'));
+
+    const legalProgression = WorkflowStateMachine.validateStageTransition('describe_problem', 'clarify_objective');
+    assert.strictEqual(legalProgression.allowed, true);
+  });
+
+  test('Server-side stage derivation from database mode and message counts', () => {
+    assert.strictEqual(WorkflowStateMachine.deriveCurrentStage('understand', 0), 'welcome');
+    assert.strictEqual(WorkflowStateMachine.deriveCurrentStage('understand', 1), 'describe_problem');
+    assert.strictEqual(WorkflowStateMachine.deriveCurrentStage('understand', 4), 'clarify_objective');
+    assert.strictEqual(WorkflowStateMachine.deriveCurrentStage('explore', 2), 'explore_perspectives');
+    assert.strictEqual(WorkflowStateMachine.deriveCurrentStage('challenge', 2), 'challenge_assumptions');
+    assert.strictEqual(WorkflowStateMachine.deriveCurrentStage('decide', 2), 'summarize_insights');
+    assert.strictEqual(WorkflowStateMachine.deriveCurrentStage('act', 2), 'choose_action');
   });
 });

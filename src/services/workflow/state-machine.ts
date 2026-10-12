@@ -51,6 +51,14 @@ const ALLOWED_DIRECT_TRANSITIONS: Record<ThinkingMode, ThinkingMode[]> = {
   act: ['decide', 'understand', 'challenge'],
 };
 
+export const MODE_TO_DEFAULT_STAGE: Record<ThinkingMode, CoThinkerStep> = {
+  understand: 'describe_problem',
+  explore: 'explore_perspectives',
+  challenge: 'challenge_assumptions',
+  decide: 'summarize_insights',
+  act: 'choose_action',
+};
+
 export class WorkflowStateMachine {
   /**
    * Authoritatively checks if transitioning from one flowchart stage to another is legal.
@@ -68,6 +76,18 @@ export class WorkflowStateMachine {
       allowed: false,
       reason: `Illegal workflow stage jump from "${fromStep}" to "${toStep}". Stages must progress through the Co-Thinker reasoning pipeline.`,
     };
+  }
+
+  /**
+   * Derives current flowchart stage from persisted mode and previous message count.
+   */
+  static deriveCurrentStage(currentMode: ThinkingMode, messageCount: number): CoThinkerStep {
+    if (currentMode === 'understand') {
+      if (messageCount === 0) return 'welcome';
+      if (messageCount <= 2) return 'describe_problem';
+      return 'clarify_objective';
+    }
+    return MODE_TO_DEFAULT_STAGE[currentMode] || 'welcome';
   }
 
   /**

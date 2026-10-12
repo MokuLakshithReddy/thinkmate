@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint src/",
-    "test": "tsx --test \"src/**/*.test.ts\""
+    "test": "tsx --test"
   },
   "dependencies": {
     "@google/genai": "^2.28.0",

@@ -174,14 +174,12 @@ export default function Home() {
     setFutureSnapshots([]); // Clear redo stack on new action
 
     // If user clicked resume on a verified session, load its title
-    let activeSessionTitle: string | undefined;
     if (selectedOptionId?.startsWith('resume_')) {
       const targetSessionId = selectedOptionId.replace('resume_', '');
       const sessions = getStoredSessions();
       const match = sessions.find((s) => s.id === targetSessionId);
       if (match) {
         currentSessionIdRef.current = match.id;
-        activeSessionTitle = match.title;
         setProblemStatement(match.problemStatement || '');
       }
     }
@@ -215,13 +213,12 @@ export default function Home() {
         method: 'POST',
         headers,
         body: JSON.stringify({
+          sessionId: currentSessionIdRef.current,
           step: currentStep,
           userMessage: text,
           selectedOptionId,
           problemStatement: currentStep === 'describe_problem' ? text : problemStatement,
           clarifiedObjective,
-          activeSessionTitle,
-          history: nextHistory.map((m) => ({ role: m.role, content: m.content })),
         }),
       });
 

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { CoThinkEngine } from '@/services/ai/cothink-engine';
 import { CoThinkerStep } from '@/types';
-import { checkRateLimit, getClientIp } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, getClientIp } from '@/lib/rate-limiter';
 
 /**
  * Isolated Unauthenticated Demo Endpoint.
@@ -43,8 +43,8 @@ const engine = new CoThinkEngine();
 export async function POST(req: NextRequest) {
   try {
     const clientIp = getClientIp(req);
-    // Rate Limiting: 20 req/min for anonymous demo traffic
-    const rateCheck = checkRateLimit(`demo:ip:${clientIp}`, 20, 60000);
+    // Rate Limiting: 20 req/min for anonymous demo traffic with distributed support
+    const rateCheck = await checkRateLimitAsync(`demo:ip:${clientIp}`, 20, 60000);
 
     if (!rateCheck.allowed) {
       return NextResponse.json(

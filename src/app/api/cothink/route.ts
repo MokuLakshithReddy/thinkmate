@@ -3,17 +3,17 @@ import { z } from 'zod';
 import { CoThinkEngine } from '@/services/ai/cothink-engine';
 import { CoThinkerStep } from '@/types';
 import { getAuthenticatedUser } from '@/lib/server-auth';
-import { checkRateLimit } from '@/lib/rate-limiter';
+import { checkRateLimitAsync } from '@/lib/rate-limiter';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 
 /**
  * Main Co-Thinker Stage Progression Endpoint.
- * Strictly requires authentication to prevent unauthenticated resource consumption.
- * Validates session ownership and authoritatively updates persisted workflow mode.
+ * Strictly requires authentication and an authoritative database-persisted session.
+ * Enforces server-side transition guardrails, authoritative message history, and fails closed on DB failures.
  */
 const CoThinkRequestSchema = z.object({
-  sessionId: z.string().max(100).optional(),
+  sessionId: z.string().min(1, 'Session ID is required for authenticated workflow execution'),
   step: z.enum([
     'welcome',
     'describe_problem',
@@ -30,15 +30,6 @@ const CoThinkRequestSchema = z.object({
   userName: z.string().max(50).default('Thinker'),
   problemStatement: z.string().max(8000, 'Problem statement exceeds 8,000 character limit').optional(),
   clarifiedObjective: z.string().max(4000, 'Clarified objective exceeds 4,000 character limit').optional(),
-  history: z
-    .array(
-      z.object({
-        role: z.enum(['user', 'assistant']),
-        content: z.string().max(8000),
-      })
-    )
-    .max(50, 'Conversation history cannot exceed 50 turns')
-    .default([]),
 });
 
 const engine = new CoThinkEngine(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
@@ -62,8 +53,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Rate Limiting: 60 req/min for authenticated user
-    const rateCheck = checkRateLimit(`usr:${authUser.id}`, 60, 60000);
+    // Rate Limiting: 60 req/min for authenticated user with distributed support
+    const rateCheck = await checkRateLimitAsync(`usr:${authUser.id}`, 60, 60000);
     if (!rateCheck.allowed) {
       return NextResponse.json(
         { error: 'Rate limit exceeded. Please wait a moment before sending more messages.' },
@@ -92,40 +83,138 @@ export async function POST(req: NextRequest) {
       userName,
       problemStatement,
       clarifiedObjective,
-      history,
     } = parsed.data;
 
-    // Verify session ownership if sessionId is supplied
-    if (sessionId) {
-      const session = await getRepository().getSession(sessionId, authUser.id);
-      if (!session) {
+    // 1. Authoritatively retrieve the persisted session owned by caller
+    let session;
+    try {
+      session = await getRepository().getSession(sessionId, authUser.id);
+    } catch (sessionFetchErr: unknown) {
+      console.error('Database error fetching session:', sessionFetchErr);
+      return NextResponse.json(
+        { error: 'Database service unavailable while verifying session' },
+        { status: 503 }
+      );
+    }
+
+    if (!session) {
+      return NextResponse.json(
+        { error: 'Unauthorized or non-existent session' },
+        { status: 404 }
+      );
+    }
+
+    // 2. Authoritatively retrieve message history from database
+    let dbMessages;
+    try {
+      dbMessages = await getRepository().getMessages(sessionId, authUser.id);
+    } catch (msgErr: unknown) {
+      console.error('Failed to retrieve authoritative session messages:', msgErr);
+      return NextResponse.json(
+        { error: 'Database service unavailable while retrieving session messages' },
+        { status: 503 }
+      );
+    }
+
+    // 3. Derive current stage and validate stage transition server-side
+    const currentStage = WorkflowStateMachine.deriveCurrentStage(session.currentMode, dbMessages.length);
+    const transitionValidation = WorkflowStateMachine.validateStageTransition(currentStage, step as CoThinkerStep);
+
+    if (!transitionValidation.allowed) {
+      return NextResponse.json(
+        {
+          error: 'Invalid workflow stage transition',
+          reason: transitionValidation.reason,
+          currentStage,
+          requestedStage: step,
+        },
+        { status: 400 }
+      );
+    }
+
+    // 4. Persist incoming user message into the database
+    if (userMessage.trim()) {
+      try {
+        await getRepository().addMessage(
+          {
+            id: crypto.randomUUID(),
+            sessionId,
+            role: 'user',
+            content: userMessage,
+            mode: WorkflowStateMachine.getModeForStage(step as CoThinkerStep),
+            createdAt: new Date().toISOString(),
+          },
+          authUser.id
+        );
+      } catch (saveUserMsgErr: unknown) {
+        console.error('Failed to persist user message:', saveUserMsgErr);
         return NextResponse.json(
-          { error: 'Unauthorized or non-existent session' },
-          { status: 404 }
+          { error: 'Database error: failed to record message before thinking execution' },
+          { status: 503 }
         );
       }
     }
 
+    // 5. Build authoritative conversation history from database
+    const authoritativeHistory = dbMessages.map((m) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    }));
+
+    // 6. Process stage via AI thinking engine
     const result = await engine.processStep(
       {
         userName: authUser.email || userName,
         step: step as CoThinkerStep,
-        problemStatement,
+        problemStatement: problemStatement || session.problemStatement,
         clarifiedObjective,
-        conversationHistory: history,
+        conversationHistory: authoritativeHistory,
+        activeSessionTitle: session.title,
       },
       userMessage,
       selectedOptionId
     );
 
-    // If caller owns this session, authoritatively update currentMode in the database
-    if (sessionId && result.nextStep) {
-      try {
-        const nextMode = WorkflowStateMachine.getModeForStage(result.nextStep);
-        await getRepository().updateSession(sessionId, { currentMode: nextMode }, authUser.id);
-      } catch (err: unknown) {
-        console.warn('Could not persist stage update to session:', err);
-      }
+    if (result.executionMode === 'error') {
+      return NextResponse.json(
+        { error: result.message, executionMode: 'error' },
+        { status: 503 }
+      );
+    }
+
+    // 7. Authoritatively persist the assistant message and update session's workflow mode
+    const nextMode = WorkflowStateMachine.getModeForStage(result.nextStep);
+    try {
+      await getRepository().addMessage(
+        {
+          id: crypto.randomUUID(),
+          sessionId,
+          role: 'assistant',
+          content: result.message,
+          mode: nextMode,
+          suggestedQuestions: result.options?.map((o) => o.label) || [],
+          createdAt: new Date().toISOString(),
+        },
+        authUser.id
+      );
+
+      await getRepository().updateSession(
+        sessionId,
+        {
+          currentMode: nextMode,
+          problemStatement: problemStatement || session.problemStatement,
+        },
+        authUser.id
+      );
+    } catch (persistErr: unknown) {
+      console.error('Critical database persistence failure during workflow transition:', persistErr);
+      // Fail closed: never return success if database persistence fails
+      return NextResponse.json(
+        {
+          error: 'Database persistence error: failed to commit workflow transition to session',
+        },
+        { status: 503 }
+      );
     }
 
     return NextResponse.json(result);
