@@ -124,3 +124,10 @@ npm run build
 - **Row Level Security**: Database rows are protected with PostgreSQL RLS policies in `supabase/migrations/20261012000000_thinkmate_schema.sql`.
 - **Ownership Verification**: Endpoints enforce user ownership to block insecure direct-object references (IDOR).
 - **Data Erasure**: Built-in "Wipe All Data" action in Settings allows users to clear all sessions and insights immediately.
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
+
