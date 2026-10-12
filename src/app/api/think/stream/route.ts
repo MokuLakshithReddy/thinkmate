@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { ThinkStreamRequestSchema } from '@/services/ai/types';
 import { GeminiThinkingService } from '@/services/ai/gemini-service';
 
-
+/**
+ * SSE Token Streaming Endpoint for Freeform Generative Thinking.
+ * Used for streaming live tokens, granular insight extraction, and mode switches
+ * when streaming response chunks are requested.
+ */
 export async function POST(req: NextRequest) {
   try {
     const json = await req.json();
@@ -34,11 +38,11 @@ export async function POST(req: NextRequest) {
           // Done signal
           controller.enqueue(encoder.encode('data: [DONE]\n\n'));
           controller.close();
-        } catch (streamErr: any) {
+        } catch (streamErr: unknown) {
           console.error('Error during streaming execution:', streamErr);
           const errPayload = `data: ${JSON.stringify({
             type: 'error',
-            error: streamErr?.message || 'Streaming failure',
+            error: (streamErr as Error)?.message || 'Streaming failure',
           })}\n\n`;
           controller.enqueue(encoder.encode(errPayload));
           controller.close();
@@ -54,10 +58,10 @@ export async function POST(req: NextRequest) {
         'X-Accel-Buffering': 'no',
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('API route error in /api/think/stream:', error);
     return NextResponse.json(
-      { error: error?.message || 'Internal server error processing thinking stream' },
+      { error: (error as Error)?.message || 'Internal server error processing thinking stream' },
       { status: 500 }
     );
   }

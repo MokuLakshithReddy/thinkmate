@@ -1,4 +1,4 @@
-import { ThinkingSession, SessionMessage, Insight, ThinkingMode, InsightStatus } from '@/types';
+import { ThinkingSession, SessionMessage, Insight } from '@/types';
 
 const SESSIONS_KEY = 'thinkmate_sessions_v1';
 const MESSAGES_KEY = 'thinkmate_messages_v1';
@@ -9,12 +9,7 @@ export function getStoredSessions(): ThinkingSession[] {
   try {
     const raw = localStorage.getItem(SESSIONS_KEY);
     if (!raw) {
-      // Seed default demo session
-      const defaultSession = createInitialDemoSession();
-      saveStoredSessions([defaultSession.session]);
-      saveStoredMessages({ [defaultSession.session.id]: defaultSession.messages });
-      saveStoredInsights({ [defaultSession.session.id]: defaultSession.insights });
-      return [defaultSession.session];
+      return [];
     }
     return JSON.parse(raw);
   } catch {
@@ -123,7 +118,7 @@ export function clearAllLocalData(): void {
   localStorage.removeItem('thinkmate_model');
 }
 
-function createInitialDemoSession(): {
+export function createInitialDemoSession(): {
   session: ThinkingSession;
   messages: SessionMessage[];
   insights: Insight[];

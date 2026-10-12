@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
-import { Key, ShieldCheck, Database, Trash2, Cpu, Check, AlertTriangle } from 'lucide-react';
+import { Key, ShieldCheck, Database, Trash2, Cpu, Check } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;

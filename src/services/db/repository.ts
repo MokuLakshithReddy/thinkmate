@@ -1,4 +1,5 @@
-import { ThinkingSession, SessionMessage, Insight } from '@/types';
+import { SupabaseClient } from '@supabase/supabase-js';
+import { ThinkingSession, SessionMessage, Insight, ThinkingMode, InsightCategory, InsightStatus } from '@/types';
 import { getServiceSupabaseClient } from './supabase-client';
 
 export interface ThinkingRepository {
@@ -7,15 +8,19 @@ export interface ThinkingRepository {
   createSession(session: ThinkingSession): Promise<ThinkingSession>;
   updateSession(id: string, updates: Partial<ThinkingSession>, userId?: string): Promise<ThinkingSession>;
   deleteSession(id: string, userId?: string): Promise<void>;
-  getMessages(sessionId: string): Promise<SessionMessage[]>;
-  addMessage(message: SessionMessage): Promise<SessionMessage>;
-  getInsights(sessionId: string): Promise<Insight[]>;
-  upsertInsight(insight: Insight): Promise<Insight>;
-  deleteInsight(id: string): Promise<void>;
+  getMessages(sessionId: string, userId?: string): Promise<SessionMessage[]>;
+  addMessage(message: SessionMessage, userId?: string): Promise<SessionMessage>;
+  getInsights(sessionId: string, userId?: string): Promise<Insight[]>;
+  upsertInsight(insight: Insight, userId?: string): Promise<Insight>;
+  deleteInsight(id: string, userId?: string): Promise<void>;
 }
 
 export class SupabaseThinkingRepository implements ThinkingRepository {
-  private client = getServiceSupabaseClient();
+  private client: SupabaseClient;
+
+  constructor(customClient?: SupabaseClient) {
+    this.client = customClient || getServiceSupabaseClient();
+  }
 
   async getSessions(userId?: string): Promise<ThinkingSession[]> {
     let query = this.client
@@ -29,29 +34,33 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
 
     const { data, error } = await query;
     if (error) {
-      console.warn('Supabase query error, falling back:', error.message);
-      return [];
+      console.error('Supabase query error in getSessions:', error.message);
+      throw new Error(`Failed to retrieve sessions: ${error.message}`);
     }
 
-    return (data || []).map((row: any) => ({
-      id: row.id,
-      userId: row.user_id || 'anonymous',
-      title: row.title,
-      problemStatement: row.problem_statement,
-      currentMode: row.current_mode,
-      status: row.status,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
+    return (data || []).map((row: Record<string, unknown>) => ({
+      id: row.id as string,
+      userId: (row.user_id as string) || 'anonymous',
+      title: row.title as string,
+      problemStatement: row.problem_statement as string,
+      currentMode: row.current_mode as ThinkingMode,
+      status: row.status as 'active' | 'archived',
+      createdAt: row.created_at as string,
+      updatedAt: row.updated_at as string,
     }));
   }
 
   async getSession(id: string, userId?: string): Promise<ThinkingSession | null> {
-    let query = this.client.from('thinking_sessions').select('*').eq('id', id).maybeSingle();
+    const query = this.client.from('thinking_sessions').select('*').eq('id', id).maybeSingle();
 
     const { data, error } = await query;
-    if (error || !data) return null;
+    if (error) {
+      console.error(`Failed to fetch session ${id}:`, error.message);
+      throw new Error(`Database error retrieving session: ${error.message}`);
+    }
+    if (!data) return null;
 
-    // Ownership check (prevent IDOR)
+    // Strict ownership verification (prevent IDOR)
     if (userId && data.user_id && data.user_id !== userId) {
       throw new Error('Unauthorized session access: ownership verification failed');
     }
@@ -88,7 +97,7 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
 
     if (error) {
       console.error('Failed to create session in Supabase:', error.message);
-      return session;
+      throw new Error(`Failed to persist new session: ${error.message}`);
     }
 
     return {
@@ -112,23 +121,27 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       }
     }
 
-    const payload: any = {
+    const payload: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
     };
     if (updates.title) payload.title = updates.title;
     if (updates.currentMode) payload.current_mode = updates.currentMode;
     if (updates.status) payload.status = updates.status;
 
-    const { data, error } = await this.client
+    let query = this.client
       .from('thinking_sessions')
       .update(payload)
-      .eq('id', id)
-      .select()
-      .single();
+      .eq('id', id);
+
+    if (userId) {
+      query = query.eq('user_id', userId);
+    }
+
+    const { data, error } = await query.select().single();
 
     if (error) {
       console.error('Failed to update session:', error.message);
-      return { id, ...updates } as ThinkingSession;
+      throw new Error(`Failed to update session: ${error.message}`);
     }
 
     return {
@@ -145,36 +158,62 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
 
   async deleteSession(id: string, userId?: string): Promise<void> {
     if (userId) {
-      await this.getSession(id, userId); // verify ownership first
+      const session = await this.getSession(id, userId);
+      if (!session) {
+        throw new Error('Session not found or unauthorized');
+      }
     }
 
-    const { error } = await this.client.from('thinking_sessions').delete().eq('id', id);
+    let query = this.client.from('thinking_sessions').delete().eq('id', id);
+    if (userId) {
+      query = query.eq('user_id', userId);
+    }
+
+    const { error } = await query;
     if (error) {
       console.error('Failed to delete session:', error.message);
+      throw new Error(`Failed to delete session: ${error.message}`);
     }
   }
 
-  async getMessages(sessionId: string): Promise<SessionMessage[]> {
+  async getMessages(sessionId: string, userId?: string): Promise<SessionMessage[]> {
+    if (userId) {
+      const session = await this.getSession(sessionId, userId);
+      if (!session) {
+        throw new Error('Session not found or unauthorized');
+      }
+    }
+
     const { data, error } = await this.client
       .from('session_messages')
       .select('*')
       .eq('session_id', sessionId)
       .order('created_at', { ascending: true });
 
-    if (error) return [];
+    if (error) {
+      console.error('Failed to get session messages:', error.message);
+      throw new Error(`Failed to fetch messages: ${error.message}`);
+    }
 
-    return (data || []).map((row: any) => ({
-      id: row.id,
-      sessionId: row.session_id,
-      role: row.role,
-      content: row.content,
-      mode: row.mode,
-      suggestedQuestions: row.suggested_questions,
-      createdAt: row.created_at,
+    return (data || []).map((row: Record<string, unknown>) => ({
+      id: row.id as string,
+      sessionId: row.session_id as string,
+      role: row.role as 'user' | 'assistant' | 'system',
+      content: row.content as string,
+      mode: row.mode as ThinkingMode,
+      suggestedQuestions: row.suggested_questions as string[] | undefined,
+      createdAt: row.created_at as string,
     }));
   }
 
-  async addMessage(message: SessionMessage): Promise<SessionMessage> {
+  async addMessage(message: SessionMessage, userId?: string): Promise<SessionMessage> {
+    if (userId) {
+      const session = await this.getSession(message.sessionId, userId);
+      if (!session) {
+        throw new Error('Session not found or unauthorized');
+      }
+    }
+
     const payload = {
       session_id: message.sessionId,
       role: message.role,
@@ -191,8 +230,8 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       .single();
 
     if (error) {
-      console.warn('Failed to insert message into Supabase:', error.message);
-      return message;
+      console.error('Failed to insert message into Supabase:', error.message);
+      throw new Error(`Failed to persist session message: ${error.message}`);
     }
 
     return {
@@ -201,30 +240,48 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
     };
   }
 
-  async getInsights(sessionId: string): Promise<Insight[]> {
+  async getInsights(sessionId: string, userId?: string): Promise<Insight[]> {
+    if (userId) {
+      const session = await this.getSession(sessionId, userId);
+      if (!session) {
+        throw new Error('Session not found or unauthorized');
+      }
+    }
+
     const { data, error } = await this.client
       .from('session_insights')
       .select('*')
       .eq('session_id', sessionId)
       .order('created_at', { ascending: true });
 
-    if (error) return [];
+    if (error) {
+      console.error('Failed to get session insights:', error.message);
+      throw new Error(`Failed to fetch insights: ${error.message}`);
+    }
 
-    return (data || []).map((row: any) => ({
-      id: row.id,
-      sessionId: row.session_id,
-      category: row.category,
-      title: row.title,
-      content: row.content,
-      status: row.status,
-      metadata: row.metadata,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
+    return (data || []).map((row: Record<string, unknown>) => ({
+      id: row.id as string,
+      sessionId: row.session_id as string,
+      category: row.category as InsightCategory,
+      title: row.title as string,
+      content: row.content as string,
+      status: row.status as InsightStatus,
+      metadata: row.metadata as Record<string, unknown> | undefined,
+      createdAt: row.created_at as string,
+      updatedAt: row.updated_at as string,
     }));
   }
 
-  async upsertInsight(insight: Insight): Promise<Insight> {
+  async upsertInsight(insight: Insight, userId?: string): Promise<Insight> {
+    if (userId) {
+      const session = await this.getSession(insight.sessionId, userId);
+      if (!session) {
+        throw new Error('Session not found or unauthorized');
+      }
+    }
+
     const payload = {
+      id: insight.id.includes('-') && insight.id.length === 36 ? insight.id : undefined,
       session_id: insight.sessionId,
       category: insight.category,
       title: insight.title,
@@ -237,12 +294,13 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
 
     const { data, error } = await this.client
       .from('session_insights')
-      .upsert(payload)
+      .upsert(payload, { onConflict: 'id' })
       .select()
       .single();
 
     if (error) {
-      return insight;
+      console.error('Failed to upsert insight:', error.message);
+      throw new Error(`Failed to save insight: ${error.message}`);
     }
 
     return {
@@ -251,7 +309,29 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
     };
   }
 
-  async deleteInsight(id: string): Promise<void> {
-    await this.client.from('session_insights').delete().eq('id', id);
+  async deleteInsight(id: string, userId?: string): Promise<void> {
+    if (userId) {
+      // Find the insight to check its session ownership
+      const { data: item, error: fetchErr } = await this.client
+        .from('session_insights')
+        .select('session_id')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (fetchErr || !item) {
+        throw new Error('Insight not found or unauthorized');
+      }
+
+      const session = await this.getSession(item.session_id, userId);
+      if (!session) {
+        throw new Error('Insight not found or unauthorized');
+      }
+    }
+
+    const { error } = await this.client.from('session_insights').delete().eq('id', id);
+    if (error) {
+      console.error('Failed to delete insight:', error.message);
+      throw new Error(`Failed to delete insight: ${error.message}`);
+    }
   }
 }

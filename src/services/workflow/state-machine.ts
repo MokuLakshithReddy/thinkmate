@@ -88,8 +88,10 @@ export class WorkflowStateMachine {
 
     if (!isDirect && !context?.userOverride) {
       return {
-        allowed: true,
-        warning: `Unconventional transition from ${fromMode} to ${toMode}. Co-reasoning focus will adapt accordingly.`,
+        allowed: false,
+        reason: `Direct transition from ${fromMode} to ${toMode} is disallowed by state machine guardrails.`,
+        warning: `Unconventional transition from ${fromMode} to ${toMode} requires explicit user override.`,
+        recommendedMode: this.getNextRecommendedMode(fromMode, context?.insights),
       };
     }
 

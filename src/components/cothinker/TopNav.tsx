@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { ArrowLeft, Cloud, Share2, Sparkles, Settings, User } from 'lucide-react';
+import { ArrowLeft, Cloud, Share2, Sparkles, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface TopNavProps {
@@ -17,7 +17,7 @@ export function TopNav({
   onViewModeChange,
   onOpenSettings,
   onShare,
-  userName = 'Lakshith Reddy',
+  userName = 'Thinker',
 }: TopNavProps) {
   return (
     <header className="h-14 bg-white border-b border-slate-200 px-4 flex items-center justify-between sticky top-0 z-50 select-none shadow-xs">

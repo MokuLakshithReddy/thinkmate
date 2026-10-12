@@ -11,7 +11,6 @@ import {
   Undo2,
   Redo2,
   CheckCircle2,
-  ArrowDown,
   RotateCcw,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -19,9 +18,20 @@ import { cn } from '@/lib/utils';
 interface WorkflowCanvasProps {
   currentStep: CoThinkerStep;
   isLoading?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
 }
 
-export function WorkflowCanvas({ currentStep, isLoading }: WorkflowCanvasProps) {
+export function WorkflowCanvas({
+  currentStep,
+  isLoading,
+  onUndo,
+  onRedo,
+  canUndo = false,
+  canRedo = false,
+}: WorkflowCanvasProps) {
   const [zoom, setZoom] = useState(100);
 
   const stepsList: CoThinkerStep[] = [
@@ -48,7 +58,7 @@ export function WorkflowCanvas({ currentStep, isLoading }: WorkflowCanvasProps) 
         }}
       />
 
-      {/* Main Node Card: Co-think Assistant (Exactly matching Image 1) */}
+      {/* Main Node Card: Co-think Assistant */}
       <div
         className="relative z-10 transition-transform duration-200"
         style={{ transform: `scale(${zoom / 100})` }}
@@ -67,7 +77,11 @@ export function WorkflowCanvas({ currentStep, isLoading }: WorkflowCanvasProps) 
             </div>
 
             {/* Spinner indicator */}
-            <div className="h-4 w-4 rounded-full border-2 border-purple-500 border-t-transparent animate-spin" />
+            {isLoading ? (
+              <div className="h-4 w-4 rounded-full border-2 border-purple-600 border-t-transparent animate-spin" />
+            ) : (
+              <div className="h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-200" />
+            )}
           </div>
 
           {/* Card Instructions */}
@@ -85,7 +99,7 @@ export function WorkflowCanvas({ currentStep, isLoading }: WorkflowCanvasProps) 
           </div>
         </div>
 
-        {/* Visual Flowchart Overview (Mini Map Matching Image 2) */}
+        {/* Visual Flowchart Overview */}
         <div className="mt-6 w-80 md:w-88 bg-white/90 backdrop-blur-xs border border-slate-200 rounded-xl p-3 shadow-xs">
           <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center justify-between">
             <span>Active Thinking Pipeline</span>
@@ -95,7 +109,7 @@ export function WorkflowCanvas({ currentStep, isLoading }: WorkflowCanvasProps) 
           </div>
 
           <div className="space-y-1">
-            {stepsList.map((stepKey, idx) => {
+            {stepsList.map((stepKey) => {
               const info = WORKFLOW_STAGES[stepKey];
               const isCurrent = currentStep === stepKey;
               const isPassed = currentStageInfo.number > info.number;
@@ -131,17 +145,17 @@ export function WorkflowCanvas({ currentStep, isLoading }: WorkflowCanvasProps) 
           {/* Loopback Note */}
           <div className="mt-2 text-[10px] text-slate-500 bg-slate-50 rounded p-1.5 flex items-center gap-1.5">
             <RotateCcw className="h-3 w-3 text-purple-600 shrink-0" />
-            <span>If understanding is incomplete at Step 6, workflow loops back to Explore.</span>
+            <span>If understanding is incomplete at Step 6, workflow loops back to Step 4.</span>
           </div>
         </div>
       </div>
 
-      {/* Canvas Zoom & Controls Bar (Bottom Right, matching Image 1) */}
+      {/* Canvas Zoom & Controls Bar */}
       <div className="absolute bottom-4 right-4 z-20 flex flex-col items-center bg-white border border-slate-200 rounded-lg p-1 shadow-md">
         <button
           onClick={() => setZoom(100)}
           className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer"
-          title="Fit to screen"
+          title="Fit to 100%"
         >
           <Maximize2 className="h-3.5 w-3.5" />
         </button>
@@ -161,16 +175,18 @@ export function WorkflowCanvas({ currentStep, isLoading }: WorkflowCanvasProps) 
         </button>
         <div className="w-full h-px bg-slate-200 my-0.5" />
         <button
-          onClick={() => {}}
-          className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors cursor-pointer"
-          title="Undo"
+          onClick={onUndo}
+          disabled={!canUndo}
+          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+          title="Undo to previous step"
         >
           <Undo2 className="h-3.5 w-3.5" />
         </button>
         <button
-          onClick={() => {}}
-          className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors cursor-pointer"
-          title="Redo"
+          onClick={onRedo}
+          disabled={!canRedo}
+          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+          title="Redo to next step"
         >
           <Redo2 className="h-3.5 w-3.5" />
         </button>

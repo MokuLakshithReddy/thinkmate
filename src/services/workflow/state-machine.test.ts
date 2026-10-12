@@ -1,7 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
 import { WorkflowStateMachine } from './state-machine';
-import { Insight } from '@/types';
 
 describe('Workflow State Machine & Guardrails', () => {
   test('Permits standard forward transition from Understand to Explore', () => {
@@ -64,5 +63,12 @@ describe('Workflow State Machine & Guardrails', () => {
       userOverride: true,
     });
     assert.strictEqual(res.allowed, true);
+  });
+
+  test('Strictly denies unconventional transitions without explicit user override', () => {
+    // Act directly to Explore is not an allowed direct transition in state machine
+    const res = WorkflowStateMachine.validateTransition('act', 'explore');
+    assert.strictEqual(res.allowed, false);
+    assert.ok(res.reason?.includes('disallowed by state machine guardrails'));
   });
 });

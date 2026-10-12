@@ -20,7 +20,7 @@ describe('Persistence, Security & Ownership Verification', () => {
     };
 
     // Override client get method for hermetic test
-    (repo as any).client = {
+    (repo as unknown as { client: unknown }).client = {
       from: () => ({
         select: () => ({
           eq: () => ({
@@ -59,7 +59,10 @@ describe('Persistence, Security & Ownership Verification', () => {
   test('Session update enforces ownership validation before applying modifications', async () => {
     const repo = new SupabaseThinkingRepository();
 
-    (repo as any).getSession = async (id: string, userId?: string) => {
+    (repo as unknown as { getSession: unknown }).getSession = async (
+      id: string,
+      userId?: string
+    ) => {
       if (userId === 'attacker-user') {
         throw new Error('Session not found or unauthorized');
       }
@@ -69,6 +72,38 @@ describe('Persistence, Security & Ownership Verification', () => {
     await assert.rejects(
       async () => {
         await repo.updateSession('sess-1', { title: 'Hijacked' }, 'attacker-user');
+      },
+      {
+        message: 'Session not found or unauthorized',
+      }
+    );
+  });
+
+  test('Messages and insights retrieval rejects unauthorized access to foreign sessions', async () => {
+    const repo = new SupabaseThinkingRepository();
+
+    (repo as unknown as { getSession: unknown }).getSession = async (
+      id: string,
+      userId?: string
+    ) => {
+      if (userId === 'foreign-user') {
+        throw new Error('Session not found or unauthorized');
+      }
+      return { id, userId: 'owner-user', title: 'Private' };
+    };
+
+    await assert.rejects(
+      async () => {
+        await repo.getMessages('sess-private', 'foreign-user');
+      },
+      {
+        message: 'Session not found or unauthorized',
+      }
+    );
+
+    await assert.rejects(
+      async () => {
+        await repo.getInsights('sess-private', 'foreign-user');
       },
       {
         message: 'Session not found or unauthorized',

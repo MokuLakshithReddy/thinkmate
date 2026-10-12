@@ -12,7 +12,6 @@ import {
   GitBranch,
   ShieldAlert,
   ListTodo,
-  HelpCircle,
   Target,
 } from 'lucide-react';
 

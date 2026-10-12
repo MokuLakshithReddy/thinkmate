@@ -3,7 +3,7 @@
 import React from 'react';
 import { ThinkingSession, ThinkingMode, THINKING_MODES } from '@/types';
 import { Button } from '@/components/ui/Button';
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/Card';
+import { Card, CardTitle } from '@/components/ui/Card';
 import {
   Brain,
   Plus,

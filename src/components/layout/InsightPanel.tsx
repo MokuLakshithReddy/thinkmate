@@ -6,7 +6,6 @@ import { Button } from '@/components/ui/Button';
 import {
   Lightbulb,
   CheckCircle2,
-  XCircle,
   HelpCircle,
   Layers,
   ShieldAlert,
@@ -23,7 +22,7 @@ interface InsightPanelProps {
   insights: Insight[];
   onUpdateInsightStatus: (id: string, status: InsightStatus, notes?: string) => void;
   onEditInsight: (id: string, updated: Partial<Insight>) => void;
-  onDeleteInsight: (id: string) => void;
+  onDeleteInsight?: (id: string) => void;
 }
 
 export function InsightPanel({
@@ -31,7 +30,6 @@ export function InsightPanel({
   insights,
   onUpdateInsightStatus,
   onEditInsight,
-  onDeleteInsight,
 }: InsightPanelProps) {
   const [activeTab, setActiveTab] = useState<InsightCategory | 'all'>('all');
   const [editingId, setEditingId] = useState<string | null>(null);

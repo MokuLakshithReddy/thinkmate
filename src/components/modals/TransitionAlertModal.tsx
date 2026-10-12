@@ -4,7 +4,7 @@ import React from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { ThinkingMode, THINKING_MODES } from '@/types';
-import { AlertCircle, ArrowRight, ShieldAlert } from 'lucide-react';
+import { ArrowRight, ShieldAlert } from 'lucide-react';
 
 interface TransitionAlertModalProps {
   isOpen: boolean;

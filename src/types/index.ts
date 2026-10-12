@@ -103,6 +103,9 @@ export interface ChatMessage {
   options?: ChoiceOption[];
   selectedOptionId?: string;
   timestamp: string;
+  executionMode?: 'gemini' | 'simulator' | 'error';
+  modelName?: string;
+  simulatedNotice?: string;
 }
 
 export interface PastProjectMemory {

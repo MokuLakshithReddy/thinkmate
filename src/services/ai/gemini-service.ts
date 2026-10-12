@@ -84,10 +84,11 @@ export class GeminiThinkingService implements ThinkingAIService {
 
       // Parse metadata block if captured
       this.parseAndEmitMetadata(jsonMetaBuffer || fullBuffer, request.currentMode, onEvent);
-    } catch (err: any) {
-      console.warn('Gemini API call encountered error, falling back to simulator:', err?.message || err);
+    } catch (err: unknown) {
+      const errMsg = (err as Error)?.message || String(err);
+      console.warn('Gemini API call encountered error, falling back to simulator:', errMsg);
       // If API fails (e.g. invalid key or network issue), fallback gracefully
-      await this.runSimulator(request, onEvent, err?.message);
+      await this.runSimulator(request, onEvent, errMsg);
     }
   }
 
@@ -116,7 +117,7 @@ export class GeminiThinkingService implements ThinkingAIService {
           questions: this.getDefaultQuestionsForMode(currentMode),
         });
       }
-    } catch (e) {
+    } catch {
       onEvent({
         type: 'questions',
         questions: this.getDefaultQuestionsForMode(currentMode),

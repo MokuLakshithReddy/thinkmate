@@ -3,6 +3,11 @@ import { z } from 'zod';
 import { CoThinkEngine } from '@/services/ai/cothink-engine';
 import { CoThinkerStep } from '@/types';
 
+/**
+ * Main Co-Thinker Stage Progression Endpoint.
+ * Powers the interactive dual-pane workflow UI through the 8 flowchart stages,
+ * returning structured step choices, stage transitions, and explicit execution mode stamping.
+ */
 const CoThinkRequestSchema = z.object({
   step: z.enum([
     'welcome',
@@ -17,7 +22,7 @@ const CoThinkRequestSchema = z.object({
   ]),
   userMessage: z.string().default(''),
   selectedOptionId: z.string().optional(),
-  userName: z.string().default('Lakshith Reddy'),
+  userName: z.string().default('Thinker'),
   problemStatement: z.string().optional(),
   clarifiedObjective: z.string().optional(),
   history: z
@@ -67,10 +72,10 @@ export async function POST(req: NextRequest) {
     );
 
     return NextResponse.json(result);
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('Co-think error:', err);
     return NextResponse.json(
-      { error: err?.message || 'Co-think processing failure' },
+      { error: (err as Error)?.message || 'Co-think processing failure' },
       { status: 500 }
     );
   }

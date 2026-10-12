@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import { ThinkingMode, THINKING_MODES } from '@/types';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
-import { Sparkles, HelpCircle } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface NewSessionModalProps {

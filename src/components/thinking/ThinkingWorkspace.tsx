@@ -10,9 +10,6 @@ import {
   User,
   Sparkles,
   Target,
-  ArrowRight,
-  ShieldCheck,
-  CheckCircle,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -24,7 +21,7 @@ interface ThinkingWorkspaceProps {
   suggestedQuestions: string[];
   options: Insight[];
   onSendMessage: (content: string) => void;
-  onSelectMode: (mode: ThinkingMode) => void;
+  onSelectMode?: (mode: ThinkingMode) => void;
   onUpdateInsightStatus: (id: string, status: InsightStatus) => void;
 }
 
@@ -36,7 +33,6 @@ export function ThinkingWorkspace({
   suggestedQuestions,
   options,
   onSendMessage,
-  onSelectMode,
   onUpdateInsightStatus,
 }: ThinkingWorkspaceProps) {
   const [input, setInput] = React.useState('');
