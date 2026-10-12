@@ -156,6 +156,8 @@ export class GeminiThinkingService implements ThinkingAIService {
           'Who is accountable for each milestone?',
           'What signal triggers an immediate rollback?',
         ];
+      default:
+        return [];
     }
   }
 

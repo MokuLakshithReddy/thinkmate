@@ -1,3 +1,133 @@
+// ==========================================
+// 1. Co-Thinker Flowchart Stages & Types (Images 1 & 2)
+// ==========================================
+
+export type CoThinkerStep =
+  | 'welcome'
+  | 'describe_problem'
+  | 'clarify_objective'
+  | 'break_subproblems'
+  | 'explore_perspectives'
+  | 'challenge_assumptions'
+  | 'check_satisfaction'
+  | 'summarize_insights'
+  | 'choose_action';
+
+export interface WorkflowStageInfo {
+  step: CoThinkerStep;
+  number: number;
+  label: string;
+  shortDescription: string;
+  nodeInstruction: string;
+  memoryKey?: string;
+}
+
+export const WORKFLOW_STAGES: Record<CoThinkerStep, WorkflowStageInfo> = {
+  welcome: {
+    step: 'welcome',
+    number: 0,
+    label: 'Session Kickoff & Memory',
+    shortDescription: 'Retrieve past project memory or start a new problem.',
+    nodeInstruction: 'Act as a co-thinker: chat with the user to help them better understand the problem they are having. Use Memory to retrieve conversation history.',
+    memoryKey: 'Use Memory',
+  },
+  describe_problem: {
+    step: 'describe_problem',
+    number: 1,
+    label: 'User describes a problem',
+    shortDescription: 'Capture the core tension, situation, and dilemma.',
+    nodeInstruction: 'Listen attentively to the problem statement without offering quick solutions. Focus on deep understanding.',
+  },
+  clarify_objective: {
+    step: 'clarify_objective',
+    number: 2,
+    label: 'AI clarifies the objective',
+    shortDescription: 'Isolate what success looks like and the true underlying goal.',
+    nodeInstruction: 'Probe stated goals vs underlying needs. Ask targeted questions to clarify the exact target outcome.',
+  },
+  break_subproblems: {
+    step: 'break_subproblems',
+    number: 3,
+    label: 'Break problem into subproblems',
+    shortDescription: 'Deconstruct complexity into distinct manageable pillars.',
+    nodeInstruction: 'Decompose the user dilemma into 2-4 distinct subproblems or structural tensions.',
+  },
+  explore_perspectives: {
+    step: 'explore_perspectives',
+    number: 4,
+    label: 'Explore perspectives and evidence',
+    shortDescription: 'Analyze multiple angles: technical, user, business, risk, and facts.',
+    nodeInstruction: 'Identify distinct perspectives (user experience, technical debt, risk, business impact) and evaluate empirical evidence.',
+  },
+  challenge_assumptions: {
+    step: 'challenge_assumptions',
+    number: 5,
+    label: 'Challenge assumptions',
+    shortDescription: 'Surface unproven beliefs, blind spots, and single points of failure.',
+    nodeInstruction: 'Audit what the user takes for granted. Clearly label verified facts vs unproven assumptions.',
+  },
+  check_satisfaction: {
+    step: 'check_satisfaction',
+    number: 6,
+    label: 'User satisfied with understanding?',
+    shortDescription: 'Verify if understanding is complete before synthesizing.',
+    nodeInstruction: 'Ask the user if they feel the problem and perspectives are fully understood. If "Not yet", loop back to explore further.',
+  },
+  summarize_insights: {
+    step: 'summarize_insights',
+    number: 7,
+    label: 'Summarize insights and options',
+    shortDescription: 'Deliver structured synthesis: core dilemma, key insights, and options.',
+    nodeInstruction: 'Synthesize the clarified objective, verified facts, core assumptions, and viable strategic options.',
+  },
+  choose_action: {
+    step: 'choose_action',
+    number: 8,
+    label: 'User chooses next action',
+    shortDescription: 'Select concrete next step and execution plan.',
+    nodeInstruction: 'Present actionable next steps. Guide the user in locking in their immediate priority.',
+  },
+};
+
+export interface ChoiceOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'assistant' | 'user' | 'system';
+  content: string;
+  step: CoThinkerStep;
+  options?: ChoiceOption[];
+  selectedOptionId?: string;
+  timestamp: string;
+}
+
+export interface PastProjectMemory {
+  id: string;
+  title: string;
+  summary: string;
+  lastStep: CoThinkerStep;
+}
+
+export interface SessionMemoryState {
+  userName: string;
+  pastProjects: PastProjectMemory[];
+  currentProblem?: string;
+  clarifiedObjective?: string;
+  subproblems?: string[];
+  perspectives?: { title: string; description: string }[];
+  assumptions?: { text: string; isFact: boolean }[];
+  currentStep: CoThinkerStep;
+  progressPercent: number;
+}
+
+// ==========================================
+// 2. 5 Thinking Modes & Domain Types
+// ==========================================
+
 export type ThinkingMode = 'understand' | 'explore' | 'challenge' | 'decide' | 'act';
 
 export interface ModeConfig {
@@ -94,10 +224,10 @@ export interface Insight {
   content: string;
   status: InsightStatus;
   metadata?: {
-    isFact?: boolean; // For assumptions: fact vs assumption
-    tradeoffs?: string[]; // For options
-    risks?: string[]; // For options
-    milestone?: string; // For actions
+    isFact?: boolean;
+    tradeoffs?: string[];
+    risks?: string[];
+    milestone?: string;
     confidence?: number;
     userNotes?: string;
   };

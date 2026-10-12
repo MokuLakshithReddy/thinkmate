@@ -1,36 +1,13 @@
 @import "tailwindcss";
 
 :root {
-  --background: #090d16;
-  --surface: #101728;
-  --surface-raised: #162036;
-  --surface-subtle: #1c2842;
-  --border: #1e293b;
-  --border-subtle: #172033;
-  --foreground: #f1f5f9;
-  --foreground-muted: #94a3b8;
-  --foreground-dim: #64748b;
-  --accent-cyan: #38bdf8;
-  --accent-blue: #0284c7;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-surface: var(--surface);
-  --color-surface-raised: var(--surface-raised);
-  --color-surface-subtle: var(--surface-subtle);
-  --color-border: var(--border);
-  --color-border-subtle: var(--border-subtle);
-  --color-foreground: var(--foreground);
-  --color-foreground-muted: var(--foreground-muted);
-  --color-foreground-dim: var(--foreground-dim);
-  --color-accent-cyan: var(--accent-cyan);
-  --color-accent-blue: var(--accent-blue);
+  --background: #f8fafc;
+  --foreground: #0f172a;
 }
 
 body {
-  background-color: #090d16;
-  color: #f1f5f9;
+  background-color: #f8fafc;
+  color: #0f172a;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   overflow-x: hidden;
   min-height: 100vh;
@@ -38,39 +15,34 @@ body {
 
 /* Custom Scrollbars */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #090d16;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1e293b;
-  border-radius: 3px;
+  background: #cbd5e1;
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #334155;
+  background: #94a3b8;
 }
 
-/* Smooth transitions */
-* {
-  border-color: #1e293b;
-}
-
-.thinking-pulse {
-  animation: pulse-glow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
-
-@keyframes pulse-glow {
-  0%, 100% {
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
     opacity: 1;
-    box-shadow: 0 0 15px rgba(56, 189, 248, 0.2);
+    transform: translateY(0);
   }
-  50% {
-    opacity: 0.7;
-    box-shadow: 0 0 5px rgba(56, 189, 248, 0.05);
-  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.25s ease-out forwards;
 }

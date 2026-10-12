@@ -57,8 +57,8 @@ ${options
     (o) =>
       `### ${o.title} [Status: ${o.status}]
 ${o.content}
-${o.metadata?.tradeoffs?.length ? `**Trade-offs:**\n${o.metadata.tradeoffs.map((t) => `- ${t}`).join('\n')}` : ''}
-${o.metadata?.risks?.length ? `**Risks:**\n${o.metadata.risks.map((r) => `- ${r}`).join('\n')}` : ''}`
+${o.metadata?.tradeoffs?.length ? `**Trade-offs:**\n${o.metadata.tradeoffs.map((t: string) => `- ${t}`).join('\n')}` : ''}
+${o.metadata?.risks?.length ? `**Risks:**\n${o.metadata.risks.map((r: string) => `- ${r}`).join('\n')}` : ''}`
   )
   .join('\n\n') || 'None recorded yet.'}
 

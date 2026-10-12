@@ -71,7 +71,7 @@ export function OptionsMatrix({ options, onUpdateStatus, onSelectOption }: Optio
                       <ShieldAlert className="h-3 w-3" /> Key Trade-offs:
                     </span>
                     <ul className="list-disc list-inside mt-1 space-y-0.5 text-slate-400">
-                      {opt.metadata.tradeoffs.map((t, idx) => (
+                      {opt.metadata.tradeoffs.map((t: string, idx: number) => (
                         <li key={idx} className="line-clamp-2">
                           {t}
                         </li>
@@ -85,7 +85,7 @@ export function OptionsMatrix({ options, onUpdateStatus, onSelectOption }: Optio
                   <div className="mb-3 text-[11px] bg-slate-900/70 rounded-lg p-2 border border-slate-800">
                     <span className="font-semibold text-rose-400">Risks & Blindspots:</span>
                     <ul className="list-disc list-inside mt-1 space-y-0.5 text-slate-400">
-                      {opt.metadata.risks.map((r, idx) => (
+                      {opt.metadata.risks.map((r: string, idx: number) => (
                         <li key={idx} className="line-clamp-2">
                           {r}
                         </li>

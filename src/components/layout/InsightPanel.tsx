@@ -256,7 +256,7 @@ export function InsightPanel({
                       <div className="mt-2 text-[11px] bg-slate-900/60 rounded p-1.5 border border-slate-800/80">
                         <span className="font-semibold text-amber-400">Trade-offs:</span>
                         <ul className="list-disc list-inside mt-0.5 text-slate-400">
-                          {insight.metadata.tradeoffs.map((t, i) => (
+                          {insight.metadata.tradeoffs.map((t: string, i: number) => (
                             <li key={i}>{t}</li>
                           ))}
                         </ul>
@@ -267,7 +267,7 @@ export function InsightPanel({
                       <div className="mt-1 text-[11px] bg-slate-900/60 rounded p-1.5 border border-slate-800/80">
                         <span className="font-semibold text-rose-400">Risks:</span>
                         <ul className="list-disc list-inside mt-0.5 text-slate-400">
-                          {insight.metadata.risks.map((r, i) => (
+                          {insight.metadata.risks.map((r: string, i: number) => (
                             <li key={i}>{r}</li>
                           ))}
                         </ul>
