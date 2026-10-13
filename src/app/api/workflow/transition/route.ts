@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { ModeTransitionRequestSchema, WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { getAuthenticatedUser } from '@/lib/server-auth';
+import { readBoundedJson } from '@/lib/request-utils';
 
 let repositoryInstance: SupabaseThinkingRepository | null = null;
 function getRepository() {
@@ -13,15 +14,6 @@ function getRepository() {
 
 export async function POST(req: NextRequest) {
   try {
-    // 0. Bounded request size check at application layer (max 64KB)
-    const contentLength = req.headers.get('content-length');
-    if (contentLength && parseInt(contentLength, 10) > 65536) {
-      return NextResponse.json(
-        { error: 'Payload too large: request body exceeds 64KB limit' },
-        { status: 413 }
-      );
-    }
-
     const authUser = await getAuthenticatedUser(req);
     if (!authUser) {
       return NextResponse.json(
@@ -30,16 +22,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Explicitly catch malformed JSON and return 400 Bad Request
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch {
+    // 0. Enforce real streaming byte limits and catch malformed JSON
+    const bodyResult = await readBoundedJson(req, 65536);
+    if (bodyResult.error) {
       return NextResponse.json(
-        { error: 'Malformed JSON payload in request body' },
-        { status: 400 }
+        { error: bodyResult.error },
+        { status: bodyResult.status || 400 }
       );
     }
+    const body = bodyResult.data;
 
     const parsed = ModeTransitionRequestSchema.safeParse(body);
 
@@ -98,10 +89,13 @@ export async function POST(req: NextRequest) {
     });
 
     if (!validation.allowed) {
-      return NextResponse.json({
-        ...validation,
-        persistedMode: session.currentMode,
-      });
+      return NextResponse.json(
+        {
+          ...validation,
+          persistedMode: session.currentMode,
+        },
+        { status: 400 }
+      );
     }
 
     // Atomically execute transition under PostgreSQL row lock

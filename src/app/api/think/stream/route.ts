@@ -18,6 +18,8 @@ function getRepository() {
   return repositoryInstance;
 }
 
+import { readBoundedJson } from '@/lib/request-utils';
+
 export async function POST(req: NextRequest) {
   try {
     const authUser = await getAuthenticatedUser(req);
@@ -32,15 +34,6 @@ export async function POST(req: NextRequest) {
 
     // Rate Limiting: 40 req/min for authenticated user with distributed support
     const rateCheck = await checkRateLimitAsync(`stream:usr:${authUser.id}`, 40, 60000);
-    // 0. Bounded request size check at application layer (max 64KB)
-    const contentLength = req.headers.get('content-length');
-    if (contentLength && parseInt(contentLength, 10) > 65536) {
-      return NextResponse.json(
-        { error: 'Payload too large: request body exceeds 64KB limit' },
-        { status: 413 }
-      );
-    }
-
     if (!rateCheck.allowed) {
       return NextResponse.json(
         { error: 'Rate limit exceeded for streaming requests. Please wait a moment.' },
@@ -51,15 +44,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let json: unknown;
-    try {
-      json = await req.json();
-    } catch {
+    // 0. Enforce real streaming byte limits and catch malformed JSON
+    const bodyResult = await readBoundedJson(req, 65536);
+    if (bodyResult.error) {
       return NextResponse.json(
-        { error: 'Malformed JSON payload in request body' },
-        { status: 400 }
+        { error: bodyResult.error },
+        { status: bodyResult.status || 400 }
       );
     }
+    const json = bodyResult.data;
 
     const validation = ThinkStreamRequestSchema.safeParse(json);
 
@@ -88,26 +81,62 @@ export async function POST(req: NextRequest) {
 
     const aiService = new GeminiThinkingService(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
     const encoder = new TextEncoder();
+    let isAborted = false;
+    let isClosed = false;
 
     const stream = new ReadableStream({
       async start(controller) {
-        try {
-          await aiService.generateThinkingStream(requestData, (event) => {
-            const payload = `data: ${JSON.stringify(event)}\n\n`;
-            controller.enqueue(encoder.encode(payload));
-          });
+        const onAbort = () => {
+          isAborted = true;
+          if (!isClosed) {
+            isClosed = true;
+            try {
+              controller.close();
+            } catch {}
+          }
+        };
 
-          // Done signal
-          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-          controller.close();
+        if (req.signal.aborted) {
+          onAbort();
+          return;
+        }
+
+        req.signal.addEventListener('abort', onAbort);
+
+        try {
+          await aiService.generateThinkingStream(
+            requestData,
+            (event) => {
+              if (isAborted || isClosed || req.signal.aborted) return;
+              try {
+                const payload = `data: ${JSON.stringify(event)}\n\n`;
+                controller.enqueue(encoder.encode(payload));
+              } catch {}
+            },
+            req.signal
+          );
+
+          if (!isAborted && !isClosed) {
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            isClosed = true;
+            controller.close();
+          }
         } catch (streamErr: unknown) {
+          if (isAborted || req.signal.aborted) return;
           console.error('Error during streaming execution:', streamErr);
-          const errPayload = `data: ${JSON.stringify({
-            type: 'error',
-            error: 'Streaming generation encountered a temporary failure. Please retry.',
-          })}\n\n`;
-          controller.enqueue(encoder.encode(errPayload));
-          controller.close();
+          if (!isClosed) {
+            try {
+              const errPayload = `data: ${JSON.stringify({
+                type: 'error',
+                error: 'Streaming generation encountered a temporary failure. Please retry.',
+              })}\n\n`;
+              controller.enqueue(encoder.encode(errPayload));
+              isClosed = true;
+              controller.close();
+            } catch {}
+          }
+        } finally {
+          req.signal.removeEventListener('abort', onAbort);
         }
       },
     });

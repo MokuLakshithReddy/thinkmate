@@ -16,8 +16,10 @@ export class GeminiThinkingService implements ThinkingAIService {
 
   async generateThinkingStream(
     request: ThinkStreamRequest,
-    onEvent: (event: ThinkingStreamEvent) => void
+    onEvent: (event: ThinkingStreamEvent) => void,
+    abortSignal?: AbortSignal
   ): Promise<void> {
+    if (abortSignal?.aborted) return;
     const activeKey = this.defaultApiKey;
 
     if (!activeKey) {
@@ -29,7 +31,7 @@ export class GeminiThinkingService implements ThinkingAIService {
         return;
       }
       // If no API key is supplied in non-production, use the high-fidelity thinking simulator
-      await this.runSimulator(request, onEvent);
+      await this.runSimulator(request, onEvent, undefined, abortSignal);
       return;
     }
 
@@ -69,6 +71,9 @@ export class GeminiThinkingService implements ThinkingAIService {
       const markerPattern = /```json(?::thinkmate-meta)?/;
 
       for await (const chunk of responseStream) {
+        if (abortSignal?.aborted) {
+          break;
+        }
         const text = chunk.text;
         if (!text) continue;
 
@@ -83,7 +88,7 @@ export class GeminiThinkingService implements ThinkingAIService {
         if (match) {
           // Emitting tokens strictly before the fence
           const preMarker = pendingBuffer.slice(0, match.index);
-          if (preMarker) {
+          if (preMarker && !abortSignal?.aborted) {
             onEvent({ type: 'token', token: preMarker });
           }
           isCapturingJson = true;
@@ -92,7 +97,7 @@ export class GeminiThinkingService implements ThinkingAIService {
         } else {
           // If pending buffer exceeds maximum marker prefix length (30 chars), emit safe head
           const safeEmitLength = pendingBuffer.length - 30;
-          if (safeEmitLength > 0) {
+          if (safeEmitLength > 0 && !abortSignal?.aborted) {
             const safeToken = pendingBuffer.slice(0, safeEmitLength);
             onEvent({ type: 'token', token: safeToken });
             pendingBuffer = pendingBuffer.slice(safeEmitLength);
@@ -100,14 +105,21 @@ export class GeminiThinkingService implements ThinkingAIService {
         }
       }
 
+      if (abortSignal?.aborted) {
+        return;
+      }
+
       // Flush remaining non-marker text if any
-      if (!isCapturingJson && pendingBuffer) {
+      if (!isCapturingJson && pendingBuffer && !abortSignal?.aborted) {
         onEvent({ type: 'token', token: pendingBuffer });
       }
 
       // Parse metadata block if captured
-      this.parseAndEmitMetadata(jsonMetaBuffer || pendingBuffer, request.currentMode, onEvent);
+      if (!abortSignal?.aborted) {
+        this.parseAndEmitMetadata(jsonMetaBuffer || pendingBuffer, request.currentMode, onEvent);
+      }
     } catch (err: unknown) {
+      if (abortSignal?.aborted) return;
       const errMsg = (err as Error)?.message || String(err);
       console.warn('Gemini API call encountered error:', errMsg);
       if (process.env.NODE_ENV === 'production') {
@@ -118,7 +130,7 @@ export class GeminiThinkingService implements ThinkingAIService {
         return;
       }
       // In development or test environments, fallback to simulator with explicit warning
-      await this.runSimulator(request, onEvent, errMsg);
+      await this.runSimulator(request, onEvent, errMsg, abortSignal);
     }
   }
 
@@ -245,8 +257,10 @@ export class GeminiThinkingService implements ThinkingAIService {
   private async runSimulator(
     request: ThinkStreamRequest,
     onEvent: (event: ThinkingStreamEvent) => void,
-    notice?: string
+    notice?: string,
+    abortSignal?: AbortSignal
   ): Promise<void> {
+    if (abortSignal?.aborted) return;
     const mode = request.currentMode;
     const problem = request.problemStatement;
 
@@ -390,10 +404,12 @@ export class GeminiThinkingService implements ThinkingAIService {
     // Stream simulated response in chunks with natural pacing
     const tokens = responseMarkdown.split(' ');
     for (const word of tokens) {
+      if (abortSignal?.aborted) return;
       onEvent({ type: 'token', token: word + ' ' });
       await new Promise((res) => setTimeout(res, 12));
     }
 
+    if (abortSignal?.aborted) return;
     onEvent({ type: 'questions', questions });
     onEvent({ type: 'insights', insights });
   }

@@ -232,11 +232,12 @@ BEGIN
   -- 3. Transition rule verification (e.g. transitioning to 'act' requires an accepted decision)
   IF p_to_mode = 'act' THEN
     SELECT EXISTS (
-      SELECT 1 FROM public.session_insights
-      WHERE session_id = p_session_id
-        AND user_id = p_user_id
-        AND category = 'decision'
-        AND status = 'accepted'
+      SELECT 1 FROM public.session_insights i
+      JOIN public.thinking_sessions s ON s.id = i.session_id
+      WHERE i.session_id = p_session_id
+        AND s.user_id = p_user_id
+        AND i.category = 'decision'
+        AND i.status = 'accepted'
     ) INTO v_has_accepted_decision;
 
     IF NOT v_has_accepted_decision THEN

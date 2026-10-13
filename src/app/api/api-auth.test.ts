@@ -11,6 +11,7 @@ import { GET as healthGet } from './health/route';
 import { checkRateLimitAsync, MemoryRateLimitStore } from '@/lib/rate-limiter';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
+import { SupabaseThinkingRepository } from '@/services/db/repository';
 
 describe('API Security Boundaries & Authentication Enforcement', () => {
   test('POST /api/cothink rejects unauthenticated callers with 401', async () => {
@@ -320,6 +321,128 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       });
       const streamRes = await thinkStreamPost(badJsonStream);
       assert.strictEqual(streamRes.status, 400);
+    } finally {
+      supabase.auth.getUser = origGetUser;
+    }
+  });
+
+  test('POST /api/workflow/transition returns 400 Bad Request on invalid transition requests', async () => {
+    const origGetUser = supabase.auth.getUser;
+    const origGetSession = SupabaseThinkingRepository.prototype.getSession;
+    const origGetInsights = SupabaseThinkingRepository.prototype.getInsights;
+
+    // @ts-expect-error test stub
+    supabase.auth.getUser = async (token: string) => {
+      if (token === 'mock-token-test') {
+        return { data: { user: { id: 'usr-test', email: 'test@example.com' } }, error: null };
+      }
+      return origGetUser.call(supabase.auth, token);
+    };
+
+    // @ts-expect-error test stub
+    SupabaseThinkingRepository.prototype.getSession = async (id: string, userId: string) => {
+      if (id === 'sess-transition-test' && userId === 'usr-test') {
+        return {
+          id: 'sess-transition-test',
+          userId: 'usr-test',
+          title: 'Testing Transition',
+          currentMode: 'understand',
+          currentStage: 'describe_problem',
+          status: 'active',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+      }
+      return null;
+    };
+
+    SupabaseThinkingRepository.prototype.getInsights = async () => [];
+
+    try {
+      // 1. Direct illegal jump: understand -> act without decisions
+      const invalidJumpReq = new NextRequest('http://localhost:3000/api/workflow/transition', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: JSON.stringify({
+          sessionId: 'sess-transition-test',
+          fromMode: 'understand',
+          toMode: 'act',
+        }),
+      });
+
+      const res = await workflowTransitionPost(invalidJumpReq);
+      assert.strictEqual(res.status, 400, 'Must return HTTP 400 Bad Request for disallowed transition');
+      const json = await res.json();
+      assert.strictEqual(json.allowed, false);
+      assert.ok(json.reason, 'Must include explanation of why transition was rejected');
+
+      // 2. Mode mismatch: requested fromMode doesn't match active database mode
+      const mismatchReq = new NextRequest('http://localhost:3000/api/workflow/transition', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: JSON.stringify({
+          sessionId: 'sess-transition-test',
+          fromMode: 'challenge',
+          toMode: 'explore',
+        }),
+      });
+
+      const mismatchRes = await workflowTransitionPost(mismatchReq);
+      assert.strictEqual(mismatchRes.status, 400, 'Must return 400 for fromMode mismatch with session state');
+    } finally {
+      supabase.auth.getUser = origGetUser;
+      SupabaseThinkingRepository.prototype.getSession = origGetSession;
+      SupabaseThinkingRepository.prototype.getInsights = origGetInsights;
+    }
+  });
+
+  test('POST /api/cothink and POST /api/think/stream reject streaming bodies exceeding 64KB with 413', async () => {
+    const origGetUser = supabase.auth.getUser;
+    // @ts-expect-error test stub
+    supabase.auth.getUser = async (token: string) => {
+      if (token === 'mock-token-test') {
+        return { data: { user: { id: 'usr-test', email: 'test@example.com' } }, error: null };
+      }
+      return origGetUser.call(supabase.auth, token);
+    };
+
+    try {
+      // Oversized payload (70KB)
+      const oversizedPayload = JSON.stringify({
+        sessionId: 'sess-test',
+        step: 'describe_problem',
+        userMessage: 'A'.repeat(70000),
+      });
+
+      const cothinkReq = new NextRequest('http://localhost:3000/api/cothink', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: oversizedPayload,
+      });
+
+      const cothinkRes = await coThinkPost(cothinkReq);
+      assert.strictEqual(cothinkRes.status, 413, 'Must return 413 Payload Too Large');
+
+      const streamReq = new NextRequest('http://localhost:3000/api/think/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: oversizedPayload,
+      });
+
+      const streamRes = await thinkStreamPost(streamReq);
+      assert.strictEqual(streamRes.status, 413, 'Must return 413 Payload Too Large');
     } finally {
       supabase.auth.getUser = origGetUser;
     }

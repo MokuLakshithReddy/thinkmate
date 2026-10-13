@@ -6,6 +6,7 @@ import { getAuthenticatedUser } from '@/lib/server-auth';
 import { checkRateLimitAsync } from '@/lib/rate-limiter';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
+import { readBoundedJson } from '@/lib/request-utils';
 
 /**
  * Main Co-Thinker Stage Progression Endpoint.
@@ -77,16 +78,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Explicitly catch malformed JSON and return 400 Bad Request
-    let json: unknown;
-    try {
-      json = await req.json();
-    } catch {
+    // 0. Enforce real streaming byte limits and catch malformed JSON
+    const bodyResult = await readBoundedJson(req, 65536);
+    if (bodyResult.error) {
       return NextResponse.json(
-        { error: 'Malformed JSON payload in request body' },
-        { status: 400 }
+        { error: bodyResult.error },
+        { status: bodyResult.status || 400 }
       );
     }
+    const json = bodyResult.data;
 
     const parsed = CoThinkRequestSchema.safeParse(json);
 
