@@ -6,16 +6,60 @@ export interface CsrfValidationResult {
 }
 
 /**
+ * Resolves the canonical allowed origins and hostnames from environment configuration.
+ *
+ * Recognized sources:
+ * - APP_URL: Canonical application URL (e.g. "https://thinkmate.ai")
+ * - NEXT_PUBLIC_APP_URL: Client-exposed application URL (e.g. "http://localhost:3000")
+ * - TRUSTED_ORIGINS: Comma-separated list of trusted origins or host aliases (e.g. "https://thinkmate.app,https://staging.thinkmate.app")
+ * - VERCEL_PROJECT_PRODUCTION_URL / VERCEL_URL: Platform production hostnames
+ */
+export function getAllowedAppOrigins(): { origins: Set<string>; hosts: Set<string> } {
+  const origins = new Set<string>();
+  const hosts = new Set<string>();
+
+  const candidates: (string | undefined)[] = [
+    process.env.APP_URL,
+    process.env.NEXT_PUBLIC_APP_URL,
+    process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : undefined,
+    process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined,
+  ];
+
+  if (process.env.TRUSTED_ORIGINS) {
+    const split = process.env.TRUSTED_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean);
+    candidates.push(...split);
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      const urlStr = candidate.includes('://') ? candidate : `https://${candidate}`;
+      const parsed = new URL(urlStr);
+      origins.add(parsed.origin.toLowerCase());
+      hosts.add(parsed.host.toLowerCase());
+    } catch {
+      // Ignore unparseable entries
+    }
+  }
+
+  return { origins, hosts };
+}
+
+/**
  * Validates cross-origin state-changing mutations under ambient cookie authentication.
  *
- * Rules:
+ * Defense-in-depth rules:
  * 1. Read-only methods (GET, HEAD, OPTIONS) are exempt from CSRF checks.
  * 2. Requests using explicit Authorization headers (Bearer tokens) are not ambient credentials
  *    and cannot be forged cross-site without script execution on the victim origin; they are allowed.
  * 3. When authentication relies on ambient cookies (e.g. sb-access-token, thinkmate_auth_token):
  *    - Sec-Fetch-Site: If present and equals 'cross-site', reject immediately (403 Forbidden).
- *    - Origin / Referer: The origin host must match the request's Host header or configured APP_URL.
- *    - Missing Origin AND Referer on a cookie-authenticated state-changing mutation is rejected (403 Forbidden).
+ *    - Request Host: Must be present. If missing, reject immediately (403 Forbidden).
+ *    - Origin / Referer: Must be a valid URL whose origin/host matches:
+ *        a. The incoming request's Host header (Same-Origin), OR
+ *        b. The canonical configured application origin (APP_URL, NEXT_PUBLIC_APP_URL, TRUSTED_ORIGINS).
+ *    - Untrusted proxy headers (e.g. spoofed X-Forwarded-Host) are never used to authorize cross-origin requests.
+ *    - Missing or malformed Origin AND Referer on a cookie-authenticated state-changing mutation is rejected (403 Forbidden).
  */
 export function validateCsrf(req: Request | NextRequest): CsrfValidationResult {
   const method = req.method.toUpperCase();
@@ -41,46 +85,79 @@ export function validateCsrf(req: Request | NextRequest): CsrfValidationResult {
     return { allowed: true };
   }
 
-  // At this point, the request is a state-changing mutation carrying ambient auth cookies
+  // 1. Sec-Fetch-Site check
   const secFetchSite = req.headers.get('sec-fetch-site');
-  if (secFetchSite && secFetchSite === 'cross-site') {
+  if (secFetchSite && secFetchSite.toLowerCase() === 'cross-site') {
     return {
       allowed: false,
       reason: 'CSRF violation: Sec-Fetch-Site is cross-site for cookie-authenticated mutation',
     };
   }
 
+  // 2. Validate request Host header
   const host = req.headers.get('host');
   if (!host) {
     return { allowed: false, reason: 'CSRF violation: missing Host header' };
   }
+  const normalizedHost = host.toLowerCase();
 
+  // Resolve canonical configured origins
+  const { origins: allowedOrigins, hosts: allowedHosts } = getAllowedAppOrigins();
+
+  // 3. Validate Origin header
   const origin = req.headers.get('origin');
   if (origin) {
     try {
-      const originHost = new URL(origin).host.toLowerCase();
-      if (originHost === host.toLowerCase()) {
+      const originUrl = new URL(origin);
+      // Origin must be HTTP or HTTPS
+      if (originUrl.protocol !== 'http:' && originUrl.protocol !== 'https:') {
+        return { allowed: false, reason: `CSRF violation: invalid Origin protocol "${originUrl.protocol}"` };
+      }
+
+      const originHost = originUrl.host.toLowerCase();
+      const originOrigin = originUrl.origin.toLowerCase();
+
+      // Check against request Host OR configured canonical application origins / aliases
+      if (
+        originHost === normalizedHost ||
+        allowedHosts.has(originHost) ||
+        allowedOrigins.has(originOrigin)
+      ) {
         return { allowed: true };
       }
+
       return {
         allowed: false,
-        reason: `CSRF violation: origin "${origin}" does not match host "${host}"`,
+        reason: `CSRF violation: origin "${origin}" does not match host "${host}" or configured application origins`,
       };
     } catch {
       return { allowed: false, reason: 'CSRF violation: invalid Origin header URL' };
     }
   }
 
+  // 4. Fallback to Referer header if Origin is not supplied
   const referer = req.headers.get('referer');
   if (referer) {
     try {
-      const refererHost = new URL(referer).host.toLowerCase();
-      if (refererHost === host.toLowerCase()) {
+      const refererUrl = new URL(referer);
+      if (refererUrl.protocol !== 'http:' && refererUrl.protocol !== 'https:') {
+        return { allowed: false, reason: `CSRF violation: invalid Referer protocol "${refererUrl.protocol}"` };
+      }
+
+      const refererHost = refererUrl.host.toLowerCase();
+      const refererOrigin = refererUrl.origin.toLowerCase();
+
+      if (
+        refererHost === normalizedHost ||
+        allowedHosts.has(refererHost) ||
+        allowedOrigins.has(refererOrigin)
+      ) {
         return { allowed: true };
       }
+
       return {
         allowed: false,
-        reason: `CSRF violation: referer "${referer}" does not match host "${host}"`,
+        reason: `CSRF violation: referer "${referer}" does not match host "${host}" or configured application origins`,
       };
     } catch {
       return { allowed: false, reason: 'CSRF violation: invalid Referer header URL' };

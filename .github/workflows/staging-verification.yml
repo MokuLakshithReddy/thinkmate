@@ -2,11 +2,6 @@ name: Staging Database Verification
 
 on:
   workflow_dispatch:
-    inputs:
-      staging_url:
-        description: 'Optional override for Staging Supabase URL'
-        required: false
-        type: string
   schedule:
     # Optional scheduled nightly run against staging environment
     - cron: '0 3 * * *'
@@ -32,7 +27,7 @@ jobs:
 
       - name: Run Staging Verification Suite
         env:
-          STAGING_SUPABASE_URL: ${{ inputs.staging_url || secrets.STAGING_SUPABASE_URL }}
+          STAGING_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}
           STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
           STAGING_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
         run: npx tsx scripts/verify-supabase-staging.ts

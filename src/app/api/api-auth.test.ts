@@ -903,8 +903,8 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       // 5. Bearer token request without Origin header is accepted (not vulnerable to ambient CSRF)
       // @ts-expect-error test stub
       supabase.auth.getUser = async (token: string) => {
-        if (token === 'mock-bearer-token') {
-          return { data: { user: { id: testUserId, email: 'bearer@example.com' } }, error: null };
+        if (token === 'mock-bearer-token' || token === 'mock-cookie-token') {
+          return { data: { user: { id: testUserId, email: 'authenticated@example.com' } }, error: null };
         }
         return origGetUser.call(supabase.auth, token);
       };
@@ -923,6 +923,88 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
 
       const bearerRes = await sessionsPost(bearerReq);
       assert.strictEqual(bearerRes.status, 200, 'Bearer token requests are exempt from cookie CSRF checks');
+
+      // 6. Malformed Origin header returns 403 Forbidden
+      const malformedOriginReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'javascript:alert(1)',
+          Host: 'localhost:3000',
+          Cookie: 'sb-access-token=mock-cookie-token',
+        },
+        body: JSON.stringify({ title: 'Malformed Origin', problemStatement: 'test' }),
+      });
+      const malformedOriginRes = await sessionsPost(malformedOriginReq);
+      assert.strictEqual(malformedOriginRes.status, 403, 'Malformed origin protocol must return 403');
+
+      // 7. Malformed Referer header returns 403 Forbidden
+      const malformedRefererReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Referer: '://not-a-valid-url',
+          Host: 'localhost:3000',
+          Cookie: 'sb-access-token=mock-cookie-token',
+        },
+        body: JSON.stringify({ title: 'Malformed Referer', problemStatement: 'test' }),
+      });
+      const malformedRefererRes = await sessionsPost(malformedRefererReq);
+      assert.strictEqual(malformedRefererRes.status, 403, 'Malformed referer must return 403');
+
+      // 8. Canonical configured application origin and production-host aliases are honored
+      const prevAppUrl = process.env.APP_URL;
+      const prevTrustedOrigins = process.env.TRUSTED_ORIGINS;
+      try {
+        process.env.APP_URL = 'https://thinkmate.ai';
+        process.env.TRUSTED_ORIGINS = 'https://staging.thinkmate.ai,https://thinkmate-preview.vercel.app';
+
+        // Request with Origin matching configured production APP_URL succeeds
+        const prodAliasReq = new NextRequest('https://thinkmate.ai/api/sessions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: 'https://thinkmate.ai',
+            Host: 'thinkmate.ai',
+            Cookie: 'sb-access-token=mock-cookie-token',
+          },
+          body: JSON.stringify({ title: 'Prod Alias Session', problemStatement: 'test' }),
+        });
+        const prodAliasRes = await sessionsPost(prodAliasReq);
+        assert.strictEqual(prodAliasRes.status, 200, 'Origin matching configured APP_URL must pass CSRF validation');
+
+        // Request with Origin matching TRUSTED_ORIGINS alias succeeds
+        const trustedAliasReq = new NextRequest('https://staging.thinkmate.ai/api/sessions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: 'https://thinkmate-preview.vercel.app',
+            Host: 'staging.thinkmate.ai',
+            Cookie: 'sb-access-token=mock-cookie-token',
+          },
+          body: JSON.stringify({ title: 'Trusted Preview Session', problemStatement: 'test' }),
+        });
+        const trustedAliasRes = await sessionsPost(trustedAliasReq);
+        assert.strictEqual(trustedAliasRes.status, 200, 'Origin matching TRUSTED_ORIGINS alias must pass CSRF');
+      } finally {
+        process.env.APP_URL = prevAppUrl;
+        process.env.TRUSTED_ORIGINS = prevTrustedOrigins;
+      }
+
+      // 9. Attacker spoofing X-Forwarded-Host cannot validate attacker origin
+      const spoofedProxyReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://attacker-domain.com',
+          Host: 'localhost:3000',
+          'X-Forwarded-Host': 'attacker-domain.com',
+          Cookie: 'sb-access-token=mock-cookie-token',
+        },
+        body: JSON.stringify({ title: 'Spoofed Proxy Attack', problemStatement: 'test' }),
+      });
+      const spoofedProxyRes = await sessionsPost(spoofedProxyReq);
+      assert.strictEqual(spoofedProxyRes.status, 403, 'Spoofed proxy headers must not allow foreign origin');
     } finally {
       supabase.auth.getUser = origGetUser;
       SupabaseThinkingRepository.prototype.createSession = origCreateSession;

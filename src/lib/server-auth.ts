@@ -24,42 +24,14 @@ export const SECURE_COOKIE_OPTIONS = {
   path: '/',
 };
 
+import { validateCsrf } from '@/lib/csrf';
+
 /**
- * Validates that an incoming state-changing request originates from the same site.
- * Inspects Sec-Fetch-Site, Origin, and Referer headers against the Host header.
+ * Validates that an incoming state-changing request originates from the same site
+ * or an authorized application origin using the shared CSRF policy.
  */
 export function isSameOriginRequest(req: NextRequest): boolean {
-  const secFetchSite = req.headers.get('sec-fetch-site');
-  if (secFetchSite === 'cross-site') {
-    return false;
-  }
-
-  const host = req.headers.get('host') || req.nextUrl.host;
-  if (!host) return false;
-
-  const origin = req.headers.get('origin');
-  if (origin) {
-    try {
-      const originHost = new URL(origin).host.toLowerCase();
-      return originHost === host.toLowerCase();
-    } catch {
-      return false;
-    }
-  }
-
-  const referer = req.headers.get('referer');
-  if (referer) {
-    try {
-      const refererHost = new URL(referer).host.toLowerCase();
-      return refererHost === host.toLowerCase();
-    } catch {
-      return false;
-    }
-  }
-
-  // If neither Origin nor Referer is present on a state-changing browser request,
-  // cookie-based ambient credentials cannot be validated against CSRF.
-  return false;
+  return validateCsrf(req).allowed;
 }
 
 /**
