@@ -1,14 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { checkCsrfOrForbidden } from '@/lib/csrf';
 
 /**
- * Next.js Middleware implementing per-request Cryptographic Nonce & Strict-Dynamic CSP.
+ * Next.js Edge Proxy Middleware.
  *
- * In CSP Level 3 browsers (Chrome, Firefox, Safari, Edge):
- * - 'strict-dynamic' instructs the browser to execute only scripts bearing the dynamic 'nonce-...'.
- * - It automatically disables and ignores 'unsafe-inline' and host sources for script elements.
- * - 'unsafe-inline' is only evaluated as an ignored fallback for legacy pre-CSP3 browsers.
+ * Enforces two primary security layers:
+ * 1. Global CSRF Protection:
+ *    Inspects state-changing API mutations (/api/*) authenticated via ambient cookies,
+ *    strictly verifying Same-Origin and Sec-Fetch-Site to prevent cross-site request forgery.
+ *
+ * 2. Per-Request Nonce & Strict-Dynamic CSP:
+ *    For document/page requests, generates a cryptographic random base64 nonce.
+ *    Sets the single authoritative Content-Security-Policy response header with
+ *    'nonce-${nonce}' and 'strict-dynamic', ensuring only authorized framework and application
+ *    scripts execute while preventing duplicate/conflicting static policies.
  */
 export function proxy(request: NextRequest) {
+  // 1. API Route Handling: Enforce CSRF protection on mutations
+  if (request.nextUrl.pathname.startsWith('/api')) {
+    const csrfRejection = checkCsrfOrForbidden(request);
+    if (csrfRejection) {
+      return csrfRejection;
+    }
+    return NextResponse.next();
+  }
+
+  // 2. Page & Document Requests: Dynamic Nonce & Single Authoritative CSP
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
   const cspHeader = `
     default-src 'self';
@@ -43,7 +60,7 @@ export function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     {
-      source: '/((?!api|_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt).*)',
+      source: '/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt).*)',
       missing: [
         { type: 'header', key: 'next-router-prefetch' },
         { type: 'header', key: 'purpose', value: 'prefetch' },

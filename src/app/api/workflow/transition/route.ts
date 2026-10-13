@@ -4,6 +4,7 @@ import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { getAuthenticatedUser } from '@/lib/server-auth';
 import { readBoundedJson } from '@/lib/request-utils';
 import { checkRateLimitAsync } from '@/lib/rate-limiter';
+import { checkCsrfOrForbidden } from '@/lib/csrf';
 
 let repositoryInstance: SupabaseThinkingRepository | null = null;
 function getRepository() {
@@ -15,6 +16,9 @@ function getRepository() {
 
 export async function POST(req: NextRequest) {
   try {
+    const csrfError = checkCsrfOrForbidden(req);
+    if (csrfError) return csrfError;
+
     const authUser = await getAuthenticatedUser(req);
     if (!authUser) {
       return NextResponse.json(

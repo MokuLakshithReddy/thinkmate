@@ -1,0 +1,38 @@
+name: Staging Database Verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      staging_url:
+        description: 'Optional override for Staging Supabase URL'
+        required: false
+        type: string
+  schedule:
+    # Optional scheduled nightly run against staging environment
+    - cron: '0 3 * * *'
+
+jobs:
+  verify-staging-database:
+    name: Verify Database Concurrency & Migrations
+    runs-on: ubuntu-latest
+    environment: staging # Protected environment with staging-only secrets
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Staging Verification Suite
+        env:
+          STAGING_SUPABASE_URL: ${{ inputs.staging_url || secrets.STAGING_SUPABASE_URL }}
+          STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
+          STAGING_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
+        run: npx tsx scripts/verify-supabase-staging.ts

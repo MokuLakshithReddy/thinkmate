@@ -7,6 +7,7 @@ import { checkRateLimitAsync } from '@/lib/rate-limiter';
 import { SupabaseThinkingRepository, computeRequestHash } from '@/services/db/repository';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { readBoundedJson } from '@/lib/request-utils';
+import { checkCsrfOrForbidden } from '@/lib/csrf';
 
 /**
  * Main Co-Thinker Stage Progression Endpoint.
@@ -47,6 +48,9 @@ function getRepository() {
 
 export async function POST(req: NextRequest) {
   try {
+    const csrfError = checkCsrfOrForbidden(req);
+    if (csrfError) return csrfError;
+
     // 0. Bounded request size check at application layer (max 64KB)
     const contentLength = req.headers.get('content-length');
     if (contentLength && parseInt(contentLength, 10) > 65536) {

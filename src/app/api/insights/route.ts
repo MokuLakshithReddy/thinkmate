@@ -4,6 +4,7 @@ import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { getAuthenticatedUser } from '@/lib/server-auth';
 import { readBoundedJson } from '@/lib/request-utils';
 import { checkRateLimitAsync } from '@/lib/rate-limiter';
+import { checkCsrfOrForbidden } from '@/lib/csrf';
 
 const InsightMutationSchema = z.object({
   id: z.string().optional(),
@@ -30,6 +31,9 @@ function getRepository() {
 
 export async function POST(req: NextRequest) {
   try {
+    const csrfError = checkCsrfOrForbidden(req);
+    if (csrfError) return csrfError;
+
     const authUser = await getAuthenticatedUser(req);
     if (!authUser) {
       return NextResponse.json(
@@ -96,6 +100,9 @@ export async function POST(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   try {
+    const csrfError = checkCsrfOrForbidden(req);
+    if (csrfError) return csrfError;
+
     const authUser = await getAuthenticatedUser(req);
     if (!authUser) {
       return NextResponse.json(

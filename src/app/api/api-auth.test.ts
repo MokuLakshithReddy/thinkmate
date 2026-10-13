@@ -14,6 +14,7 @@ import { checkRateLimitAsync, MemoryRateLimitStore, UpstashRedisRateLimitStore, 
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
+import { proxy } from '@/proxy';
 
 describe('API Security Boundaries & Authentication Enforcement', () => {
   test('POST /api/cothink rejects unauthenticated callers with 401', async () => {
@@ -811,7 +812,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     }
   });
 
-  test('Cookie-based authentication enforces CSRF protection on state-changing requests', async () => {
+  test('Cookie-based authentication enforces strict CSRF protection on state-changing requests', async () => {
     const origGetUser = supabase.auth.getUser;
     const origCreateSession = SupabaseThinkingRepository.prototype.createSession;
     const testUserId = `usr-csrf-${Date.now()}`;
@@ -827,8 +828,8 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     SupabaseThinkingRepository.prototype.createSession = async (session) => session;
 
     try {
-      // 1. Cross-origin POST request with cookie authentication must be rejected
-      const crossOriginReq = new NextRequest('http://localhost:3000/api/sessions', {
+      // 1. Cross-origin POST request with malicious Origin must be rejected with 403 Forbidden
+      const maliciousOriginReq = new NextRequest('http://localhost:3000/api/sessions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -841,10 +842,47 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
         }),
       });
 
-      const crossOriginRes = await sessionsPost(crossOriginReq);
-      assert.strictEqual(crossOriginRes.status, 401, 'Cross-origin cookie POST must be rejected by CSRF protection');
+      const maliciousRes = await sessionsPost(maliciousOriginReq);
+      assert.strictEqual(maliciousRes.status, 403, 'Cross-origin cookie POST with malicious origin must return 403');
+      const maliciousJson = await maliciousRes.json();
+      assert.ok(maliciousJson.error.includes('CSRF protection validation failed'));
 
-      // 2. Same-origin POST request with cookie authentication is accepted
+      // 2. Cookie mutation request with missing Origin AND Referer must be rejected with 403
+      const missingOriginReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: 'sb-access-token=mock-cookie-token',
+        },
+        body: JSON.stringify({
+          title: 'Missing Origin CSRF Attempt',
+          problemStatement: 'Payload without origin',
+        }),
+      });
+
+      const missingOriginRes = await sessionsPost(missingOriginReq);
+      assert.strictEqual(missingOriginRes.status, 403, 'Cookie mutation with missing origin must return 403');
+
+      // 3. Cookie mutation with Sec-Fetch-Site: cross-site must be rejected with 403
+      const crossSiteHeaderReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Sec-Fetch-Site': 'cross-site',
+          Origin: 'http://localhost:3000',
+          Host: 'localhost:3000',
+          Cookie: 'sb-access-token=mock-cookie-token',
+        },
+        body: JSON.stringify({
+          title: 'Sec-Fetch-Site Cross-Site Attack',
+          problemStatement: 'Cross-site fetch',
+        }),
+      });
+
+      const crossSiteRes = await sessionsPost(crossSiteHeaderReq);
+      assert.strictEqual(crossSiteRes.status, 403, 'Cookie mutation with cross-site Sec-Fetch-Site must return 403');
+
+      // 4. Same-origin POST request with cookie authentication is accepted with 200 OK
       const sameOriginReq = new NextRequest('http://localhost:3000/api/sessions', {
         method: 'POST',
         headers: {
@@ -861,9 +899,78 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
 
       const sameOriginRes = await sessionsPost(sameOriginReq);
       assert.strictEqual(sameOriginRes.status, 200, 'Same-origin cookie POST must pass CSRF validation');
+
+      // 5. Bearer token request without Origin header is accepted (not vulnerable to ambient CSRF)
+      // @ts-expect-error test stub
+      supabase.auth.getUser = async (token: string) => {
+        if (token === 'mock-bearer-token') {
+          return { data: { user: { id: testUserId, email: 'bearer@example.com' } }, error: null };
+        }
+        return origGetUser.call(supabase.auth, token);
+      };
+
+      const bearerReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-bearer-token',
+        },
+        body: JSON.stringify({
+          title: 'Bearer Token Request',
+          problemStatement: 'Non-ambient authorization header',
+        }),
+      });
+
+      const bearerRes = await sessionsPost(bearerReq);
+      assert.strictEqual(bearerRes.status, 200, 'Bearer token requests are exempt from cookie CSRF checks');
     } finally {
       supabase.auth.getUser = origGetUser;
       SupabaseThinkingRepository.prototype.createSession = origCreateSession;
     }
+  });
+
+  test('proxy middleware enforces API CSRF and sets single authoritative nonce CSP on page requests', async () => {
+    // 1. API request through proxy middleware with malicious origin and cookie is rejected at edge
+    const apiReq = new NextRequest('http://localhost:3000/api/sessions', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://evil-cross-site.com',
+        Cookie: 'sb-access-token=some-cookie',
+        Host: 'localhost:3000',
+      },
+    });
+
+    const apiProxyRes = proxy(apiReq);
+    assert.strictEqual(apiProxyRes.status, 403, 'Proxy must reject cross-origin cookie API mutation with 403');
+
+    // 2. Page request through proxy receives single nonce-based CSP header
+    const pageReq = new NextRequest('http://localhost:3000/', {
+      method: 'GET',
+      headers: {
+        Host: 'localhost:3000',
+      },
+    });
+
+    const pageProxyRes = proxy(pageReq);
+    assert.strictEqual(pageProxyRes.status, 200);
+
+    const cspHeader = pageProxyRes.headers.get('Content-Security-Policy');
+    const xNonceHeader = pageProxyRes.headers.get('x-nonce');
+
+    assert.ok(cspHeader, 'Page response must include Content-Security-Policy');
+    assert.ok(xNonceHeader, 'Page response must include x-nonce');
+
+    // Check nonce matching
+    assert.ok(
+      cspHeader.includes(`'nonce-${xNonceHeader}'`),
+      'Content-Security-Policy must contain the matching cryptographic nonce'
+    );
+    assert.ok(
+      cspHeader.includes("'strict-dynamic'"),
+      'Content-Security-Policy must include strict-dynamic'
+    );
+    // Ensure single authoritative CSP header is set
+    const cspValue = pageProxyRes.headers.get('content-security-policy');
+    assert.strictEqual(cspValue, cspHeader);
   });
 });

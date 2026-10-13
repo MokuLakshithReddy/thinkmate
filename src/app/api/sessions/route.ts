@@ -5,6 +5,7 @@ import { getAuthenticatedUser } from '@/lib/server-auth';
 import { STAGE_TO_MODE, MODE_TO_DEFAULT_STAGE } from '@/services/workflow/state-machine';
 import { readBoundedJson } from '@/lib/request-utils';
 import { checkRateLimitAsync } from '@/lib/rate-limiter';
+import { checkCsrfOrForbidden } from '@/lib/csrf';
 
 const CreateSessionSchema = z
   .object({
@@ -97,6 +98,9 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
+    const csrfError = checkCsrfOrForbidden(req);
+    if (csrfError) return csrfError;
+
     const authUser = await getAuthenticatedUser(req);
     if (!authUser) {
       return NextResponse.json(
@@ -164,6 +168,9 @@ export async function POST(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   try {
+    const csrfError = checkCsrfOrForbidden(req);
+    if (csrfError) return csrfError;
+
     const authUser = await getAuthenticatedUser(req);
     if (!authUser) {
       return NextResponse.json(
