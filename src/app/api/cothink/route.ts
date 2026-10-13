@@ -4,7 +4,7 @@ import { CoThinkEngine, CoThinkStepResponse } from '@/services/ai/cothink-engine
 import { CoThinkerStep } from '@/types';
 import { getAuthenticatedUser } from '@/lib/server-auth';
 import { checkRateLimitAsync } from '@/lib/rate-limiter';
-import { SupabaseThinkingRepository } from '@/services/db/repository';
+import { SupabaseThinkingRepository, computeRequestHash } from '@/services/db/repository';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { readBoundedJson } from '@/lib/request-utils';
 
@@ -109,14 +109,28 @@ export async function POST(req: NextRequest) {
       model,
     } = parsed.data;
 
+    // Compute canonical request hash covering all semantic parameters
+    const canonicalRequestHash = clientRequestId
+      ? computeRequestHash({
+          sessionId,
+          step,
+          userMessage,
+          selectedOptionId,
+          problemStatement,
+          clarifiedObjective,
+          model,
+        })
+      : undefined;
+
     // Idempotency Pre-Check: If request was already successfully committed, return cached response
     // without invoking the AI provider again or executing duplicate operations
-    if (clientRequestId) {
+    if (clientRequestId && canonicalRequestHash) {
       try {
         const existingRecord = await getRepository().getIdempotencyRecord(
           sessionId,
           authUser.id,
-          clientRequestId
+          clientRequestId,
+          canonicalRequestHash
         );
         if (existingRecord) {
           const replayResponse: CoThinkStepResponse = {
@@ -260,6 +274,10 @@ export async function POST(req: NextRequest) {
           problemStatement: activeProblem,
           suggestedQuestions: result.options?.map((o) => o.label) || [],
           clientRequestId,
+          requestHash: canonicalRequestHash,
+          selectedOptionId,
+          clarifiedObjective,
+          model,
           clientResponse: result as unknown as Record<string, unknown>,
         },
         authUser.id

@@ -2,23 +2,40 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { getAuthenticatedUser } from '@/lib/server-auth';
+import { STAGE_TO_MODE, MODE_TO_DEFAULT_STAGE } from '@/services/workflow/state-machine';
+import { readBoundedJson } from '@/lib/request-utils';
 
-const CreateSessionSchema = z.object({
-  title: z.string().min(1, 'Title is required').max(120),
-  problemStatement: z.string().min(1, 'Problem statement is required'),
-  currentMode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']).default('understand'),
-  currentStage: z.enum([
-    'welcome',
-    'describe_problem',
-    'clarify_objective',
-    'break_subproblems',
-    'explore_perspectives',
-    'challenge_assumptions',
-    'check_satisfaction',
-    'summarize_insights',
-    'choose_action',
-  ]).default('welcome'),
-});
+const CreateSessionSchema = z
+  .object({
+    title: z.string().min(1, 'Title is required').max(120),
+    problemStatement: z.string().min(1, 'Problem statement is required'),
+    currentMode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']).default('understand'),
+    currentStage: z
+      .enum([
+        'welcome',
+        'describe_problem',
+        'clarify_objective',
+        'break_subproblems',
+        'explore_perspectives',
+        'challenge_assumptions',
+        'check_satisfaction',
+        'summarize_insights',
+        'choose_action',
+      ])
+      .optional(),
+  })
+  .refine(
+    (data) => {
+      if (data.currentStage) {
+        return STAGE_TO_MODE[data.currentStage] === data.currentMode;
+      }
+      return true;
+    },
+    {
+      message: 'Incompatible mode and stage combination: specified stage does not align with mode',
+      path: ['currentStage'],
+    }
+  );
 
 function getRepository() {
   return new SupabaseThinkingRepository();
@@ -67,14 +84,6 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const contentLength = req.headers.get('content-length');
-    if (contentLength && parseInt(contentLength, 10) > 65536) {
-      return NextResponse.json(
-        { error: 'Payload too large: request body exceeds 64KB limit' },
-        { status: 413 }
-      );
-    }
-
     const authUser = await getAuthenticatedUser(req);
     if (!authUser) {
       return NextResponse.json(
@@ -83,17 +92,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch {
+    const bodyResult = await readBoundedJson(req, 65536);
+    if (bodyResult.error) {
       return NextResponse.json(
-        { error: 'Malformed JSON payload in request body' },
-        { status: 400 }
+        { error: bodyResult.error },
+        { status: bodyResult.status || 400 }
       );
     }
 
-    const parsed = CreateSessionSchema.safeParse(body);
+    const parsed = CreateSessionSchema.safeParse(bodyResult.data);
 
     if (!parsed.success) {
       return NextResponse.json(
@@ -103,6 +110,8 @@ export async function POST(req: NextRequest) {
     }
 
     const { title, problemStatement, currentMode, currentStage } = parsed.data;
+    const effectiveStage = currentStage || (currentMode === 'understand' ? 'welcome' : MODE_TO_DEFAULT_STAGE[currentMode]);
+
     const session = await getRepository().createSession(
       {
         id: crypto.randomUUID(),
@@ -110,7 +119,7 @@ export async function POST(req: NextRequest) {
         title,
         problemStatement,
         currentMode,
-        currentStage,
+        currentStage: effectiveStage,
         status: 'active',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),

@@ -62,6 +62,7 @@ export class GeminiThinkingService implements ThinkingAIService {
           systemInstruction,
           maxOutputTokens: 2500,
           temperature: 0.7,
+          abortSignal,
         },
       });
 
@@ -72,6 +73,11 @@ export class GeminiThinkingService implements ThinkingAIService {
 
       for await (const chunk of responseStream) {
         if (abortSignal?.aborted) {
+          if (typeof (responseStream as unknown as { return?: () => Promise<unknown> }).return === 'function') {
+            try {
+              await (responseStream as unknown as { return: () => Promise<unknown> }).return();
+            } catch {}
+          }
           break;
         }
         const text = chunk.text;

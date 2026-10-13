@@ -82,4 +82,35 @@ describe('AI Thinking Service & Zod Validation', () => {
     assert.ok(result.capturedJson.includes('"suggestedQuestions"'));
     assert.ok(result.capturedJson.includes('What is next?'));
   });
+
+  test('GeminiThinkingService propagates cancellation via AbortSignal and stops generation', async () => {
+    const service = new GeminiThinkingService();
+    const events: ThinkingStreamEvent[] = [];
+    const abortController = new AbortController();
+
+    const streamPromise = service.generateThinkingStream(
+      {
+        sessionId: 'sess-abort-test',
+        problemStatement: 'Long running thinking process',
+        currentMode: 'explore',
+        messages: [{ role: 'user', content: 'Explore options' }],
+        model: 'gemini-2.5-flash',
+      },
+      (event) => {
+        events.push(event);
+        if (event.type === 'token') {
+          // Immediately abort generation
+          abortController.abort();
+        }
+      },
+      abortController.signal
+    );
+
+    await streamPromise;
+
+    const tokenEvents = events.filter((e) => e.type === 'token');
+    assert.ok(tokenEvents.length <= 2, `Should abort immediately after cancellation (emitted ${tokenEvents.length})`);
+    assert.strictEqual(events.some((e) => e.type === 'questions'), false, 'Should not emit questions after abort');
+    assert.strictEqual(events.some((e) => e.type === 'insights'), false, 'Should not emit insights after abort');
+  });
 });

@@ -7,8 +7,10 @@ import { POST as coThinkPost } from './cothink/route';
 import { POST as thinkStreamPost } from './think/stream/route';
 import { POST as workflowTransitionPost } from './workflow/transition/route';
 import { POST as demoCoThinkPost } from './demo/cothink/route';
+import { POST as sessionsPost } from './sessions/route';
+import { POST as insightsPost } from './insights/route';
 import { GET as healthGet } from './health/route';
-import { checkRateLimitAsync, MemoryRateLimitStore } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, MemoryRateLimitStore, UpstashRedisRateLimitStore } from '@/lib/rate-limiter';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
@@ -445,6 +447,228 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       assert.strictEqual(streamRes.status, 413, 'Must return 413 Payload Too Large');
     } finally {
       supabase.auth.getUser = origGetUser;
+    }
+  });
+
+  test('POST /api/cothink rejects reused clientRequestId with different input with 409 Conflict', async () => {
+    const origGetUser = supabase.auth.getUser;
+    const origGetSession = SupabaseThinkingRepository.prototype.getSession;
+    const origGetMessages = SupabaseThinkingRepository.prototype.getMessages;
+
+    // @ts-expect-error test stub
+    supabase.auth.getUser = async (token: string) => {
+      if (token === 'mock-token-test') {
+        return { data: { user: { id: 'usr-idemp-test', email: 'test@example.com' } }, error: null };
+      }
+      return origGetUser.call(supabase.auth, token);
+    };
+
+    SupabaseThinkingRepository.prototype.getSession = async (id: string, userId: string) => {
+      return {
+        id,
+        userId,
+        title: 'Session Idemp Test',
+        problemStatement: 'Problem statement test',
+        currentMode: 'understand',
+        currentStage: 'welcome',
+        status: 'active',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    };
+
+    SupabaseThinkingRepository.prototype.getMessages = async () => [];
+
+    const origRecordWorkflowStep = SupabaseThinkingRepository.prototype.recordWorkflowStep;
+    SupabaseThinkingRepository.prototype.recordWorkflowStep = async (params, userId) => {
+      const cacheKey = `${userId}:${params.sessionId}:${params.clientRequestId}`;
+      const res = {
+        sessionId: params.sessionId,
+        assistantMessageId: 'asst-msg-1',
+        nextStage: params.nextStage,
+        nextMode: params.nextMode,
+        message: params.assistantMessage,
+        nextStep: params.nextStage,
+      };
+      if (params.clientRequestId && params.requestHash) {
+        SupabaseThinkingRepository.idempotencyCache.set(cacheKey, {
+          result: res,
+          requestHash: params.requestHash,
+        });
+      }
+      return res;
+    };
+
+    const clientRequestId = `req-hash-diff-${Date.now()}`;
+    try {
+      // 1st request with initial prompt
+      const firstReq = new NextRequest('http://localhost:3000/api/cothink', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: JSON.stringify({
+          sessionId: 'sess-idemp-test',
+          step: 'welcome',
+          userMessage: 'Starting dilemma inquiry',
+          clientRequestId,
+        }),
+      });
+
+      const firstRes = await coThinkPost(firstReq);
+      assert.strictEqual(firstRes.status, 200, 'First request should succeed');
+
+      // 2nd request with SAME clientRequestId but TAMPERED userMessage
+      const tamperedReq = new NextRequest('http://localhost:3000/api/cothink', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: JSON.stringify({
+          sessionId: 'sess-idemp-test',
+          step: 'welcome',
+          userMessage: 'COMPLETELY DIFFERENT TAMPERED INQUIRY',
+          clientRequestId,
+        }),
+      });
+
+      const tamperedRes = await coThinkPost(tamperedReq);
+      assert.strictEqual(tamperedRes.status, 409, 'Reusing clientRequestId with altered payload must return 409 Conflict');
+      const json = await tamperedRes.json();
+      assert.ok(json.error.includes('Idempotency key reuse violation'));
+    } finally {
+      supabase.auth.getUser = origGetUser;
+      SupabaseThinkingRepository.prototype.getSession = origGetSession;
+      SupabaseThinkingRepository.prototype.getMessages = origGetMessages;
+      SupabaseThinkingRepository.prototype.recordWorkflowStep = origRecordWorkflowStep;
+    }
+  });
+
+  test('POST /api/sessions rejects incompatible initial mode and stage with 400', async () => {
+    const origGetUser = supabase.auth.getUser;
+    // @ts-expect-error test stub
+    supabase.auth.getUser = async (token: string) => {
+      if (token === 'mock-token-test') {
+        return { data: { user: { id: 'usr-sess-test', email: 'test@example.com' } }, error: null };
+      }
+      return origGetUser.call(supabase.auth, token);
+    };
+
+    try {
+      // Incompatible: mode is 'understand', but stage is 'choose_action' (belongs to 'act')
+      const incompatibleReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: JSON.stringify({
+          title: 'Invalid Stage/Mode Session',
+          problemStatement: 'Some challenge',
+          currentMode: 'understand',
+          currentStage: 'choose_action',
+        }),
+      });
+
+      const res = await sessionsPost(incompatibleReq);
+      assert.strictEqual(res.status, 400, 'Must return 400 Bad Request for incompatible mode and stage');
+      const json = await res.json();
+      assert.ok(json.error.includes('Invalid session payload'));
+    } finally {
+      supabase.auth.getUser = origGetUser;
+    }
+  });
+
+  test('POST /api/sessions, /api/insights, and /api/demo/cothink reject oversized bodies with 413', async () => {
+    const origGetUser = supabase.auth.getUser;
+    // @ts-expect-error test stub
+    supabase.auth.getUser = async (token: string) => {
+      if (token === 'mock-token-test') {
+        return { data: { user: { id: 'usr-size-test', email: 'test@example.com' } }, error: null };
+      }
+      return origGetUser.call(supabase.auth, token);
+    };
+
+    try {
+      const oversizedPayload = JSON.stringify({
+        title: 'Huge Session',
+        problemStatement: 'X'.repeat(70000),
+      });
+
+      const sessReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: oversizedPayload,
+      });
+      const sessRes = await sessionsPost(sessReq);
+      assert.strictEqual(sessRes.status, 413, 'Sessions POST must return 413 on oversized body');
+
+      const insightReq = new NextRequest('http://localhost:3000/api/insights', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: oversizedPayload,
+      });
+      const insightRes = await insightsPost(insightReq);
+      assert.strictEqual(insightRes.status, 413, 'Insights POST must return 413 on oversized body');
+
+      const demoReq = new NextRequest('http://localhost:3000/api/demo/cothink', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: oversizedPayload,
+      });
+      const demoRes = await demoCoThinkPost(demoReq);
+      assert.strictEqual(demoRes.status, 413, 'Demo POST must return 413 on oversized body');
+    } finally {
+      supabase.auth.getUser = origGetUser;
+    }
+  });
+
+  test('UpstashRedisRateLimitStore handles Redis non-2xx responses and fail-closed policy', async () => {
+    const mockStore = new UpstashRedisRateLimitStore(
+      'https://mock-upstash-error.example.com',
+      'mock-error-token'
+    );
+    const originalFetch = global.fetch;
+
+    try {
+      // Simulate Upstash returning HTTP 503 Service Unavailable
+      global.fetch = (async (url: string | URL | Request) => {
+        if (String(url).includes('mock-upstash-error')) {
+          return new Response(JSON.stringify({ error: 'Service Unavailable' }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return originalFetch(url);
+      }) as typeof global.fetch;
+
+      // 1. Without fail-closed (default), engages degraded in-memory sliding window
+      const degradedResult = await mockStore.checkAndRecord('test-503-fallback', 2, 60000);
+      assert.strictEqual(degradedResult.allowed, true, 'Degraded mode should allow request within memory quota');
+
+      // 2. With RATE_LIMIT_FAIL_CLOSED=true, strictly rejects request on non-2xx response
+      const oldEnv = process.env.RATE_LIMIT_FAIL_CLOSED;
+      try {
+        process.env.RATE_LIMIT_FAIL_CLOSED = 'true';
+        const failClosedResult = await mockStore.checkAndRecord('test-503-fail-closed', 10, 60000);
+        assert.strictEqual(failClosedResult.allowed, false, 'Fail-closed mode must reject request on 503 outage');
+      } finally {
+        if (oldEnv !== undefined) {
+          process.env.RATE_LIMIT_FAIL_CLOSED = oldEnv;
+        } else {
+          delete process.env.RATE_LIMIT_FAIL_CLOSED;
+        }
+      }
+    } finally {
+      global.fetch = originalFetch;
     }
   });
 });

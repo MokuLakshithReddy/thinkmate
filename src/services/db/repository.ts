@@ -14,6 +14,10 @@ export interface RecordWorkflowStepParams {
   suggestedQuestions?: string[];
   clientRequestId?: string;
   clientResponse?: Record<string, unknown>;
+  requestHash?: string;
+  selectedOptionId?: string;
+  clarifiedObjective?: string;
+  model?: string;
 }
 
 export interface RecordWorkflowStepResult {
@@ -121,13 +125,29 @@ export interface CachedIdempotencyEntry {
  */
 export function computeRequestHash(params: {
   sessionId: string;
+  step?: string;
   userMessage?: string;
+  selectedOptionId?: string;
+  problemStatement?: string;
+  clarifiedObjective?: string;
+  model?: string;
   expectedStage?: CoThinkerStep;
   expectedMode?: ThinkingMode;
   nextStage?: CoThinkerStep;
   nextMode?: ThinkingMode;
 }): string {
-  const payload = `${params.sessionId}:${params.userMessage?.trim() || ''}:${params.expectedStage || ''}:${params.expectedMode || ''}:${params.nextStage || ''}:${params.nextMode || ''}`;
+  const payload = [
+    params.sessionId,
+    params.step || params.expectedStage || '',
+    params.userMessage?.trim() || '',
+    params.selectedOptionId || '',
+    params.clarifiedObjective?.trim() || '',
+    params.problemStatement?.trim() || '',
+    params.model || '',
+    params.expectedMode || '',
+    params.nextStage || '',
+    params.nextMode || '',
+  ].join(':');
   let hash = 0x811c9dc5;
   for (let i = 0; i < payload.length; i++) {
     hash ^= payload.charCodeAt(i);
@@ -400,7 +420,7 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
     }
 
     const cacheKey = params.clientRequestId ? `${userId}:${params.sessionId}:${params.clientRequestId}` : null;
-    const requestHash = params.clientRequestId ? computeRequestHash(params) : null;
+    const requestHash = params.requestHash || (params.clientRequestId ? computeRequestHash(params) : null);
 
     if (cacheKey && requestHash) {
       const cached = SupabaseThinkingRepository.idempotencyCache.get(cacheKey);

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { CoThinkEngine } from '@/services/ai/cothink-engine';
 import { CoThinkerStep } from '@/types';
 import { checkRateLimitAsync, getClientIp } from '@/lib/rate-limiter';
+import { readBoundedJson } from '@/lib/request-utils';
 
 /**
  * Isolated Unauthenticated Demo Endpoint.
@@ -56,7 +57,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const json = await req.json();
+    const bodyResult = await readBoundedJson(req, 65536);
+    if (bodyResult.error) {
+      return NextResponse.json(
+        { error: bodyResult.error },
+        { status: bodyResult.status || 400 }
+      );
+    }
+    const json = bodyResult.data;
     const parsed = DemoCoThinkRequestSchema.safeParse(json);
 
     if (!parsed.success) {

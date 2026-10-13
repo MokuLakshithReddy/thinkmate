@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { getAuthenticatedUser } from '@/lib/server-auth';
+import { readBoundedJson } from '@/lib/request-utils';
 
 const InsightMutationSchema = z.object({
   id: z.string().optional(),
@@ -18,18 +19,16 @@ const InsightMutationSchema = z.object({
     .optional(),
 });
 
-const repository = new SupabaseThinkingRepository();
+let repositoryInstance: SupabaseThinkingRepository | null = null;
+function getRepository() {
+  if (!repositoryInstance) {
+    repositoryInstance = new SupabaseThinkingRepository();
+  }
+  return repositoryInstance;
+}
 
 export async function POST(req: NextRequest) {
   try {
-    const contentLength = req.headers.get('content-length');
-    if (contentLength && parseInt(contentLength, 10) > 65536) {
-      return NextResponse.json(
-        { error: 'Payload too large: request body exceeds 64KB limit' },
-        { status: 413 }
-      );
-    }
-
     const authUser = await getAuthenticatedUser(req);
     if (!authUser) {
       return NextResponse.json(
@@ -38,17 +37,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch {
+    const bodyResult = await readBoundedJson(req, 65536);
+    if (bodyResult.error) {
       return NextResponse.json(
-        { error: 'Malformed JSON payload in request body' },
-        { status: 400 }
+        { error: bodyResult.error },
+        { status: bodyResult.status || 400 }
       );
     }
 
-    const parsed = InsightMutationSchema.safeParse(body);
+    const parsed = InsightMutationSchema.safeParse(bodyResult.data);
 
     if (!parsed.success) {
       return NextResponse.json(
@@ -58,7 +55,7 @@ export async function POST(req: NextRequest) {
     }
 
     const item = parsed.data;
-    const insight = await repository.upsertInsight(
+    const insight = await getRepository().upsertInsight(
       {
         id: item.id || crypto.randomUUID(),
         sessionId: item.sessionId,
@@ -99,7 +96,7 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: 'Insight ID is required' }, { status: 400 });
     }
 
-    await repository.deleteInsight(id, authUser.id);
+    await getRepository().deleteInsight(id, authUser.id);
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     const msg = (err as Error)?.message || '';
