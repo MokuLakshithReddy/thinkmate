@@ -9,6 +9,7 @@ export interface CoThinkPromptContext {
   conversationHistory: { role: 'user' | 'assistant'; content: string }[];
   activeSessionTitle?: string;
   isDemo?: boolean;
+  model?: string;
 }
 
 export interface CoThinkStepResponse {
@@ -338,8 +339,9 @@ OPTIONS:
       parts: [{ text: userMessage + (selectedOptionId ? ` [Selected Option: ${selectedOptionId}]` : '') }],
     });
 
+    const modelToUse = context.model || 'gemini-2.5-flash';
     const response = await this.ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: modelToUse,
       contents,
       config: {
         systemInstruction: systemPrompt,
@@ -377,7 +379,7 @@ OPTIONS:
       options: options.length > 0 ? options : fallback.options,
       progressPercent: fallback.progressPercent,
       executionMode: 'gemini',
-      modelName: 'gemini-2.5-flash',
+      modelName: modelToUse,
     };
   }
 }

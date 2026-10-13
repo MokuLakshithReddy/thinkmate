@@ -506,4 +506,162 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
       }
     );
   });
+
+  test('two simultaneous transitions against the same initial stage detects optimistic conflict', async () => {
+    let callCount = 0;
+    // Simulate database where first call advances stage from describe_problem to clarify_objective,
+    // and second concurrent call detects that stage is no longer describe_problem.
+    const mockClient = {
+      rpc: async (fn: string, args: Record<string, unknown>) => {
+        callCount++;
+        if (callCount === 1) {
+          // First transition succeeds
+          return {
+            data: [{
+              session_id: args.p_session_id,
+              assistant_message_id: 'ast-1',
+              next_stage: 'clarify_objective',
+              next_mode: 'understand',
+            }],
+            error: null,
+          };
+        } else {
+          // Second simultaneous transition arrives with stale expectedStage
+          return {
+            data: null,
+            error: {
+              message: 'CONFLICT: expected stage "describe_problem" but session is at "clarify_objective". Reload the session.',
+            },
+          };
+        }
+      },
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+
+    const [firstCall, secondCall] = await Promise.all([
+      repo.recordWorkflowStep(
+        {
+          sessionId: 'sess-concurrent-1',
+          userMessage: 'First concurrent thought',
+          assistantMessage: 'First response',
+          nextStage: 'clarify_objective',
+          nextMode: 'understand',
+          expectedStage: 'describe_problem',
+          expectedMode: 'understand',
+        },
+        'user-concurrent'
+      ),
+      repo.recordWorkflowStep(
+        {
+          sessionId: 'sess-concurrent-1',
+          userMessage: 'Second concurrent thought',
+          assistantMessage: 'Second response',
+          nextStage: 'clarify_objective',
+          nextMode: 'understand',
+          expectedStage: 'describe_problem',
+          expectedMode: 'understand',
+        },
+        'user-concurrent'
+      ),
+    ]);
+
+    assert.strictEqual(firstCall.nextStage, 'clarify_objective');
+    assert.strictEqual(firstCall.isConflict, undefined);
+
+    // Second call must receive conflict flag mapping to HTTP 409
+    assert.strictEqual(secondCall.isConflict, true, 'Second concurrent call must be flagged as conflict');
+  });
+
+  test('production runtime fails closed if transactional RPC is unavailable', async () => {
+    const oldEnv = process.env.NODE_ENV;
+    const oldFailClosed = process.env.FAIL_CLOSED_WORKFLOW;
+
+    try {
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+      process.env.FAIL_CLOSED_WORKFLOW = 'true';
+
+      // Mock client without RPC function
+      const mockClientNoRpc = {
+        from: () => ({}),
+      } as unknown as SupabaseClient;
+
+      const repo = new SupabaseThinkingRepository(mockClientNoRpc);
+
+      await assert.rejects(
+        async () => {
+          await repo.recordWorkflowStep(
+            {
+              sessionId: 'sess-prod-fail',
+              assistantMessage: 'AI msg',
+              nextStage: 'clarify_objective',
+              nextMode: 'understand',
+              expectedStage: 'describe_problem',
+              expectedMode: 'understand',
+            },
+            'user-prod'
+          );
+        },
+        (err: Error) => {
+          return err.message.includes('FATAL: Transactional RPC record_workflow_step_tx is not available');
+        }
+      );
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = oldEnv;
+      if (oldFailClosed !== undefined) {
+        process.env.FAIL_CLOSED_WORKFLOW = oldFailClosed;
+      } else {
+        delete process.env.FAIL_CLOSED_WORKFLOW;
+      }
+    }
+  });
+
+  test('atomic transitionMode detects concurrent mode mutation conflict', async () => {
+    const mockClient = {
+      rpc: async () => ({
+        data: null,
+        error: {
+          message: 'CONFLICT: expected mode "understand" but session is currently at "explore". Reload session.',
+        },
+      }),
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+
+    const result = await repo.transitionMode(
+      {
+        sessionId: 'sess-mode-conflict',
+        expectedMode: 'understand',
+        toMode: 'explore',
+      },
+      'user-mode'
+    );
+
+    assert.strictEqual(result.isConflict, true);
+    assert.strictEqual(result.allowed, false);
+  });
+
+  test('atomic transitionMode to act is denied when no accepted decision exists', async () => {
+    const mockClient = {
+      rpc: async () => ({
+        data: null,
+        error: {
+          message: 'Transition to Act mode denied: an accepted decision insight is required',
+        },
+      }),
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+
+    const result = await repo.transitionMode(
+      {
+        sessionId: 'sess-act-denied',
+        expectedMode: 'decide',
+        toMode: 'act',
+      },
+      'user-mode'
+    );
+
+    assert.strictEqual(result.allowed, false);
+  });
 });

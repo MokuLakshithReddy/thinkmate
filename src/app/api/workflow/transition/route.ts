@@ -13,6 +13,15 @@ function getRepository() {
 
 export async function POST(req: NextRequest) {
   try {
+    // 0. Bounded request size check at application layer (max 64KB)
+    const contentLength = req.headers.get('content-length');
+    if (contentLength && parseInt(contentLength, 10) > 65536) {
+      return NextResponse.json(
+        { error: 'Payload too large: request body exceeds 64KB limit' },
+        { status: 413 }
+      );
+    }
+
     const authUser = await getAuthenticatedUser(req);
     if (!authUser) {
       return NextResponse.json(
@@ -21,7 +30,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const body = await req.json();
+    // Explicitly catch malformed JSON and return 400 Bad Request
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json(
+        { error: 'Malformed JSON payload in request body' },
+        { status: 400 }
+      );
+    }
+
     const parsed = ModeTransitionRequestSchema.safeParse(body);
 
     if (!parsed.success) {
@@ -31,7 +50,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { sessionId, fromMode, toMode } = parsed.data;
+    const { sessionId, fromMode, toMode, reason } = parsed.data;
 
     // Verify session exists and is owned by the authenticated caller
     const session = await getRepository().getSession(sessionId, authUser.id);
@@ -78,31 +97,59 @@ export async function POST(req: NextRequest) {
       insights,
     });
 
-    if (validation.allowed) {
-      // Persist the transition to Supabase
-      const defaultStageForMode = WorkflowStateMachine.deriveCurrentStage(toMode, 0);
-      try {
-        await getRepository().updateSession(
-          sessionId,
-          {
-            currentMode: toMode,
-            currentStage: defaultStageForMode,
-          },
-          authUser.id
-        );
-      } catch (updateErr) {
-        console.error('Failed to persist mode transition:', updateErr);
-        return NextResponse.json(
-          { error: 'Failed to persist validated workflow transition to database' },
-          { status: 503 }
-        );
-      }
+    if (!validation.allowed) {
+      return NextResponse.json({
+        ...validation,
+        persistedMode: session.currentMode,
+      });
     }
 
-    return NextResponse.json({
-      ...validation,
-      persistedMode: validation.allowed ? toMode : session.currentMode,
-    });
+    // Atomically execute transition under PostgreSQL row lock
+    try {
+      const txResult = await getRepository().transitionMode(
+        {
+          sessionId,
+          expectedMode: authoritativeFromMode,
+          toMode,
+          reason,
+        },
+        authUser.id
+      );
+
+      if (txResult.isConflict) {
+        const freshSession = await getRepository().getSession(sessionId, authUser.id);
+        return NextResponse.json(
+          {
+            error: 'Session mode has changed concurrently since your request was sent. Please reload.',
+            currentMode: freshSession?.currentMode || session.currentMode,
+          },
+          { status: 409 }
+        );
+      }
+
+      if (!txResult.allowed) {
+        return NextResponse.json(
+          {
+            allowed: false,
+            reason: 'Transition preconditions not met in database state.',
+            persistedMode: session.currentMode,
+          },
+          { status: 400 }
+        );
+      }
+
+      return NextResponse.json({
+        ...validation,
+        persistedMode: toMode,
+        stage: txResult.stage,
+      });
+    } catch (txErr: unknown) {
+      console.error('Failed to commit atomic mode transition:', txErr);
+      return NextResponse.json(
+        { error: 'Failed to persist validated workflow transition to database' },
+        { status: 503 }
+      );
+    }
   } catch (err: unknown) {
     const msg = (err as Error)?.message || '';
     if (msg.includes('unauthorized') || msg.includes('ownership')) {

@@ -63,33 +63,50 @@ export class GeminiThinkingService implements ThinkingAIService {
         },
       });
 
-      let fullBuffer = '';
+      let pendingBuffer = '';
       let jsonMetaBuffer = '';
       let isCapturingJson = false;
+      const markerPattern = /```json(?::thinkmate-meta)?/;
 
       for await (const chunk of responseStream) {
         const text = chunk.text;
         if (!text) continue;
 
-        fullBuffer += text;
+        if (isCapturingJson) {
+          jsonMetaBuffer += text;
+          continue;
+        }
 
-        // Check if we hit the structured meta block
-        if (text.includes('```json:thinkmate-meta') || text.includes('```json')) {
-          const split = text.split(/```json(?::thinkmate-meta)?/);
-          if (split[0]) {
-            onEvent({ type: 'token', token: split[0] });
+        pendingBuffer += text;
+
+        const match = markerPattern.exec(pendingBuffer);
+        if (match) {
+          // Emitting tokens strictly before the fence
+          const preMarker = pendingBuffer.slice(0, match.index);
+          if (preMarker) {
+            onEvent({ type: 'token', token: preMarker });
           }
           isCapturingJson = true;
-          jsonMetaBuffer += split.slice(1).join('');
-        } else if (isCapturingJson) {
-          jsonMetaBuffer += text;
+          jsonMetaBuffer = pendingBuffer.slice(match.index + match[0].length);
+          pendingBuffer = '';
         } else {
-          onEvent({ type: 'token', token: text });
+          // If pending buffer exceeds maximum marker prefix length (30 chars), emit safe head
+          const safeEmitLength = pendingBuffer.length - 30;
+          if (safeEmitLength > 0) {
+            const safeToken = pendingBuffer.slice(0, safeEmitLength);
+            onEvent({ type: 'token', token: safeToken });
+            pendingBuffer = pendingBuffer.slice(safeEmitLength);
+          }
         }
       }
 
+      // Flush remaining non-marker text if any
+      if (!isCapturingJson && pendingBuffer) {
+        onEvent({ type: 'token', token: pendingBuffer });
+      }
+
       // Parse metadata block if captured
-      this.parseAndEmitMetadata(jsonMetaBuffer || fullBuffer, request.currentMode, onEvent);
+      this.parseAndEmitMetadata(jsonMetaBuffer || pendingBuffer, request.currentMode, onEvent);
     } catch (err: unknown) {
       const errMsg = (err as Error)?.message || String(err);
       console.warn('Gemini API call encountered error:', errMsg);
@@ -105,30 +122,80 @@ export class GeminiThinkingService implements ThinkingAIService {
     }
   }
 
-  private parseAndEmitMetadata(
+  /**
+   * Helper for stream simulation and unit testing of rolling buffer parser.
+   */
+  static processStreamChunksWithRollingBuffer(
+    chunks: string[],
+    onToken: (token: string) => void
+  ): { capturedJson: string } {
+    let pendingBuffer = '';
+    let jsonMetaBuffer = '';
+    let isCapturingJson = false;
+    const markerPattern = /```json(?::thinkmate-meta)?/;
+
+    for (const text of chunks) {
+      if (!text) continue;
+
+      if (isCapturingJson) {
+        jsonMetaBuffer += text;
+        continue;
+      }
+
+      pendingBuffer += text;
+
+      const match = markerPattern.exec(pendingBuffer);
+      if (match) {
+        const preMarker = pendingBuffer.slice(0, match.index);
+        if (preMarker) {
+          onToken(preMarker);
+        }
+        isCapturingJson = true;
+        jsonMetaBuffer = pendingBuffer.slice(match.index + match[0].length);
+        pendingBuffer = '';
+      } else {
+        const safeEmitLength = pendingBuffer.length - 30;
+        if (safeEmitLength > 0) {
+          const safeToken = pendingBuffer.slice(0, safeEmitLength);
+          onToken(safeToken);
+          pendingBuffer = pendingBuffer.slice(safeEmitLength);
+        }
+      }
+    }
+
+    if (!isCapturingJson && pendingBuffer) {
+      onToken(pendingBuffer);
+    }
+
+    return { capturedJson: jsonMetaBuffer };
+  }
+
+  public parseAndEmitMetadata(
     text: string,
     currentMode: ThinkingMode,
     onEvent: (event: ThinkingStreamEvent) => void
   ) {
     try {
-      const match = text.match(/```json(?::thinkmate-meta)?\s*([\s\S]*?)\s*```/);
-      if (match && match[1]) {
-        const parsed = JSON.parse(match[1]);
-        if (Array.isArray(parsed.suggestedQuestions) && parsed.suggestedQuestions.length > 0) {
-          onEvent({ type: 'questions', questions: parsed.suggestedQuestions });
-        }
-        if (Array.isArray(parsed.insights) && parsed.insights.length > 0) {
-          onEvent({ type: 'insights', insights: parsed.insights });
-        }
-        if (parsed.suggestedMode) {
-          onEvent({ type: 'suggestedMode', mode: parsed.suggestedMode });
-        }
+      let jsonStr = text;
+      const fenceMatch = text.match(/```json(?::thinkmate-meta)?\s*([\s\S]*?)\s*```/);
+      if (fenceMatch && fenceMatch[1]) {
+        jsonStr = fenceMatch[1];
       } else {
-        // Fallback default questions based on mode
-        onEvent({
-          type: 'questions',
-          questions: this.getDefaultQuestionsForMode(currentMode),
-        });
+        const closingMatch = text.match(/([\s\S]*?)```/);
+        if (closingMatch && closingMatch[1]) {
+          jsonStr = closingMatch[1];
+        }
+      }
+
+      const parsed = JSON.parse(jsonStr.trim());
+      if (Array.isArray(parsed.suggestedQuestions) && parsed.suggestedQuestions.length > 0) {
+        onEvent({ type: 'questions', questions: parsed.suggestedQuestions });
+      }
+      if (Array.isArray(parsed.insights) && parsed.insights.length > 0) {
+        onEvent({ type: 'insights', insights: parsed.insights });
+      }
+      if (parsed.suggestedMode) {
+        onEvent({ type: 'suggestedMode', mode: parsed.suggestedMode });
       }
     } catch {
       onEvent({

@@ -22,6 +22,14 @@ const repository = new SupabaseThinkingRepository();
 
 export async function POST(req: NextRequest) {
   try {
+    const contentLength = req.headers.get('content-length');
+    if (contentLength && parseInt(contentLength, 10) > 65536) {
+      return NextResponse.json(
+        { error: 'Payload too large: request body exceeds 64KB limit' },
+        { status: 413 }
+      );
+    }
+
     const authUser = await getAuthenticatedUser(req);
     if (!authUser) {
       return NextResponse.json(
@@ -30,7 +38,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const body = await req.json();
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json(
+        { error: 'Malformed JSON payload in request body' },
+        { status: 400 }
+      );
+    }
+
     const parsed = InsightMutationSchema.safeParse(body);
 
     if (!parsed.success) {

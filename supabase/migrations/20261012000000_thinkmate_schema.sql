@@ -17,10 +17,17 @@ CREATE TABLE IF NOT EXISTS public.thinking_sessions (
   title TEXT NOT NULL,
   problem_statement TEXT NOT NULL,
   current_mode TEXT NOT NULL DEFAULT 'understand' CHECK (current_mode IN ('understand', 'explore', 'challenge', 'decide', 'act')),
-  current_stage TEXT NOT NULL DEFAULT 'welcome',
+  current_stage TEXT NOT NULL DEFAULT 'welcome' CHECK (current_stage IN ('welcome', 'describe_problem', 'clarify_objective', 'break_subproblems', 'explore_perspectives', 'challenge_assumptions', 'check_satisfaction', 'summarize_insights', 'choose_action')),
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  CONSTRAINT chk_stage_mode_compatible CHECK (
+    (current_stage IN ('welcome', 'describe_problem', 'clarify_objective') AND current_mode = 'understand') OR
+    (current_stage IN ('break_subproblems', 'explore_perspectives') AND current_mode = 'explore') OR
+    (current_stage IN ('challenge_assumptions', 'check_satisfaction') AND current_mode = 'challenge') OR
+    (current_stage = 'summarize_insights' AND current_mode = 'decide') OR
+    (current_stage = 'choose_action' AND current_mode = 'act')
+  )
 );
 
 ALTER TABLE public.thinking_sessions ADD COLUMN IF NOT EXISTS current_stage TEXT NOT NULL DEFAULT 'welcome';
@@ -272,7 +279,18 @@ BEGIN
       p_expected_mode, v_session.current_mode;
   END IF;
 
-  -- 3. Idempotency check AFTER lock acquisition (prevents TOCTOU race)
+  -- 3. Workflow Invariant Enforcement: Validate stage and mode compatibility
+  IF NOT (
+    (p_next_stage IN ('welcome', 'describe_problem', 'clarify_objective') AND p_next_mode = 'understand') OR
+    (p_next_stage IN ('break_subproblems', 'explore_perspectives') AND p_next_mode = 'explore') OR
+    (p_next_stage IN ('challenge_assumptions', 'check_satisfaction') AND p_next_mode = 'challenge') OR
+    (p_next_stage = 'summarize_insights' AND p_next_mode = 'decide') OR
+    (p_next_stage = 'choose_action' AND p_next_mode = 'act')
+  ) THEN
+    RAISE EXCEPTION 'Invalid workflow stage/mode combination: stage "%" does not match mode "%"', p_next_stage, p_next_mode;
+  END IF;
+
+  -- 4. Idempotency check AFTER lock acquisition (prevents TOCTOU race)
   IF p_client_request_id IS NOT NULL AND length(p_client_request_id) > 0 THEN
     SELECT response_payload, request_hash INTO v_existing_payload, v_existing_hash
     FROM public.workflow_idempotency_keys
@@ -290,7 +308,7 @@ BEGIN
     END IF;
   END IF;
 
-  -- 4. Insert user message if provided
+  -- 5. Insert user message if provided
   IF p_user_message IS NOT NULL AND length(trim(p_user_message)) > 0 THEN
     INSERT INTO public.session_messages (id, session_id, role, content, mode)
     VALUES (v_user_msg_id, p_session_id, 'user', trim(p_user_message), v_session.current_mode);
@@ -298,11 +316,11 @@ BEGIN
     v_user_msg_id := NULL;
   END IF;
 
-  -- 5. Insert assistant message
+  -- 6. Insert assistant message
   INSERT INTO public.session_messages (id, session_id, role, content, mode, suggested_questions)
   VALUES (v_ast_msg_id, p_session_id, 'assistant', p_assistant_message, p_next_mode, p_suggested_questions);
 
-  -- 6. Update session stage, mode, and problem_statement in the same transaction
+  -- 7. Update session stage, mode, and problem_statement in the same transaction
   UPDATE public.thinking_sessions
   SET current_mode = p_next_mode,
       current_stage = p_next_stage,
@@ -310,7 +328,7 @@ BEGIN
       updated_at = timezone('utc'::text, now())
   WHERE id = p_session_id AND user_id = p_user_id;
 
-  -- 7. Build response payload
+  -- 8. Build response payload
   v_result := jsonb_build_object(
     'sessionId', p_session_id,
     'userMessageId', v_user_msg_id,
@@ -320,7 +338,7 @@ BEGIN
     'isIdempotentReplay', false
   );
 
-  -- 8. Persist idempotency record (scoped to user + session + request)
+  -- 9. Persist idempotency record (scoped to user + session + request)
   IF p_client_request_id IS NOT NULL AND length(p_client_request_id) > 0 THEN
     INSERT INTO public.workflow_idempotency_keys (user_id, session_id, client_request_id, request_hash, response_payload)
     VALUES (p_user_id, p_session_id, p_client_request_id, COALESCE(p_request_hash, ''), jsonb_set(v_result, '{isIdempotentReplay}', 'true'::jsonb))
@@ -337,6 +355,95 @@ REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TE
 REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT) FROM anon;
 REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT) FROM authenticated;
 GRANT EXECUTE ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT) TO service_role;
+
+-- 9. Atomic Transaction Function for Workflow Mode Transitions
+-- Locks session, verifies optimistic current_mode, validates transition prerequisites (such as accepted decision for 'act'),
+-- updates session atomically, and records transition in workflow_transitions table.
+CREATE OR REPLACE FUNCTION public.transition_workflow_mode_tx(
+  p_session_id UUID,
+  p_user_id UUID,
+  p_expected_mode TEXT,
+  p_to_mode TEXT,
+  p_reason TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_session RECORD;
+  v_next_stage TEXT;
+  v_result JSONB;
+BEGIN
+  -- Strict caller verification
+  IF auth.uid() IS NOT NULL AND auth.uid() != p_user_id THEN
+    RAISE EXCEPTION 'Forbidden: caller auth.uid (%) does not match target p_user_id (%)', auth.uid(), p_user_id;
+  END IF;
+
+  -- 1. Exclusive row lock
+  SELECT * INTO v_session
+  FROM public.thinking_sessions
+  WHERE id = p_session_id AND user_id = p_user_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Unauthorized or session not found: %', p_session_id;
+  END IF;
+
+  -- 2. Optimistic concurrency check
+  IF v_session.current_mode != p_expected_mode THEN
+    RAISE EXCEPTION 'CONFLICT: expected mode "%" but session is currently at "%". Reload session.',
+      p_expected_mode, v_session.current_mode;
+  END IF;
+
+  -- 3. Invariant: transitioning to 'act' requires at least one accepted decision insight
+  IF p_to_mode = 'act' THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM public.session_insights
+      WHERE session_id = p_session_id AND category = 'decision' AND status = 'accepted'
+    ) THEN
+      RAISE EXCEPTION 'Transition to Act mode denied: an accepted decision insight is required';
+    END IF;
+  END IF;
+
+  -- 4. Derive authoritative default stage for target mode
+  v_next_stage := CASE p_to_mode
+    WHEN 'understand' THEN 'describe_problem'
+    WHEN 'explore' THEN 'explore_perspectives'
+    WHEN 'challenge' THEN 'challenge_assumptions'
+    WHEN 'decide' THEN 'summarize_insights'
+    WHEN 'act' THEN 'choose_action'
+    ELSE 'describe_problem'
+  END;
+
+  -- 5. Atomically update session
+  UPDATE public.thinking_sessions
+  SET current_mode = p_to_mode,
+      current_stage = v_next_stage,
+      updated_at = timezone('utc'::text, now())
+  WHERE id = p_session_id AND user_id = p_user_id;
+
+  -- 6. Insert audit record in workflow_transitions
+  INSERT INTO public.workflow_transitions (session_id, from_mode, to_mode, reason)
+  VALUES (p_session_id, p_expected_mode, p_to_mode, p_reason);
+
+  v_result := jsonb_build_object(
+    'sessionId', p_session_id,
+    'fromMode', p_expected_mode,
+    'toMode', p_to_mode,
+    'stage', v_next_stage,
+    'allowed', true
+  );
+
+  RETURN v_result;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.transition_workflow_mode_tx(UUID, UUID, TEXT, TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.transition_workflow_mode_tx(UUID, UUID, TEXT, TEXT, TEXT) FROM anon;
+REVOKE ALL ON FUNCTION public.transition_workflow_mode_tx(UUID, UUID, TEXT, TEXT, TEXT) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.transition_workflow_mode_tx(UUID, UUID, TEXT, TEXT, TEXT) TO service_role;
 
 -- Restrict workflow_idempotency_keys table from anonymous / unprivileged roles
 REVOKE ALL ON TABLE public.workflow_idempotency_keys FROM PUBLIC;

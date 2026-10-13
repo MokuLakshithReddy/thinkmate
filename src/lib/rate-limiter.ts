@@ -320,9 +320,26 @@ function isValidIp(ip: string): boolean {
 
 /**
  * Safely extracts client IP from request headers according to trusted proxy guidelines.
- * Prioritizes trusted edge headers (cf-connecting-ip, x-real-ip) over easily spoofed x-forwarded-for entries.
+ * Respects TRUST_PROXY and TRUSTED_PROXY_HEADER to defend against client IP header spoofing.
  */
 export function getClientIp(req: Request): string {
+  const trustProxy = process.env.TRUST_PROXY !== 'false';
+  const trustedHeader = process.env.TRUSTED_PROXY_HEADER?.toLowerCase();
+
+  // If a specific trusted proxy header is explicitly configured, strictly use only that header
+  if (trustedHeader) {
+    const val = req.headers.get(trustedHeader)?.trim();
+    if (val && isValidIp(val)) {
+      return val;
+    }
+    return '127.0.0.1';
+  }
+
+  // If proxy trust is disabled, ignore client-supplied proxy headers to prevent spoofing
+  if (!trustProxy) {
+    return '127.0.0.1';
+  }
+
   // 1. Cloudflare edge verified client IP
   const cfConnectingIp = req.headers.get('cf-connecting-ip')?.trim();
   if (cfConnectingIp && isValidIp(cfConnectingIp)) {

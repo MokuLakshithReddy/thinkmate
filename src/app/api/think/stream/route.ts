@@ -32,6 +32,15 @@ export async function POST(req: NextRequest) {
 
     // Rate Limiting: 40 req/min for authenticated user with distributed support
     const rateCheck = await checkRateLimitAsync(`stream:usr:${authUser.id}`, 40, 60000);
+    // 0. Bounded request size check at application layer (max 64KB)
+    const contentLength = req.headers.get('content-length');
+    if (contentLength && parseInt(contentLength, 10) > 65536) {
+      return NextResponse.json(
+        { error: 'Payload too large: request body exceeds 64KB limit' },
+        { status: 413 }
+      );
+    }
+
     if (!rateCheck.allowed) {
       return NextResponse.json(
         { error: 'Rate limit exceeded for streaming requests. Please wait a moment.' },
@@ -42,7 +51,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const json = await req.json();
+    let json: unknown;
+    try {
+      json = await req.json();
+    } catch {
+      return NextResponse.json(
+        { error: 'Malformed JSON payload in request body' },
+        { status: 400 }
+      );
+    }
+
     const validation = ThinkStreamRequestSchema.safeParse(json);
 
     if (!validation.success) {

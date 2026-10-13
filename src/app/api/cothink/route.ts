@@ -32,6 +32,7 @@ const CoThinkRequestSchema = z.object({
   problemStatement: z.string().max(8000, 'Problem statement exceeds 8,000 character limit').optional(),
   clarifiedObjective: z.string().max(4000, 'Clarified objective exceeds 4,000 character limit').optional(),
   clientRequestId: z.string().max(100).optional(),
+  model: z.enum(['gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-1.5-flash']).default('gemini-2.5-flash'),
 });
 
 const engine = new CoThinkEngine(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
@@ -45,6 +46,15 @@ function getRepository() {
 
 export async function POST(req: NextRequest) {
   try {
+    // 0. Bounded request size check at application layer (max 64KB)
+    const contentLength = req.headers.get('content-length');
+    if (contentLength && parseInt(contentLength, 10) > 65536) {
+      return NextResponse.json(
+        { error: 'Payload too large: request body exceeds 64KB limit' },
+        { status: 413 }
+      );
+    }
+
     const authUser = await getAuthenticatedUser(req);
     if (!authUser) {
       return NextResponse.json(
@@ -67,7 +77,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const json = await req.json();
+    // Explicitly catch malformed JSON and return 400 Bad Request
+    let json: unknown;
+    try {
+      json = await req.json();
+    } catch {
+      return NextResponse.json(
+        { error: 'Malformed JSON payload in request body' },
+        { status: 400 }
+      );
+    }
+
     const parsed = CoThinkRequestSchema.safeParse(json);
 
     if (!parsed.success) {
@@ -86,7 +106,21 @@ export async function POST(req: NextRequest) {
       problemStatement,
       clarifiedObjective,
       clientRequestId,
+      model,
     } = parsed.data;
+
+    // Idempotency Pre-Check: If request was already successfully committed, return cached response
+    // without invoking the AI provider again or executing duplicate operations
+    if (clientRequestId) {
+      const existingRecord = await getRepository().getIdempotencyRecord(
+        sessionId,
+        authUser.id,
+        clientRequestId
+      );
+      if (existingRecord) {
+        return NextResponse.json(existingRecord);
+      }
+    }
 
     // 1. Authoritatively retrieve the persisted session owned by caller
     let session;
@@ -158,6 +192,7 @@ export async function POST(req: NextRequest) {
         clarifiedObjective,
         conversationHistory: authoritativeHistory,
         activeSessionTitle: session.title,
+        model,
       },
       userMessage,
       selectedOptionId

@@ -56,4 +56,30 @@ describe('AI Thinking Service & Zod Validation', () => {
     assert.ok(questionEvents.length > 0, 'Should emit suggested questions');
     assert.ok(insightEvents.length > 0, 'Should emit extracted insights');
   });
+
+  test('Rolling buffer parser captures metadata marker split across chunk boundaries', () => {
+    // Simulate Gemini API emitting chunks where ```json:thinkmate-meta is cut across 3 pieces
+    const splitChunks = [
+      'Here is the analysis of the trade-offs.\n\n',
+      'The core conclusion is sound.\n```json:',
+      'thinkmate-',
+      'meta\n{\n  "suggestedQuestions": ["What is next?"],\n  "insights": []\n}\n```',
+    ];
+
+    const emittedTokens: string[] = [];
+    const result = GeminiThinkingService.processStreamChunksWithRollingBuffer(
+      splitChunks,
+      (token) => emittedTokens.push(token)
+    );
+
+    const fullEmittedText = emittedTokens.join('');
+    // The tokens emitted should NOT include the marker ```json:thinkmate-meta
+    assert.ok(fullEmittedText.includes('Here is the analysis of the trade-offs'));
+    assert.ok(fullEmittedText.includes('The core conclusion is sound'));
+    assert.strictEqual(fullEmittedText.includes('thinkmate-meta'), false, 'Marker prefix must not leak into stream tokens');
+
+    // Metadata buffer must have captured the JSON payload
+    assert.ok(result.capturedJson.includes('"suggestedQuestions"'));
+    assert.ok(result.capturedJson.includes('What is next?'));
+  });
 });

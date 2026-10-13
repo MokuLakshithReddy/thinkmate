@@ -24,12 +24,30 @@ export interface RecordWorkflowStepResult {
   isConflict?: boolean;
 }
 
+export interface TransitionModeParams {
+  sessionId: string;
+  expectedMode: ThinkingMode;
+  toMode: ThinkingMode;
+  reason?: string;
+}
+
+export interface TransitionModeResult {
+  sessionId: string;
+  fromMode: ThinkingMode;
+  toMode: ThinkingMode;
+  stage: CoThinkerStep;
+  allowed: boolean;
+  isConflict?: boolean;
+}
+
 export interface ThinkingRepository {
   getSessions(userId: string): Promise<ThinkingSession[]>;
   getSession(id: string, userId: string): Promise<ThinkingSession | null>;
   createSession(session: ThinkingSession, userId: string): Promise<ThinkingSession>;
   updateSession(id: string, updates: Partial<ThinkingSession>, userId: string): Promise<ThinkingSession>;
   recordWorkflowStep(params: RecordWorkflowStepParams, userId: string): Promise<RecordWorkflowStepResult>;
+  getIdempotencyRecord(sessionId: string, userId: string, clientRequestId: string): Promise<RecordWorkflowStepResult | null>;
+  transitionMode(params: TransitionModeParams, userId: string): Promise<TransitionModeResult>;
   deleteSession(id: string, userId: string): Promise<void>;
   deleteAllUserSessions(userId: string): Promise<number>;
   getMessages(sessionId: string, userId: string): Promise<SessionMessage[]>;
@@ -37,6 +55,49 @@ export interface ThinkingRepository {
   getInsights(sessionId: string, userId: string): Promise<Insight[]>;
   upsertInsight(insight: Insight, userId: string): Promise<Insight>;
   deleteInsight(id: string, userId: string): Promise<void>;
+}
+
+/**
+ * Bounded LRU cache with TTL expiration to prevent memory leaks in long-running processes.
+ */
+export class BoundedLruCache<K, V> {
+  private maxSize: number;
+  private ttlMs: number;
+  private map = new Map<K, { value: V; expiresAt: number }>();
+
+  constructor(maxSize: number = 500, ttlMs: number = 600000) {
+    this.maxSize = maxSize;
+    this.ttlMs = ttlMs;
+  }
+
+  get(key: K): V | undefined {
+    const entry = this.map.get(key);
+    if (!entry) return undefined;
+    if (Date.now() > entry.expiresAt) {
+      this.map.delete(key);
+      return undefined;
+    }
+    // Refresh LRU order
+    this.map.delete(key);
+    this.map.set(key, entry);
+    return entry.value;
+  }
+
+  set(key: K, value: V): void {
+    if (this.map.has(key)) {
+      this.map.delete(key);
+    } else if (this.map.size >= this.maxSize) {
+      const oldestKey = this.map.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.map.delete(oldestKey);
+      }
+    }
+    this.map.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+  }
+
+  clear(): void {
+    this.map.clear();
+  }
 }
 
 /**
@@ -58,15 +119,52 @@ function computeRequestHash(params: RecordWorkflowStepParams): string {
  * Whether the current runtime is considered production.
  * In production, the non-transactional fallback is disabled (fail closed).
  */
-function isProductionRuntime(): boolean {
+export function isProductionRuntime(): boolean {
   return process.env.NODE_ENV === 'production' || process.env.FAIL_CLOSED_WORKFLOW === 'true';
 }
 
 export class SupabaseThinkingRepository implements ThinkingRepository {
   private client: SupabaseClient;
+  public static idempotencyCache = new BoundedLruCache<string, RecordWorkflowStepResult>(500, 600000);
 
   constructor(customClient?: SupabaseClient) {
     this.client = customClient || getServiceSupabaseClient();
+  }
+
+  /**
+   * Retrieves an existing idempotency record scoped to user, session, and request ID.
+   * Checks the in-memory bounded LRU cache first, followed by the database table.
+   */
+  async getIdempotencyRecord(
+    sessionId: string,
+    userId: string,
+    clientRequestId: string
+  ): Promise<RecordWorkflowStepResult | null> {
+    if (!userId || !sessionId || !clientRequestId) return null;
+    const cacheKey = `${userId}:${sessionId}:${clientRequestId}`;
+    const cached = SupabaseThinkingRepository.idempotencyCache.get(cacheKey);
+    if (cached) return cached;
+
+    if (this.client && typeof (this.client as unknown as Record<string, unknown>).from === 'function') {
+      try {
+        const { data, error } = await this.client
+          .from('workflow_idempotency_keys')
+          .select('response_payload')
+          .eq('user_id', userId)
+          .eq('session_id', sessionId)
+          .eq('client_request_id', clientRequestId)
+          .maybeSingle();
+
+        if (!error && data?.response_payload) {
+          const payload = data.response_payload as RecordWorkflowStepResult;
+          SupabaseThinkingRepository.idempotencyCache.set(cacheKey, payload);
+          return payload;
+        }
+      } catch {
+        // Fall through
+      }
+    }
+    return null;
   }
 
   /**
@@ -254,6 +352,12 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       throw new Error('Mandatory authorization failure: userId is required to record workflow step');
     }
 
+    const cacheKey = params.clientRequestId ? `${userId}:${params.sessionId}:${params.clientRequestId}` : null;
+    if (cacheKey) {
+      const cached = SupabaseThinkingRepository.idempotencyCache.get(cacheKey);
+      if (cached) return cached;
+    }
+
     const requestHash = params.clientRequestId ? computeRequestHash(params) : null;
 
     // 1. Attempt true PostgreSQL atomic transaction via RPC
@@ -303,13 +407,17 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       if (rpcData) {
         const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
         if (row) {
-          return {
+          const res: RecordWorkflowStepResult = {
             sessionId: row.sessionId || row.session_id || params.sessionId,
             userMessageId: row.userMessageId || row.user_message_id,
             assistantMessageId: row.assistantMessageId || row.assistant_message_id,
             nextStage: row.nextStage || row.next_stage || params.nextStage,
             nextMode: row.nextMode || row.next_mode || params.nextMode,
           };
+          if (cacheKey) {
+            SupabaseThinkingRepository.idempotencyCache.set(cacheKey, res);
+          }
+          return res;
         }
       }
 
@@ -408,13 +516,19 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
         throw new Error(`Failed to commit workflow state: ${updateErr.message}`);
       }
 
-      return {
+      const result: RecordWorkflowStepResult = {
         sessionId: params.sessionId,
         userMessageId,
         assistantMessageId,
         nextStage: params.nextStage,
         nextMode: params.nextMode,
       };
+
+      if (cacheKey) {
+        SupabaseThinkingRepository.idempotencyCache.set(cacheKey, result);
+      }
+
+      return result;
     } catch (workflowErr) {
       // Compensate: Delete any inserted messages to prevent corrupting conversation history
       for (const msgId of createdMessageIds) {
@@ -426,6 +540,139 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       }
       throw workflowErr;
     }
+  }
+
+  /**
+   * Performs an atomic workflow mode transition using row locking in PostgreSQL.
+   * Compares expectedMode under the lock, validates prerequisite decisions,
+   * updates the session atomically, and records the transition audit log.
+   */
+  async transitionMode(
+    params: TransitionModeParams,
+    userId: string
+  ): Promise<TransitionModeResult> {
+    if (!userId) {
+      throw new Error('Mandatory authorization failure: userId is required to transition mode');
+    }
+
+    if (this.client && typeof (this.client as unknown as Record<string, unknown>).rpc === 'function') {
+      const { data: rpcData, error: rpcError } = await this.client.rpc(
+        'transition_workflow_mode_tx',
+        {
+          p_session_id: params.sessionId,
+          p_user_id: userId,
+          p_expected_mode: params.expectedMode,
+          p_to_mode: params.toMode,
+          p_reason: params.reason || null,
+        }
+      );
+
+      if (rpcError) {
+        if (rpcError.message && rpcError.message.includes('CONFLICT:')) {
+          return {
+            sessionId: params.sessionId,
+            fromMode: params.expectedMode,
+            toMode: params.toMode,
+            stage: 'describe_problem',
+            allowed: false,
+            isConflict: true,
+          };
+        }
+        if (
+          rpcError.message &&
+          (rpcError.message.includes('Forbidden') ||
+            rpcError.message.includes('Unauthorized') ||
+            rpcError.message.includes('not found'))
+        ) {
+          throw new Error('Session not found or unauthorized');
+        }
+        if (rpcError.message && rpcError.message.includes('denied')) {
+          return {
+            sessionId: params.sessionId,
+            fromMode: params.expectedMode,
+            toMode: params.toMode,
+            stage: 'describe_problem',
+            allowed: false,
+          };
+        }
+        throw new Error(`Workflow transition RPC failed: ${rpcError.message}`);
+      }
+
+      if (rpcData) {
+        const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+        return {
+          sessionId: row.sessionId || params.sessionId,
+          fromMode: (row.fromMode as ThinkingMode) || params.expectedMode,
+          toMode: (row.toMode as ThinkingMode) || params.toMode,
+          stage: (row.stage as CoThinkerStep) || 'describe_problem',
+          allowed: true,
+        };
+      }
+
+      throw new Error('Workflow transition RPC returned empty result');
+    }
+
+    // Fail closed in production if transactional RPC is not available
+    if (isProductionRuntime()) {
+      throw new Error(
+        'FATAL: Transactional RPC transition_workflow_mode_tx is not available. Non-transactional fallback disabled in production.'
+      );
+    }
+
+    // Non-production test fallback
+    const session = await this.getSession(params.sessionId, userId);
+    if (!session) {
+      throw new Error('Session not found or unauthorized');
+    }
+
+    if (session.currentMode !== params.expectedMode) {
+      return {
+        sessionId: params.sessionId,
+        fromMode: params.expectedMode,
+        toMode: params.toMode,
+        stage: session.currentStage || 'describe_problem',
+        allowed: false,
+        isConflict: true,
+      };
+    }
+
+    // Validate decisions when transitioning to 'act'
+    if (params.toMode === 'act') {
+      const insights = await this.getInsights(params.sessionId, userId);
+      const hasAccepted = insights.some((i) => i.category === 'decision' && i.status === 'accepted');
+      if (!hasAccepted) {
+        return {
+          sessionId: params.sessionId,
+          fromMode: params.expectedMode,
+          toMode: params.toMode,
+          stage: session.currentStage || 'describe_problem',
+          allowed: false,
+        };
+      }
+    }
+
+    const defaultStage: CoThinkerStep =
+      params.toMode === 'understand' ? 'describe_problem' :
+      params.toMode === 'explore' ? 'explore_perspectives' :
+      params.toMode === 'challenge' ? 'challenge_assumptions' :
+      params.toMode === 'decide' ? 'summarize_insights' : 'choose_action';
+
+    await this.updateSession(
+      params.sessionId,
+      {
+        currentMode: params.toMode,
+        currentStage: defaultStage,
+      },
+      userId
+    );
+
+    return {
+      sessionId: params.sessionId,
+      fromMode: params.expectedMode,
+      toMode: params.toMode,
+      stage: defaultStage,
+      allowed: true,
+    };
   }
 
   /**

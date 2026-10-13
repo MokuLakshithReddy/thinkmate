@@ -20,21 +20,26 @@ export class AuthenticationError extends Error {
  */
 export async function getAuthenticatedUser(req: NextRequest): Promise<AuthenticatedUser | null> {
   const authHeader = req.headers.get('authorization');
+  let token: string | undefined;
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.slice(7).trim();
-    if (token) {
-      try {
-        const { data, error } = await supabase.auth.getUser(token);
-        if (!error && data?.user) {
-          return {
-            id: data.user.id,
-            email: data.user.email,
-          };
-        }
-      } catch (err) {
-        console.warn('Bearer token verification failed:', err);
+    token = authHeader.slice(7).trim();
+  } else if (req.cookies) {
+    // Check secure HttpOnly cookies (Supabase access token or ThinkMate session cookie)
+    token = req.cookies.get('sb-access-token')?.value || req.cookies.get('thinkmate_auth_token')?.value;
+  }
+
+  if (token) {
+    try {
+      const { data, error } = await supabase.auth.getUser(token);
+      if (!error && data?.user) {
+        return {
+          id: data.user.id,
+          email: data.user.email,
+        };
       }
+    } catch (err) {
+      console.warn('Authentication token verification failed:', err);
     }
   }
 

@@ -420,6 +420,9 @@ export default function Home() {
         headers['Authorization'] = `Bearer ${authToken}`;
       }
 
+      const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+      const selectedModel = (typeof window !== 'undefined' ? localStorage.getItem('thinkmate_model') : null) || 'gemini-2.5-flash';
+
       let res = await fetch(endpoint, {
         method: 'POST',
         headers,
@@ -430,10 +433,28 @@ export default function Home() {
           selectedOptionId,
           problemStatement: currentStep === 'describe_problem' ? text : problemStatement,
           clarifiedObjective,
+          clientRequestId,
+          model: selectedModel,
         }),
       });
 
-      // If authenticated call fails with 401, fall back gracefully to demo simulator and convert to local draft
+      // Handle concurrency conflict: reload authoritative state from server
+      if (res.status === 409) {
+        const conflictData = await res.json().catch(() => ({}));
+        await loadSessionById(currentSessionIdRef.current);
+        const conflictNoticeMsg: ChatMessage = {
+          id: `msg-conflict-${Date.now()}`,
+          role: 'assistant',
+          content: `⚠️ **Concurrent Workflow Update**: ${conflictData.error || 'The session stage was updated by another request.'}\n\nYour session has been re-synchronized with the authoritative database state.`,
+          step: conflictData.currentStage || currentStep,
+          timestamp: new Date().toISOString(),
+          executionMode: 'simulator',
+        };
+        setCustomMessages((prev) => (prev ? [...prev, conflictNoticeMsg] : [conflictNoticeMsg]));
+        return;
+      }
+
+      // If authenticated call fails with 401, inform user and convert session into local draft
       if (res.status === 401 && endpoint !== '/api/demo/cothink') {
         setIsAuthenticated(false);
         localStorage.removeItem('thinkmate_auth_token');

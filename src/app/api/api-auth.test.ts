@@ -10,6 +10,7 @@ import { POST as demoCoThinkPost } from './demo/cothink/route';
 import { GET as healthGet } from './health/route';
 import { checkRateLimitAsync, MemoryRateLimitStore } from '@/lib/rate-limiter';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
+import { supabase } from '@/services/db/supabase-client';
 
 describe('API Security Boundaries & Authentication Enforcement', () => {
   test('POST /api/cothink rejects unauthenticated callers with 401', async () => {
@@ -237,5 +238,90 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     // Fallback when headers missing
     const emptyReq = new Request('https://thinkmate.test');
     assert.strictEqual(getClientIp(emptyReq), '127.0.0.1');
+
+    // Untrusted proxy mode (TRUST_PROXY=false) ignores spoofed client headers
+    const oldTrust = process.env.TRUST_PROXY;
+    try {
+      process.env.TRUST_PROXY = 'false';
+      const spoofedReq = new Request('https://thinkmate.test', {
+        headers: {
+          'cf-connecting-ip': '203.0.113.195',
+          'x-real-ip': '198.51.100.42',
+        },
+      });
+      assert.strictEqual(getClientIp(spoofedReq), '127.0.0.1', 'Must ignore spoofed headers when proxy trust disabled');
+    } finally {
+      if (oldTrust !== undefined) process.env.TRUST_PROXY = oldTrust;
+      else delete process.env.TRUST_PROXY;
+    }
+
+    // Explicit TRUSTED_PROXY_HEADER enforcement
+    const oldHeader = process.env.TRUSTED_PROXY_HEADER;
+    try {
+      process.env.TRUSTED_PROXY_HEADER = 'x-real-ip';
+      const customReq = new Request('https://thinkmate.test', {
+        headers: {
+          'cf-connecting-ip': '203.0.113.195',
+          'x-real-ip': '198.51.100.99',
+        },
+      });
+      assert.strictEqual(getClientIp(customReq), '198.51.100.99', 'Must use configured trusted header exclusively');
+    } finally {
+      if (oldHeader !== undefined) process.env.TRUSTED_PROXY_HEADER = oldHeader;
+      else delete process.env.TRUSTED_PROXY_HEADER;
+    }
+  });
+
+  test('API routes return 400 Bad Request on malformed JSON payloads', async () => {
+    const origGetUser = supabase.auth.getUser;
+    // @ts-expect-error test stub
+    supabase.auth.getUser = async (token: string) => {
+      if (token === 'mock-token-test') {
+        return { data: { user: { id: 'usr-test', email: 'test@example.com' } }, error: null };
+      }
+      return origGetUser.call(supabase.auth, token);
+    };
+
+    try {
+      // Malformed JSON on POST /api/cothink
+      const badJsonCothink = new NextRequest('http://localhost:3000/api/cothink', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: '{ malformed json: not valid',
+      });
+      const cothinkRes = await coThinkPost(badJsonCothink);
+      assert.strictEqual(cothinkRes.status, 400);
+      const cothinkJson = await cothinkRes.json();
+      assert.ok(cothinkJson.error.includes('Malformed JSON'));
+
+      // Malformed JSON on POST /api/workflow/transition
+      const badJsonTransition = new NextRequest('http://localhost:3000/api/workflow/transition', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: 'invalid-json',
+      });
+      const transitionRes = await workflowTransitionPost(badJsonTransition);
+      assert.strictEqual(transitionRes.status, 400);
+
+      // Malformed JSON on POST /api/think/stream
+      const badJsonStream = new NextRequest('http://localhost:3000/api/think/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: '{"unclosed": ',
+      });
+      const streamRes = await thinkStreamPost(badJsonStream);
+      assert.strictEqual(streamRes.status, 400);
+    } finally {
+      supabase.auth.getUser = origGetUser;
+    }
   });
 });
