@@ -499,6 +499,31 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       return res;
     };
 
+    const origGetIdempotencyRecord = SupabaseThinkingRepository.prototype.getIdempotencyRecord;
+    SupabaseThinkingRepository.prototype.getIdempotencyRecord = async (
+      sessionId,
+      userId,
+      clientRequestId,
+      expectedRequestHash
+    ) => {
+      const cacheKey = `${userId}:${sessionId}:${clientRequestId}`;
+      const cached = SupabaseThinkingRepository.idempotencyCache.get(cacheKey);
+      if (cached) {
+        if (expectedRequestHash) {
+          if (!cached.requestHash || cached.requestHash !== expectedRequestHash) {
+            throw new Error(
+              `Idempotency key reuse violation: clientRequestId "${clientRequestId}" was previously used with different or missing payload hash`
+            );
+          }
+        }
+        return {
+          ...cached.result,
+          isIdempotentReplay: true,
+        };
+      }
+      return null;
+    };
+
     const clientRequestId = `req-hash-diff-${Date.now()}`;
     try {
       // 1st request with initial prompt
@@ -543,6 +568,48 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       SupabaseThinkingRepository.prototype.getSession = origGetSession;
       SupabaseThinkingRepository.prototype.getMessages = origGetMessages;
       SupabaseThinkingRepository.prototype.recordWorkflowStep = origRecordWorkflowStep;
+      SupabaseThinkingRepository.prototype.getIdempotencyRecord = origGetIdempotencyRecord;
+    }
+  });
+
+  test('POST /api/cothink returns 503 Service Unavailable when database idempotency lookup fails', async () => {
+    const origGetUser = supabase.auth.getUser;
+    const origGetIdempotencyRecord = SupabaseThinkingRepository.prototype.getIdempotencyRecord;
+
+    // @ts-expect-error test stub
+    supabase.auth.getUser = async (token: string) => {
+      if (token === 'mock-token-test') {
+        return { data: { user: { id: 'usr-db-fail', email: 'test@example.com' } }, error: null };
+      }
+      return origGetUser.call(supabase.auth, token);
+    };
+
+    SupabaseThinkingRepository.prototype.getIdempotencyRecord = async () => {
+      throw new Error('Database failure looking up idempotency record: Connection pool exhausted');
+    };
+
+    try {
+      const req = new NextRequest('http://localhost:3000/api/cothink', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: JSON.stringify({
+          sessionId: 'sess-db-fail',
+          step: 'welcome',
+          userMessage: 'Hello',
+          clientRequestId: 'req-db-fail-1',
+        }),
+      });
+
+      const res = await coThinkPost(req);
+      assert.strictEqual(res.status, 503, 'Must return 503 when idempotency database check fails');
+      const json = await res.json();
+      assert.ok(json.error.includes('Database service unavailable'));
+    } finally {
+      supabase.auth.getUser = origGetUser;
+      SupabaseThinkingRepository.prototype.getIdempotencyRecord = origGetIdempotencyRecord;
     }
   });
 

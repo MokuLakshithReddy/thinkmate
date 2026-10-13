@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { SupabaseThinkingRepository } from './repository';
+import { SupabaseThinkingRepository, computeRequestHash } from './repository';
 import { ThinkingSession } from '@/types';
 import { SupabaseClient } from '@supabase/supabase-js';
 
@@ -925,5 +925,98 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
       },
       'Cache must reject payload hash mismatch instead of silently returning stale cached response'
     );
+  });
+
+  test('getIdempotencyRecord rejects legacy records with missing or empty request_hash when expectedRequestHash is supplied', async () => {
+    const mockClient = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            eq: () => ({
+              eq: () => ({
+                maybeSingle: async () => ({
+                  data: {
+                    response_payload: { message: 'Old unverified response', nextStep: 'explore' },
+                    request_hash: '', // Legacy record with missing/empty hash
+                  },
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+
+    await assert.rejects(
+      async () => {
+        await repo.getIdempotencyRecord(
+          'sess-old-hash',
+          'user-1',
+          'req-legacy-1',
+          'expected-sha256-hash'
+        );
+      },
+      (err: Error) => {
+        return err.message.includes('Idempotency key reuse violation');
+      },
+      'Must reject records with empty request_hash when an expected hash is provided'
+    );
+  });
+
+  test('getIdempotencyRecord throws on database query failure rather than silently treating as cache miss', async () => {
+    const mockClient = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            eq: () => ({
+              eq: () => ({
+                maybeSingle: async () => ({
+                  data: null,
+                  error: { message: 'Database connection terminated' },
+                }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+
+    await assert.rejects(
+      async () => {
+        await repo.getIdempotencyRecord(
+          'sess-db-err',
+          'user-1',
+          'req-db-err',
+          'expected-hash'
+        );
+      },
+      (err: Error) => {
+        return err.message.includes('Database failure looking up idempotency record');
+      },
+      'Must rethrow database errors rather than returning null'
+    );
+  });
+
+  test('computeRequestHash produces collision-resistant SHA-256 and handles colons safely', () => {
+    // Two distinct field distributions that would collide under naive colon concatenation "A:B:C"
+    const hash1 = computeRequestHash({
+      sessionId: 'sess-1',
+      userMessage: 'A:B',
+      selectedOptionId: 'C',
+    });
+
+    const hash2 = computeRequestHash({
+      sessionId: 'sess-1',
+      userMessage: 'A',
+      selectedOptionId: 'B:C',
+    });
+
+    assert.notStrictEqual(hash1, hash2, 'Inputs with colons must not collide');
+    assert.strictEqual(hash1.length, 64, 'Must be a 64-character SHA-256 hex string');
   });
 });

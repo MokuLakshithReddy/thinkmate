@@ -184,13 +184,16 @@ export class UpstashRedisRateLimitStore implements RateLimitStore {
 
       throw new Error('Unexpected format in Redis EVAL response');
     } catch (providerError) {
-      // Degraded-mode policy:
-      // If RATE_LIMIT_FAIL_CLOSED=true is configured, reject traffic during Redis outages to guarantee strict DDoS/quota enforcement.
-      // Default: engages bounded local in-memory sliding window fallback per node instance to prevent availability outages while restricting individual node floods.
-      const failClosed = process.env.RATE_LIMIT_FAIL_CLOSED === 'true';
+      // Explicit Production Policy:
+      // In production (NODE_ENV=production), fail-closed is active by default to prevent quota bypassing
+      // across distributed serverless instances, unless explicitly overridden with RATE_LIMIT_FAIL_CLOSED=false.
+      // In non-production environments (development/test), defaults to degraded in-memory sliding window fallback.
+      const isProduction = process.env.NODE_ENV === 'production';
+      const failClosed = process.env.RATE_LIMIT_FAIL_CLOSED === 'true' || (isProduction && process.env.RATE_LIMIT_FAIL_CLOSED !== 'false');
+
       if (failClosed) {
         console.error(
-          '[RateLimiter] Upstash Redis execution failed and RATE_LIMIT_FAIL_CLOSED is true. Rejecting request to fail closed:',
+          '[RateLimiter] Upstash Redis execution failed and fail-closed policy is active. Rejecting request to protect global quotas:',
           providerError
         );
         return {

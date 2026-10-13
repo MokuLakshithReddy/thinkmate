@@ -1,4 +1,5 @@
 import { SupabaseClient } from '@supabase/supabase-js';
+import crypto from 'node:crypto';
 import { ThinkingSession, SessionMessage, Insight, ThinkingMode, CoThinkerStep, ChoiceOption, InsightCategory, InsightStatus } from '@/types';
 import { getServiceSupabaseClient } from './supabase-client';
 
@@ -121,8 +122,9 @@ export interface CachedIdempotencyEntry {
 
 /**
  * Generates a deterministic hash for idempotency payload consistency enforcement.
- * Ensures the same clientRequestId cannot be reused with different message content or workflow targets.
- */
+  * Ensures the same clientRequestId cannot be reused with different message content or workflow targets.
+  * Uses cryptographic SHA-256 with canonical key sorting to guarantee collision resistance.
+  */
 export function computeRequestHash(params: {
   sessionId: string;
   step?: string;
@@ -136,24 +138,24 @@ export function computeRequestHash(params: {
   nextStage?: CoThinkerStep;
   nextMode?: ThinkingMode;
 }): string {
-  const payload = [
-    params.sessionId,
-    params.step || params.expectedStage || '',
-    params.userMessage?.trim() || '',
-    params.selectedOptionId || '',
-    params.clarifiedObjective?.trim() || '',
-    params.problemStatement?.trim() || '',
-    params.model || '',
-    params.expectedMode || '',
-    params.nextStage || '',
-    params.nextMode || '',
-  ].join(':');
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < payload.length; i++) {
-    hash ^= payload.charCodeAt(i);
-    hash = (hash * 0x01000193) >>> 0;
-  }
-  return hash.toString(36);
+  // Canonical structured payload with stable, alphabetically sorted keys
+  const canonicalObj = {
+    clarifiedObjective: params.clarifiedObjective?.trim() || '',
+    expectedMode: params.expectedMode || '',
+    expectedStage: params.step || params.expectedStage || '',
+    model: params.model || '',
+    nextMode: params.nextMode || '',
+    nextStage: params.nextStage || '',
+    problemStatement: params.problemStatement?.trim() || '',
+    selectedOptionId: params.selectedOptionId || '',
+    sessionId: params.sessionId,
+    userMessage: params.userMessage?.trim() || '',
+  };
+
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(canonicalObj))
+    .digest('hex');
 }
 
 /**
@@ -176,6 +178,8 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
    * Retrieves an existing idempotency record scoped to user, session, and request ID.
    * Checks the in-memory bounded LRU cache first, followed by the database table.
    * Validates request hash to prevent payload substitution attacks under cached entries.
+   * Rejects missing or empty stored hashes when an expected hash is provided to prevent legacy payload confusion.
+   * Rethrows database query errors rather than silently treating them as cache misses.
    */
   async getIdempotencyRecord(
     sessionId: string,
@@ -187,10 +191,12 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
     const cacheKey = `${userId}:${sessionId}:${clientRequestId}`;
     const cached = SupabaseThinkingRepository.idempotencyCache.get(cacheKey);
     if (cached) {
-      if (expectedRequestHash && cached.requestHash !== expectedRequestHash) {
-        throw new Error(
-          `Idempotency key reuse violation: clientRequestId "${clientRequestId}" was previously used with different payload`
-        );
+      if (expectedRequestHash) {
+        if (!cached.requestHash || cached.requestHash !== expectedRequestHash) {
+          throw new Error(
+            `Idempotency key reuse violation: clientRequestId "${clientRequestId}" was previously used with different or missing payload hash`
+          );
+        }
       }
       return {
         ...cached.result,
@@ -208,11 +214,18 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
           .eq('client_request_id', clientRequestId)
           .maybeSingle();
 
-        if (!error && data?.response_payload) {
-          if (expectedRequestHash && data.request_hash && data.request_hash !== expectedRequestHash) {
-            throw new Error(
-              `Idempotency key reuse violation: clientRequestId "${clientRequestId}" was previously used with different payload`
-            );
+        if (error) {
+          throw new Error(`Database failure looking up idempotency record: ${error.message}`);
+        }
+
+        if (data?.response_payload) {
+          if (expectedRequestHash) {
+            // When an expected hash is supplied, reject records with a missing or empty stored hash
+            if (!data.request_hash || data.request_hash !== expectedRequestHash) {
+              throw new Error(
+                `Idempotency key reuse violation: clientRequestId "${clientRequestId}" was previously used with different or missing payload hash`
+              );
+            }
           }
           const payload = data.response_payload as RecordWorkflowStepResult;
           SupabaseThinkingRepository.idempotencyCache.set(cacheKey, {
@@ -225,10 +238,15 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
           };
         }
       } catch (err) {
-        if (err instanceof Error && err.message.includes('Idempotency key reuse violation')) {
-          throw err;
+        if (err instanceof Error) {
+          if (
+            err.message.includes('Idempotency key reuse violation') ||
+            err.message.includes('Database failure looking up idempotency record')
+          ) {
+            throw err;
+          }
         }
-        // Fall through
+        throw err;
       }
     }
     return null;

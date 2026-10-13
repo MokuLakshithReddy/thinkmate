@@ -151,7 +151,11 @@ export async function POST(req: NextRequest) {
             { status: 409 }
           );
         }
-        throw idempErr;
+        console.error('Database failure during idempotency lookup:', idempErr);
+        return NextResponse.json(
+          { error: 'Database service unavailable while verifying request idempotency' },
+          { status: 503 }
+        );
       }
     }
 
