@@ -106,10 +106,15 @@ export function validateCsrf(req: Request | NextRequest): CsrfValidationResult {
 
   // 3. Validate Origin header
   const origin = req.headers.get('origin');
-  if (origin) {
+  if (origin !== null && origin !== undefined) {
+    const trimmedOrigin = origin.trim();
+    if (!trimmedOrigin || trimmedOrigin === 'null') {
+      return { allowed: false, reason: 'CSRF violation: missing, empty, or null Origin header' };
+    }
+
     try {
-      const originUrl = new URL(origin);
-      // Origin must be HTTP or HTTPS
+      const originUrl = new URL(trimmedOrigin);
+      // Origin must strictly be HTTP or HTTPS
       if (originUrl.protocol !== 'http:' && originUrl.protocol !== 'https:') {
         return { allowed: false, reason: `CSRF violation: invalid Origin protocol "${originUrl.protocol}"` };
       }
@@ -137,9 +142,14 @@ export function validateCsrf(req: Request | NextRequest): CsrfValidationResult {
 
   // 4. Fallback to Referer header if Origin is not supplied
   const referer = req.headers.get('referer');
-  if (referer) {
+  if (referer !== null && referer !== undefined) {
+    const trimmedReferer = referer.trim();
+    if (!trimmedReferer || trimmedReferer === 'null') {
+      return { allowed: false, reason: 'CSRF violation: missing, empty, or null Referer header' };
+    }
+
     try {
-      const refererUrl = new URL(referer);
+      const refererUrl = new URL(trimmedReferer);
       if (refererUrl.protocol !== 'http:' && refererUrl.protocol !== 'https:') {
         return { allowed: false, reason: `CSRF violation: invalid Referer protocol "${refererUrl.protocol}"` };
       }

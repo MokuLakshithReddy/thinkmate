@@ -41,6 +41,26 @@ async function runStagingVerification() {
     process.exit(1);
   }
 
+  // Safety Pre-Flight: Verify target project reference to strictly prevent running tests against production
+  let projectHost = '';
+  try {
+    const parsedUrl = new URL(SUPABASE_URL);
+    projectHost = parsedUrl.host.toLowerCase();
+  } catch {
+    console.error(`\n[FATAL] STAGING_SUPABASE_URL is not a valid URL: ${SUPABASE_URL}`);
+    process.exit(1);
+  }
+
+  // Deny-list: Known production project refs that must NEVER receive destructive/staging test executions
+  const FORBIDDEN_PRODUCTION_REFS = ['gtkvujspajcelzufpggr', 'ujbpyqubhxycgtaadkce'];
+  for (const prodRef of FORBIDDEN_PRODUCTION_REFS) {
+    if (projectHost.includes(prodRef)) {
+      console.error(`\n[SECURITY FATAL] Refusing to run tests! Target host "${projectHost}" matches production project "${prodRef}".`);
+      console.error('Staging verification must NEVER target production databases.');
+      process.exit(1);
+    }
+  }
+
   const serviceClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
   });
@@ -51,7 +71,7 @@ async function runStagingVerification() {
 
   const testUserId = crypto.randomUUID();
   const testSessionId = crypto.randomUUID();
-  console.log(`Target database: ${SUPABASE_URL}`);
+  console.log(`Target verified staging database: ${projectHost}`);
   console.log(`Disposable test session: ${testSessionId}`);
   console.log(`Disposable test user: ${testUserId}\n`);
 
@@ -325,12 +345,35 @@ async function runStagingVerification() {
     console.log('ALL 5 STAGING DATABASE INTEGRATION TESTS PASSED CLEANLY.');
     console.log('='.repeat(75));
   } finally {
-    // Clean up disposable test data
+    // Clean up disposable test data and verify all deletions succeed
     console.log('\nCleaning up disposable test records...');
-    await serviceClient.from('workflow_idempotency_keys').delete().eq('session_id', testSessionId);
-    await serviceClient.from('session_messages').delete().eq('session_id', testSessionId);
-    await serviceClient.from('thinking_sessions').delete().eq('id', testSessionId);
-    console.log('Cleanup completed.');
+    const cleanupErrors: string[] = [];
+
+    const { error: delIdempErr } = await serviceClient
+      .from('workflow_idempotency_keys')
+      .delete()
+      .eq('session_id', testSessionId);
+    if (delIdempErr) cleanupErrors.push(`workflow_idempotency_keys deletion failed: ${delIdempErr.message}`);
+
+    const { error: delMsgsErr } = await serviceClient
+      .from('session_messages')
+      .delete()
+      .eq('session_id', testSessionId);
+    if (delMsgsErr) cleanupErrors.push(`session_messages deletion failed: ${delMsgsErr.message}`);
+
+    const { error: delSessErr } = await serviceClient
+      .from('thinking_sessions')
+      .delete()
+      .eq('id', testSessionId);
+    if (delSessErr) cleanupErrors.push(`thinking_sessions deletion failed: ${delSessErr.message}`);
+
+    if (cleanupErrors.length > 0) {
+      console.error('\n[FATAL] Cleanup failures detected:');
+      cleanupErrors.forEach((err) => console.error(`  ✖ ${err}`));
+      throw new Error(`Staging verification cleanup failed with ${cleanupErrors.length} errors: ${cleanupErrors.join('; ')}`);
+    }
+
+    console.log('✔ Cleanup completed successfully: all disposable records removed.');
   }
 }
 

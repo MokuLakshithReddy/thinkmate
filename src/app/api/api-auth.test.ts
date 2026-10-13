@@ -15,6 +15,7 @@ import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { proxy } from '@/proxy';
+import { SECURE_COOKIE_OPTIONS } from '@/lib/server-auth';
 
 describe('API Security Boundaries & Authentication Enforcement', () => {
   test('POST /api/cothink rejects unauthenticated callers with 401', async () => {
@@ -1005,10 +1006,78 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       });
       const spoofedProxyRes = await sessionsPost(spoofedProxyReq);
       assert.strictEqual(spoofedProxyRes.status, 403, 'Spoofed proxy headers must not allow foreign origin');
+
+      // 10. Origin header with literal 'null' string (e.g. from sandboxed iframes) is rejected
+      const nullOriginReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'null',
+          Host: 'localhost:3000',
+          Cookie: 'sb-access-token=mock-cookie-token',
+        },
+        body: JSON.stringify({ title: 'Null Origin Attack', problemStatement: 'test' }),
+      });
+      const nullOriginRes = await sessionsPost(nullOriginReq);
+      assert.strictEqual(nullOriginRes.status, 403, 'Literal null Origin header must return 403');
+
+      // 11. Origin header with non-HTTP protocol (e.g. ftp:// or data:) is rejected
+      const ftpOriginReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'ftp://malicious-server.com',
+          Host: 'localhost:3000',
+          Cookie: 'sb-access-token=mock-cookie-token',
+        },
+        body: JSON.stringify({ title: 'FTP Origin Attack', problemStatement: 'test' }),
+      });
+      const ftpOriginRes = await sessionsPost(ftpOriginReq);
+      assert.strictEqual(ftpOriginRes.status, 403, 'FTP origin protocol must return 403');
+
+      // 12. Unapproved subdomain of configured domain is strictly rejected
+      try {
+        process.env.APP_URL = 'https://thinkmate.ai';
+        const unapprovedSubdomainReq = new NextRequest('https://thinkmate.ai/api/sessions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: 'https://attacker.thinkmate.ai',
+            Host: 'thinkmate.ai',
+            Cookie: 'sb-access-token=mock-cookie-token',
+          },
+          body: JSON.stringify({ title: 'Subdomain Attack', problemStatement: 'test' }),
+        });
+        const unapprovedSubdomainRes = await sessionsPost(unapprovedSubdomainReq);
+        assert.strictEqual(unapprovedSubdomainRes.status, 403, 'Unapproved subdomain must return 403');
+      } finally {
+        process.env.APP_URL = prevAppUrl;
+      }
+
+      // 13. Bearer-authenticated mutation with cross-origin Origin is permitted (ambient cookie defense does not apply)
+      const bearerCrossOriginReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-bearer-token',
+          Origin: 'https://external-api-client.org',
+          Host: 'localhost:3000',
+        },
+        body: JSON.stringify({ title: 'Bearer Cross-Origin', problemStatement: 'test' }),
+      });
+      const bearerCrossOriginRes = await sessionsPost(bearerCrossOriginReq);
+      assert.strictEqual(bearerCrossOriginRes.status, 200, 'Bearer authenticated callers must be permitted from any origin');
     } finally {
       supabase.auth.getUser = origGetUser;
       SupabaseThinkingRepository.prototype.createSession = origCreateSession;
     }
+  });
+
+  test('production cookie security attributes enforce defensive standard', () => {
+    assert.strictEqual(SECURE_COOKIE_OPTIONS.httpOnly, true, 'Cookies must be HttpOnly to prevent XSS theft');
+    assert.strictEqual(SECURE_COOKIE_OPTIONS.sameSite, 'lax', 'Cookies must use SameSite=Lax for defensive CSRF baseline');
+    assert.strictEqual(SECURE_COOKIE_OPTIONS.path, '/', 'Cookies must be restricted to root path');
+    assert.strictEqual(typeof SECURE_COOKIE_OPTIONS.secure, 'boolean', 'Secure flag must be evaluated');
   });
 
   test('proxy middleware enforces API CSRF and sets single authoritative nonce CSP on page requests', async () => {
