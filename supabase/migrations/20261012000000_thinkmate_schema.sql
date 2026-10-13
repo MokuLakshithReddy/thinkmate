@@ -236,7 +236,8 @@ CREATE OR REPLACE FUNCTION public.record_workflow_step_tx(
   p_problem_statement TEXT DEFAULT NULL,
   p_suggested_questions JSONB DEFAULT '[]'::jsonb,
   p_client_request_id TEXT DEFAULT NULL,
-  p_request_hash TEXT DEFAULT NULL
+  p_request_hash TEXT DEFAULT NULL,
+  p_client_response JSONB DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -267,30 +268,9 @@ BEGIN
     RAISE EXCEPTION 'Unauthorized or session not found: %', p_session_id;
   END IF;
 
-  -- 2. Optimistic concurrency control: compare expected state against locked row
-  -- This prevents two concurrent requests from both advancing the session.
-  IF v_session.current_stage != p_expected_stage THEN
-    RAISE EXCEPTION 'CONFLICT: expected stage "%" but session is at "%". Reload the session.',
-      p_expected_stage, v_session.current_stage;
-  END IF;
-
-  IF v_session.current_mode != p_expected_mode THEN
-    RAISE EXCEPTION 'CONFLICT: expected mode "%" but session is at "%". Reload the session.',
-      p_expected_mode, v_session.current_mode;
-  END IF;
-
-  -- 3. Workflow Invariant Enforcement: Validate stage and mode compatibility
-  IF NOT (
-    (p_next_stage IN ('welcome', 'describe_problem', 'clarify_objective') AND p_next_mode = 'understand') OR
-    (p_next_stage IN ('break_subproblems', 'explore_perspectives') AND p_next_mode = 'explore') OR
-    (p_next_stage IN ('challenge_assumptions', 'check_satisfaction') AND p_next_mode = 'challenge') OR
-    (p_next_stage = 'summarize_insights' AND p_next_mode = 'decide') OR
-    (p_next_stage = 'choose_action' AND p_next_mode = 'act')
-  ) THEN
-    RAISE EXCEPTION 'Invalid workflow stage/mode combination: stage "%" does not match mode "%"', p_next_stage, p_next_mode;
-  END IF;
-
-  -- 4. Idempotency check AFTER lock acquisition (prevents TOCTOU race)
+  -- 2. Idempotency check UNDER LOCK BEFORE concurrency check:
+  -- If this is a genuine retry, the session stage was already updated by the 1st request.
+  -- Checking idempotency first prevents a false optimistic concurrency conflict on valid retries.
   IF p_client_request_id IS NOT NULL AND length(p_client_request_id) > 0 THEN
     SELECT response_payload, request_hash INTO v_existing_payload, v_existing_hash
     FROM public.workflow_idempotency_keys
@@ -306,6 +286,29 @@ BEGIN
       END IF;
       RETURN v_existing_payload;
     END IF;
+  END IF;
+
+  -- 3. Optimistic concurrency control: compare expected state against locked row
+  -- Applies to new transitions to serialize workflow progression.
+  IF v_session.current_stage != p_expected_stage THEN
+    RAISE EXCEPTION 'CONFLICT: expected stage "%" but session is at "%". Reload the session.',
+      p_expected_stage, v_session.current_stage;
+  END IF;
+
+  IF v_session.current_mode != p_expected_mode THEN
+    RAISE EXCEPTION 'CONFLICT: expected mode "%" but session is at "%". Reload the session.',
+      p_expected_mode, v_session.current_mode;
+  END IF;
+
+  -- 4. Workflow Invariant Enforcement: Validate stage and mode compatibility
+  IF NOT (
+    (p_next_stage IN ('welcome', 'describe_problem', 'clarify_objective') AND p_next_mode = 'understand') OR
+    (p_next_stage IN ('break_subproblems', 'explore_perspectives') AND p_next_mode = 'explore') OR
+    (p_next_stage IN ('challenge_assumptions', 'check_satisfaction') AND p_next_mode = 'challenge') OR
+    (p_next_stage = 'summarize_insights' AND p_next_mode = 'decide') OR
+    (p_next_stage = 'choose_action' AND p_next_mode = 'act')
+  ) THEN
+    RAISE EXCEPTION 'Invalid workflow stage/mode combination: stage "%" does not match mode "%"', p_next_stage, p_next_mode;
   END IF;
 
   -- 5. Insert user message if provided
@@ -328,20 +331,42 @@ BEGIN
       updated_at = timezone('utc'::text, now())
   WHERE id = p_session_id AND user_id = p_user_id;
 
-  -- 8. Build response payload
-  v_result := jsonb_build_object(
-    'sessionId', p_session_id,
-    'userMessageId', v_user_msg_id,
-    'assistantMessageId', v_ast_msg_id,
-    'nextStage', p_next_stage,
-    'nextMode', p_next_mode,
-    'isIdempotentReplay', false
-  );
+  -- 8. Build complete response payload
+  IF p_client_response IS NOT NULL THEN
+    v_result := p_client_response;
+    v_result := jsonb_set(v_result, '{sessionId}', to_jsonb(p_session_id));
+    v_result := jsonb_set(v_result, '{assistantMessageId}', to_jsonb(v_ast_msg_id));
+    v_result := jsonb_set(v_result, '{nextStage}', to_jsonb(p_next_stage));
+    v_result := jsonb_set(v_result, '{nextMode}', to_jsonb(p_next_mode));
+    IF v_user_msg_id IS NOT NULL THEN
+      v_result := jsonb_set(v_result, '{userMessageId}', to_jsonb(v_user_msg_id));
+    END IF;
+  ELSE
+    v_result := jsonb_build_object(
+      'sessionId', p_session_id,
+      'userMessageId', v_user_msg_id,
+      'assistantMessageId', v_ast_msg_id,
+      'message', p_assistant_message,
+      'nextStep', p_next_stage,
+      'nextStage', p_next_stage,
+      'nextMode', p_next_mode,
+      'options', p_suggested_questions,
+      'progressPercent', 10,
+      'executionMode', 'gemini'
+    );
+  END IF;
+  v_result := jsonb_set(v_result, '{isIdempotentReplay}', 'false'::jsonb);
 
   -- 9. Persist idempotency record (scoped to user + session + request)
   IF p_client_request_id IS NOT NULL AND length(p_client_request_id) > 0 THEN
     INSERT INTO public.workflow_idempotency_keys (user_id, session_id, client_request_id, request_hash, response_payload)
-    VALUES (p_user_id, p_session_id, p_client_request_id, COALESCE(p_request_hash, ''), jsonb_set(v_result, '{isIdempotentReplay}', 'true'::jsonb))
+    VALUES (
+      p_user_id,
+      p_session_id,
+      p_client_request_id,
+      COALESCE(p_request_hash, ''),
+      jsonb_set(v_result, '{isIdempotentReplay}', 'true'::jsonb)
+    )
     ON CONFLICT (user_id, session_id, client_request_id) DO NOTHING;
   END IF;
 
@@ -350,11 +375,10 @@ END;
 $$;
 
 -- 8. Explicit Privilege Restrictions for SECURITY DEFINER RPC
--- Revoke execution from PUBLIC, anon, and authenticated; grant exclusively to service_role
-REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT) FROM anon;
-REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT) FROM authenticated;
-GRANT EXECUTE ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT) TO service_role;
+REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT, JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT, JSONB) FROM anon;
+REVOKE ALL ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT, JSONB) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.record_workflow_step_tx(UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, TEXT, JSONB) TO service_role;
 
 -- 9. Atomic Transaction Function for Workflow Mode Transitions
 -- Locks session, verifies optimistic current_mode, validates transition prerequisites (such as accepted decision for 'act'),

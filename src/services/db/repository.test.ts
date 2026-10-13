@@ -417,12 +417,12 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
 
     assert.strictEqual(firstCall.sessionId, 'sess-idem');
 
-    // Second call with same clientRequestId must return cached result
+    // Second call with same clientRequestId and payload must return cached result
     const secondCall = await repo.recordWorkflowStep(
       {
         sessionId: 'sess-idem',
-        userMessage: 'Test prompt duplicate',
-        assistantMessage: 'Test response duplicate',
+        userMessage: 'Test prompt',
+        assistantMessage: 'Test response',
         nextStage: 'clarify_objective',
         nextMode: 'understand',
         expectedStage: 'describe_problem',
@@ -432,7 +432,8 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
       'user-idem'
     );
 
-    assert.deepStrictEqual(firstCall, secondCall);
+    assert.strictEqual(secondCall.sessionId, firstCall.sessionId);
+    assert.strictEqual(secondCall.isIdempotentReplay, true);
   });
 
   test('deleteAllUserSessions deletes all sessions for the authenticated user and rejects unauthorized callers', async () => {
@@ -663,5 +664,266 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
     );
 
     assert.strictEqual(result.allowed, false);
+  });
+
+  test('idempotent replay returns complete client response matching original response field-by-field', async () => {
+    let storedIdempotencyPayload: Record<string, unknown> | null = null;
+    let storedHash: string | null = null;
+
+    const mockClient = {
+      rpc: async (fn: string, args: Record<string, unknown>) => {
+        if (fn === 'record_workflow_step_tx') {
+          // If already stored, return the stored payload as idempotent replay
+          if (storedIdempotencyPayload) {
+            return {
+              data: {
+                ...storedIdempotencyPayload,
+                isIdempotentReplay: true,
+              },
+              error: null,
+            };
+          }
+
+          const responseData = {
+            sessionId: args.p_session_id,
+            userMessageId: 'user-msg-1',
+            assistantMessageId: 'asst-msg-1',
+            nextStage: args.p_next_stage,
+            nextMode: args.p_next_mode,
+            message: 'I have broken your problem into three key subproblems.',
+            nextStep: 'break_subproblems',
+            options: [
+              { id: 'opt-1', label: 'Explore architecture trade-offs', category: 'action' },
+              { id: 'opt-2', label: 'Clarify non-functional requirements', category: 'action' },
+            ],
+            progressPercent: 35,
+            executionMode: 'gemini',
+            modelName: 'gemini-2.5-flash',
+            isIdempotentReplay: false,
+          };
+
+          storedIdempotencyPayload = responseData;
+          storedHash = args.p_request_hash as string;
+
+          return {
+            data: responseData,
+            error: null,
+          };
+        }
+        return { data: null, error: null };
+      },
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+    const clientRequestId = `req-field-match-${Date.now()}`;
+
+    // First call: initial workflow step execution
+    const firstResponse = await repo.recordWorkflowStep(
+      {
+        sessionId: 'sess-full-shape-1',
+        userMessage: 'Here is my design dilemma',
+        assistantMessage: 'I have broken your problem into three key subproblems.',
+        nextStage: 'break_subproblems',
+        nextMode: 'explore',
+        expectedStage: 'clarify_objective',
+        expectedMode: 'understand',
+        clientRequestId,
+        clientResponse: {
+          message: 'I have broken your problem into three key subproblems.',
+          nextStep: 'break_subproblems',
+          options: [
+            { id: 'opt-1', label: 'Explore architecture trade-offs', category: 'action' },
+            { id: 'opt-2', label: 'Clarify non-functional requirements', category: 'action' },
+          ],
+          progressPercent: 35,
+          executionMode: 'gemini',
+          modelName: 'gemini-2.5-flash',
+        },
+      },
+      'user-full-shape'
+    );
+
+    // Verify first response has complete client-facing fields
+    assert.strictEqual(firstResponse.message, 'I have broken your problem into three key subproblems.');
+    assert.strictEqual(firstResponse.nextStep, 'break_subproblems');
+    assert.strictEqual(firstResponse.options?.length, 2);
+    assert.strictEqual(firstResponse.progressPercent, 35);
+    assert.strictEqual(firstResponse.executionMode, 'gemini');
+    assert.strictEqual(firstResponse.modelName, 'gemini-2.5-flash');
+
+    // Second call: idempotent retry with the exact same clientRequestId
+    const replayResponse = await repo.recordWorkflowStep(
+      {
+        sessionId: 'sess-full-shape-1',
+        userMessage: 'Here is my design dilemma',
+        assistantMessage: 'I have broken your problem into three key subproblems.',
+        nextStage: 'break_subproblems',
+        nextMode: 'explore',
+        expectedStage: 'clarify_objective',
+        expectedMode: 'understand',
+        clientRequestId,
+      },
+      'user-full-shape'
+    );
+
+    // Verify field-by-field equality between first response and replay response
+    assert.strictEqual(replayResponse.message, firstResponse.message, 'message must match original');
+    assert.strictEqual(replayResponse.nextStep, firstResponse.nextStep, 'nextStep must match original');
+    assert.deepStrictEqual(replayResponse.options, firstResponse.options, 'options must match original');
+    assert.strictEqual(replayResponse.progressPercent, firstResponse.progressPercent, 'progressPercent must match original');
+    assert.strictEqual(replayResponse.executionMode, firstResponse.executionMode, 'executionMode must match original');
+    assert.strictEqual(replayResponse.modelName, firstResponse.modelName, 'modelName must match original');
+    assert.strictEqual(replayResponse.isIdempotentReplay, true, 'isIdempotentReplay must be true on replay');
+  });
+
+  test('idempotency check under lock succeeds on retry even after session stage has already advanced', async () => {
+    // Simulates database row state: after 1st execution, session is at break_subproblems
+    let sessionStage = 'clarify_objective';
+    let storedPayload: Record<string, unknown> | null = null;
+    let storedHash: string | null = null;
+
+    const mockClient = {
+      rpc: async (fn: string, args: Record<string, unknown>) => {
+        if (fn === 'record_workflow_step_tx') {
+          // STEP 2: Under FOR UPDATE lock, check idempotency FIRST
+          if (args.p_client_request_id && storedPayload) {
+            if (args.p_request_hash !== storedHash) {
+              return { data: null, error: { message: 'Idempotency key reuse violation' } };
+            }
+            return {
+              data: {
+                ...storedPayload,
+                isIdempotentReplay: true,
+              },
+              error: null,
+            };
+          }
+
+          // STEP 3: Concurrency check ONLY applies to non-idempotent (new) requests
+          if (sessionStage !== args.p_expected_stage) {
+            return {
+              data: null,
+              error: {
+                message: `CONFLICT: expected stage "${args.p_expected_stage}" but session is at "${sessionStage}". Reload the session.`,
+              },
+            };
+          }
+
+          // Advance session stage
+          sessionStage = args.p_next_stage as string;
+          storedPayload = {
+            sessionId: args.p_session_id,
+            assistantMessageId: 'asst-msg-adv-1',
+            nextStage: args.p_next_stage,
+            nextMode: args.p_next_mode,
+            message: 'Objective clarified.',
+            nextStep: args.p_next_stage,
+          };
+          storedHash = args.p_request_hash as string;
+
+          return { data: storedPayload, error: null };
+        }
+        return { data: null, error: null };
+      },
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+    const clientRequestId = `req-stale-stage-retry-${Date.now()}`;
+
+    // 1st request: expectedStage = 'clarify_objective' -> advances session to 'break_subproblems'
+    const firstCall = await repo.recordWorkflowStep(
+      {
+        sessionId: 'sess-adv-1',
+        assistantMessage: 'Objective clarified.',
+        nextStage: 'break_subproblems',
+        nextMode: 'explore',
+        expectedStage: 'clarify_objective',
+        expectedMode: 'understand',
+        clientRequestId,
+      },
+      'user-adv-test'
+    );
+    assert.strictEqual(firstCall.nextStage, 'break_subproblems');
+    assert.strictEqual(sessionStage, 'break_subproblems');
+
+    // 2nd request (retry of 1st request): caller still sends original expectedStage = 'clarify_objective'.
+    // Even though database session is now at 'break_subproblems',
+    // the idempotency check under lock executes before the concurrency check and returns the saved response!
+    const replayCall = await repo.recordWorkflowStep(
+      {
+        sessionId: 'sess-adv-1',
+        assistantMessage: 'Objective clarified.',
+        nextStage: 'break_subproblems',
+        nextMode: 'explore',
+        expectedStage: 'clarify_objective',
+        expectedMode: 'understand',
+        clientRequestId,
+      },
+      'user-adv-test'
+    );
+
+    assert.strictEqual(replayCall.isConflict, undefined, 'Retry must not trigger conflict');
+    assert.strictEqual(replayCall.isIdempotentReplay, true, 'Retry must return idempotent result');
+    assert.strictEqual(replayCall.nextStage, 'break_subproblems');
+  });
+
+  test('in-memory cache enforces request-hash validation and rejects payload tampering for same clientRequestId', async () => {
+    const mockClient = {
+      rpc: async (_fn: string, args: Record<string, unknown>) => {
+        return {
+          data: {
+            sessionId: args.p_session_id,
+            assistantMessageId: 'asst-msg-hash-test',
+            nextStage: args.p_next_stage,
+            nextMode: args.p_next_mode,
+            message: 'Original answer',
+            nextStep: args.p_next_stage,
+          },
+          error: null,
+        };
+      },
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+    const clientRequestId = `req-tamper-test-${Date.now()}`;
+
+    // 1. Initial request cached in memory
+    const initial = await repo.recordWorkflowStep(
+      {
+        sessionId: 'sess-tamper-1',
+        userMessage: 'Original valid prompt',
+        assistantMessage: 'Original answer',
+        nextStage: 'clarify_objective',
+        nextMode: 'understand',
+        expectedStage: 'describe_problem',
+        expectedMode: 'understand',
+        clientRequestId,
+      },
+      'user-tamper'
+    );
+    assert.strictEqual(initial.nextStage, 'clarify_objective');
+
+    // 2. Attacker/Client reuses same clientRequestId with different userMessage content
+    await assert.rejects(
+      async () => {
+        await repo.recordWorkflowStep(
+          {
+            sessionId: 'sess-tamper-1',
+            userMessage: 'TAMPERED DIFFERENT PROMPT',
+            assistantMessage: 'Original answer',
+            nextStage: 'clarify_objective',
+            nextMode: 'understand',
+            expectedStage: 'describe_problem',
+            expectedMode: 'understand',
+            clientRequestId,
+          },
+          'user-tamper'
+        );
+      },
+      (err: Error) => {
+        return err.message.includes('Idempotency key reuse violation');
+      },
+      'Cache must reject payload hash mismatch instead of silently returning stale cached response'
+    );
   });
 });

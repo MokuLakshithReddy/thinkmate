@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { CoThinkEngine } from '@/services/ai/cothink-engine';
+import { CoThinkEngine, CoThinkStepResponse } from '@/services/ai/cothink-engine';
 import { CoThinkerStep } from '@/types';
 import { getAuthenticatedUser } from '@/lib/server-auth';
 import { checkRateLimitAsync } from '@/lib/rate-limiter';
@@ -112,13 +112,32 @@ export async function POST(req: NextRequest) {
     // Idempotency Pre-Check: If request was already successfully committed, return cached response
     // without invoking the AI provider again or executing duplicate operations
     if (clientRequestId) {
-      const existingRecord = await getRepository().getIdempotencyRecord(
-        sessionId,
-        authUser.id,
-        clientRequestId
-      );
-      if (existingRecord) {
-        return NextResponse.json(existingRecord);
+      try {
+        const existingRecord = await getRepository().getIdempotencyRecord(
+          sessionId,
+          authUser.id,
+          clientRequestId
+        );
+        if (existingRecord) {
+          const replayResponse: CoThinkStepResponse = {
+            message: existingRecord.message || '',
+            nextStep: (existingRecord.nextStep || existingRecord.nextStage) as CoThinkerStep,
+            options: existingRecord.options,
+            progressPercent: existingRecord.progressPercent ?? 0,
+            executionMode: existingRecord.executionMode || 'gemini',
+            modelName: existingRecord.modelName,
+            simulatedNotice: existingRecord.simulatedNotice,
+          };
+          return NextResponse.json(replayResponse);
+        }
+      } catch (idempErr) {
+        if (idempErr instanceof Error && idempErr.message.includes('Idempotency key reuse violation')) {
+          return NextResponse.json(
+            { error: idempErr.message },
+            { status: 409 }
+          );
+        }
+        throw idempErr;
       }
     }
 
@@ -241,6 +260,7 @@ export async function POST(req: NextRequest) {
           problemStatement: activeProblem,
           suggestedQuestions: result.options?.map((o) => o.label) || [],
           clientRequestId,
+          clientResponse: result as unknown as Record<string, unknown>,
         },
         authUser.id
       );
@@ -258,7 +278,27 @@ export async function POST(req: NextRequest) {
           { status: 409 }
         );
       }
+
+      // If an idempotent replay occurred inside the RPC, replay the original saved response shape
+      if (writeResult.isIdempotentReplay && writeResult.message) {
+        const replayResponse: CoThinkStepResponse = {
+          message: writeResult.message,
+          nextStep: (writeResult.nextStep || writeResult.nextStage) as CoThinkerStep,
+          options: writeResult.options,
+          progressPercent: writeResult.progressPercent ?? result.progressPercent,
+          executionMode: writeResult.executionMode || result.executionMode,
+          modelName: writeResult.modelName || result.modelName,
+          simulatedNotice: writeResult.simulatedNotice || result.simulatedNotice,
+        };
+        return NextResponse.json(replayResponse);
+      }
     } catch (persistErr: unknown) {
+      if (persistErr instanceof Error && persistErr.message.includes('Idempotency key reuse violation')) {
+        return NextResponse.json(
+          { error: persistErr.message },
+          { status: 409 }
+        );
+      }
       console.error('Critical database persistence failure during workflow transition:', persistErr);
       // Fail closed: never return success if database persistence fails
       return NextResponse.json(

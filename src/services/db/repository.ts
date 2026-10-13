@@ -1,5 +1,5 @@
 import { SupabaseClient } from '@supabase/supabase-js';
-import { ThinkingSession, SessionMessage, Insight, ThinkingMode, CoThinkerStep, InsightCategory, InsightStatus } from '@/types';
+import { ThinkingSession, SessionMessage, Insight, ThinkingMode, CoThinkerStep, ChoiceOption, InsightCategory, InsightStatus } from '@/types';
 import { getServiceSupabaseClient } from './supabase-client';
 
 export interface RecordWorkflowStepParams {
@@ -13,6 +13,7 @@ export interface RecordWorkflowStepParams {
   problemStatement?: string;
   suggestedQuestions?: string[];
   clientRequestId?: string;
+  clientResponse?: Record<string, unknown>;
 }
 
 export interface RecordWorkflowStepResult {
@@ -22,6 +23,15 @@ export interface RecordWorkflowStepResult {
   nextStage: CoThinkerStep;
   nextMode: ThinkingMode;
   isConflict?: boolean;
+  message?: string;
+  nextStep?: CoThinkerStep;
+  options?: ChoiceOption[];
+  progressPercent?: number;
+  executionMode?: 'gemini' | 'simulator' | 'error';
+  modelName?: string;
+  simulatedNotice?: string;
+  isIdempotentReplay?: boolean;
+  clientResponse?: Record<string, unknown>;
 }
 
 export interface TransitionModeParams {
@@ -46,7 +56,7 @@ export interface ThinkingRepository {
   createSession(session: ThinkingSession, userId: string): Promise<ThinkingSession>;
   updateSession(id: string, updates: Partial<ThinkingSession>, userId: string): Promise<ThinkingSession>;
   recordWorkflowStep(params: RecordWorkflowStepParams, userId: string): Promise<RecordWorkflowStepResult>;
-  getIdempotencyRecord(sessionId: string, userId: string, clientRequestId: string): Promise<RecordWorkflowStepResult | null>;
+  getIdempotencyRecord(sessionId: string, userId: string, clientRequestId: string, expectedRequestHash?: string): Promise<RecordWorkflowStepResult | null>;
   transitionMode(params: TransitionModeParams, userId: string): Promise<TransitionModeResult>;
   deleteSession(id: string, userId: string): Promise<void>;
   deleteAllUserSessions(userId: string): Promise<number>;
@@ -100,13 +110,24 @@ export class BoundedLruCache<K, V> {
   }
 }
 
+export interface CachedIdempotencyEntry {
+  result: RecordWorkflowStepResult;
+  requestHash: string;
+}
+
 /**
  * Generates a deterministic hash for idempotency payload consistency enforcement.
- * Ensures the same clientRequestId cannot be reused with different message content.
+ * Ensures the same clientRequestId cannot be reused with different message content or workflow targets.
  */
-function computeRequestHash(params: RecordWorkflowStepParams): string {
-  const payload = `${params.sessionId}:${params.userMessage || ''}:${params.nextStage}:${params.nextMode}`;
-  // Simple FNV-1a-like hash for fast deterministic fingerprinting
+export function computeRequestHash(params: {
+  sessionId: string;
+  userMessage?: string;
+  expectedStage?: CoThinkerStep;
+  expectedMode?: ThinkingMode;
+  nextStage?: CoThinkerStep;
+  nextMode?: ThinkingMode;
+}): string {
+  const payload = `${params.sessionId}:${params.userMessage?.trim() || ''}:${params.expectedStage || ''}:${params.expectedMode || ''}:${params.nextStage || ''}:${params.nextMode || ''}`;
   let hash = 0x811c9dc5;
   for (let i = 0; i < payload.length; i++) {
     hash ^= payload.charCodeAt(i);
@@ -125,7 +146,7 @@ export function isProductionRuntime(): boolean {
 
 export class SupabaseThinkingRepository implements ThinkingRepository {
   private client: SupabaseClient;
-  public static idempotencyCache = new BoundedLruCache<string, RecordWorkflowStepResult>(500, 600000);
+  public static idempotencyCache = new BoundedLruCache<string, CachedIdempotencyEntry>(500, 600000);
 
   constructor(customClient?: SupabaseClient) {
     this.client = customClient || getServiceSupabaseClient();
@@ -134,33 +155,59 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
   /**
    * Retrieves an existing idempotency record scoped to user, session, and request ID.
    * Checks the in-memory bounded LRU cache first, followed by the database table.
+   * Validates request hash to prevent payload substitution attacks under cached entries.
    */
   async getIdempotencyRecord(
     sessionId: string,
     userId: string,
-    clientRequestId: string
+    clientRequestId: string,
+    expectedRequestHash?: string
   ): Promise<RecordWorkflowStepResult | null> {
     if (!userId || !sessionId || !clientRequestId) return null;
     const cacheKey = `${userId}:${sessionId}:${clientRequestId}`;
     const cached = SupabaseThinkingRepository.idempotencyCache.get(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      if (expectedRequestHash && cached.requestHash !== expectedRequestHash) {
+        throw new Error(
+          `Idempotency key reuse violation: clientRequestId "${clientRequestId}" was previously used with different payload`
+        );
+      }
+      return {
+        ...cached.result,
+        isIdempotentReplay: true,
+      };
+    }
 
     if (this.client && typeof (this.client as unknown as Record<string, unknown>).from === 'function') {
       try {
         const { data, error } = await this.client
           .from('workflow_idempotency_keys')
-          .select('response_payload')
+          .select('response_payload, request_hash')
           .eq('user_id', userId)
           .eq('session_id', sessionId)
           .eq('client_request_id', clientRequestId)
           .maybeSingle();
 
         if (!error && data?.response_payload) {
+          if (expectedRequestHash && data.request_hash && data.request_hash !== expectedRequestHash) {
+            throw new Error(
+              `Idempotency key reuse violation: clientRequestId "${clientRequestId}" was previously used with different payload`
+            );
+          }
           const payload = data.response_payload as RecordWorkflowStepResult;
-          SupabaseThinkingRepository.idempotencyCache.set(cacheKey, payload);
-          return payload;
+          SupabaseThinkingRepository.idempotencyCache.set(cacheKey, {
+            result: payload,
+            requestHash: data.request_hash || expectedRequestHash || '',
+          });
+          return {
+            ...payload,
+            isIdempotentReplay: true,
+          };
         }
-      } catch {
+      } catch (err) {
+        if (err instanceof Error && err.message.includes('Idempotency key reuse violation')) {
+          throw err;
+        }
         // Fall through
       }
     }
@@ -353,12 +400,22 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
     }
 
     const cacheKey = params.clientRequestId ? `${userId}:${params.sessionId}:${params.clientRequestId}` : null;
-    if (cacheKey) {
-      const cached = SupabaseThinkingRepository.idempotencyCache.get(cacheKey);
-      if (cached) return cached;
-    }
-
     const requestHash = params.clientRequestId ? computeRequestHash(params) : null;
+
+    if (cacheKey && requestHash) {
+      const cached = SupabaseThinkingRepository.idempotencyCache.get(cacheKey);
+      if (cached) {
+        if (cached.requestHash !== requestHash) {
+          throw new Error(
+            `Idempotency key reuse violation: clientRequestId "${params.clientRequestId}" was previously used with different payload`
+          );
+        }
+        return {
+          ...cached.result,
+          isIdempotentReplay: true,
+        };
+      }
+    }
 
     // 1. Attempt true PostgreSQL atomic transaction via RPC
     if (this.client && typeof (this.client as unknown as Record<string, unknown>).rpc === 'function') {
@@ -377,6 +434,7 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
           p_suggested_questions: params.suggestedQuestions || [],
           p_client_request_id: params.clientRequestId || null,
           p_request_hash: requestHash,
+          p_client_response: params.clientResponse || null,
         }
       );
 
@@ -413,9 +471,21 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
             assistantMessageId: row.assistantMessageId || row.assistant_message_id,
             nextStage: row.nextStage || row.next_stage || params.nextStage,
             nextMode: row.nextMode || row.next_mode || params.nextMode,
+            message: row.message || params.assistantMessage,
+            nextStep: row.nextStep || row.nextStage || params.nextStage,
+            options: row.options || (params.suggestedQuestions ? params.suggestedQuestions.map((q: string, idx: number) => ({ id: `opt-${idx}`, label: q })) : []),
+            progressPercent: row.progressPercent,
+            executionMode: row.executionMode,
+            modelName: row.modelName,
+            simulatedNotice: row.simulatedNotice,
+            isIdempotentReplay: Boolean(row.isIdempotentReplay),
+            clientResponse: row.clientResponse || (row.message ? (row as Record<string, unknown>) : undefined),
           };
-          if (cacheKey) {
-            SupabaseThinkingRepository.idempotencyCache.set(cacheKey, res);
+          if (cacheKey && requestHash) {
+            SupabaseThinkingRepository.idempotencyCache.set(cacheKey, {
+              result: res,
+              requestHash,
+            });
           }
           return res;
         }
@@ -522,10 +592,20 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
         assistantMessageId,
         nextStage: params.nextStage,
         nextMode: params.nextMode,
+        message: params.assistantMessage,
+        nextStep: params.nextStage,
+        options: (params.clientResponse?.options as ChoiceOption[]) || params.suggestedQuestions?.map((q, idx) => ({ id: `opt-${idx}`, label: q })),
+        progressPercent: (params.clientResponse?.progressPercent as number) || 0,
+        executionMode: (params.clientResponse?.executionMode as 'gemini' | 'simulator' | 'error') || 'gemini',
+        isIdempotentReplay: false,
+        clientResponse: params.clientResponse,
       };
 
-      if (cacheKey) {
-        SupabaseThinkingRepository.idempotencyCache.set(cacheKey, result);
+      if (cacheKey && requestHash) {
+        SupabaseThinkingRepository.idempotencyCache.set(cacheKey, {
+          result,
+          requestHash,
+        });
       }
 
       return result;
