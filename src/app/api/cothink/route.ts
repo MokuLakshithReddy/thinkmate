@@ -115,6 +115,7 @@ export async function POST(req: NextRequest) {
           sessionId,
           step,
           userMessage,
+          userName,
           selectedOptionId,
           problemStatement,
           clarifiedObjective,
@@ -270,6 +271,7 @@ export async function POST(req: NextRequest) {
         {
           sessionId,
           userMessage: userMessage.trim() ? userMessage : undefined,
+          userName,
           assistantMessage: result.message,
           nextStage: result.nextStep,
           nextMode,

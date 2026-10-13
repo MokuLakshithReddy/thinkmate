@@ -6,6 +6,7 @@ import { getServiceSupabaseClient } from './supabase-client';
 export interface RecordWorkflowStepParams {
   sessionId: string;
   userMessage?: string;
+  userName?: string;
   assistantMessage: string;
   nextStage: CoThinkerStep;
   nextMode: ThinkingMode;
@@ -122,13 +123,26 @@ export interface CachedIdempotencyEntry {
 
 /**
  * Generates a deterministic hash for idempotency payload consistency enforcement.
-  * Ensures the same clientRequestId cannot be reused with different message content or workflow targets.
-  * Uses cryptographic SHA-256 with canonical key sorting to guarantee collision resistance.
-  */
+ * Ensures the same clientRequestId cannot be reused with different message content, parameters, or workflow targets.
+ * Explicitly covers all semantically relevant request fields:
+ * - sessionId: Target session identifier
+ * - step / expectedStage: Current workflow stage
+ * - expectedMode: Current thinking mode
+ * - userMessage: Content of the user prompt
+ * - userName: User name provided to personalize or guide the reasoning engine
+ * - selectedOptionId: Follow-up question/option selected by the user
+ * - problemStatement: Underlying problem definition
+ * - clarifiedObjective: Clarified objective for the session
+ * - model: Selected AI model for processing
+ * - nextStage: Proposed destination stage
+ * - nextMode: Proposed destination mode
+ * Uses cryptographic SHA-256 with canonical key sorting to guarantee collision resistance.
+ */
 export function computeRequestHash(params: {
   sessionId: string;
   step?: string;
   userMessage?: string;
+  userName?: string;
   selectedOptionId?: string;
   problemStatement?: string;
   clarifiedObjective?: string;
@@ -150,6 +164,7 @@ export function computeRequestHash(params: {
     selectedOptionId: params.selectedOptionId || '',
     sessionId: params.sessionId,
     userMessage: params.userMessage?.trim() || '',
+    userName: params.userName?.trim() || '',
   };
 
   return crypto

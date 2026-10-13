@@ -10,7 +10,7 @@ import { POST as demoCoThinkPost } from './demo/cothink/route';
 import { POST as sessionsPost } from './sessions/route';
 import { POST as insightsPost } from './insights/route';
 import { GET as healthGet } from './health/route';
-import { checkRateLimitAsync, MemoryRateLimitStore, UpstashRedisRateLimitStore } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, MemoryRateLimitStore, UpstashRedisRateLimitStore, getActiveRateLimitStore } from '@/lib/rate-limiter';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
@@ -736,6 +736,38 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       }
     } finally {
       global.fetch = originalFetch;
+    }
+  });
+
+  test('getActiveRateLimitStore strictly rejects requests in production when Upstash credentials are missing', async () => {
+    const origNodeEnv = process.env.NODE_ENV;
+    const origUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const origToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+    try {
+      delete process.env.UPSTASH_REDIS_REST_URL;
+      delete process.env.UPSTASH_REDIS_REST_TOKEN;
+
+      // 1. In production without Redis, store must reject requests
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+      const prodStore = getActiveRateLimitStore();
+      const prodResult = await prodStore.checkAndRecord!('test-prod-key', 10, 60000);
+      assert.strictEqual(prodResult.allowed, false, 'Production without Redis must reject requests (fail-closed)');
+      assert.strictEqual(prodResult.remaining, 0);
+
+      // Verify sync checkRateLimit also fails closed in production
+      const syncResult = await checkRateLimitAsync('test-prod-sync', 10, 60000, prodStore);
+      assert.strictEqual(syncResult.allowed, false);
+
+      // 2. In non-production (test/dev), falls back to working memory store
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'test';
+      const devStore = getActiveRateLimitStore();
+      const devResult = await devStore.checkAndRecord!('test-dev-key', 10, 60000);
+      assert.strictEqual(devResult.allowed, true, 'Test/dev must fall back to working in-memory store');
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = origNodeEnv;
+      if (origUrl !== undefined) process.env.UPSTASH_REDIS_REST_URL = origUrl;
+      if (origToken !== undefined) process.env.UPSTASH_REDIS_REST_TOKEN = origToken;
     }
   });
 });

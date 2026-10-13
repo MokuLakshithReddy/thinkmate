@@ -1019,4 +1019,220 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
     assert.notStrictEqual(hash1, hash2, 'Inputs with colons must not collide');
     assert.strictEqual(hash1.length, 64, 'Must be a 64-character SHA-256 hex string');
   });
+
+  test('computeRequestHash includes userName and changes hash when userName differs', () => {
+    const hashAlice = computeRequestHash({
+      sessionId: 'sess-user-1',
+      userMessage: 'Test prompt',
+      userName: 'Alice',
+    });
+
+    const hashBob = computeRequestHash({
+      sessionId: 'sess-user-1',
+      userMessage: 'Test prompt',
+      userName: 'Bob',
+    });
+
+    const hashEmptyUser = computeRequestHash({
+      sessionId: 'sess-user-1',
+      userMessage: 'Test prompt',
+    });
+
+    assert.notStrictEqual(hashAlice, hashBob, 'Different user names must yield different hashes');
+    assert.notStrictEqual(hashAlice, hashEmptyUser, 'Provided userName must differ from omitted userName');
+  });
+
+  test('computeRequestHash produces distinct hash when mutating each semantically relevant field', () => {
+    const baseline = {
+      sessionId: 'sess-base-1',
+      step: 'welcome',
+      expectedStage: 'welcome' as const,
+      expectedMode: 'understand' as const,
+      userMessage: 'Base message',
+      userName: 'Alice',
+      selectedOptionId: 'opt-base-1',
+      problemStatement: 'Base problem statement',
+      clarifiedObjective: 'Base clarified objective',
+      model: 'gemini-2.5-flash',
+      nextStage: 'clarify_objective' as const,
+      nextMode: 'understand' as const,
+    };
+
+    const baseHash = computeRequestHash(baseline);
+
+    const mutations: Array<{ field: string; mutated: Parameters<typeof computeRequestHash>[0] }> = [
+      { field: 'sessionId', mutated: { ...baseline, sessionId: 'sess-base-mutated' } },
+      { field: 'step', mutated: { ...baseline, step: 'clarify_objective' } },
+      { field: 'expectedMode', mutated: { ...baseline, expectedMode: 'explore' as const } },
+      { field: 'userMessage', mutated: { ...baseline, userMessage: 'Mutated message' } },
+      { field: 'userName', mutated: { ...baseline, userName: 'Bob' } },
+      { field: 'selectedOptionId', mutated: { ...baseline, selectedOptionId: 'opt-mutated-2' } },
+      { field: 'problemStatement', mutated: { ...baseline, problemStatement: 'Mutated statement' } },
+      { field: 'clarifiedObjective', mutated: { ...baseline, clarifiedObjective: 'Mutated objective' } },
+      { field: 'model', mutated: { ...baseline, model: 'gemini-2.5-pro' } },
+      { field: 'nextStage', mutated: { ...baseline, nextStage: 'break_subproblems' as const } },
+      { field: 'nextMode', mutated: { ...baseline, nextMode: 'explore' as const } },
+    ];
+
+    for (const { field, mutated } of mutations) {
+      const mutatedHash = computeRequestHash(mutated);
+      assert.notStrictEqual(
+        mutatedHash,
+        baseHash,
+        `Mutating "${field}" must change the canonical SHA-256 request hash`
+      );
+    }
+  });
+
+  test('record_workflow_step_tx rejects legacy record with empty or missing hash when request_hash is provided', async () => {
+    // Simulates the exact SQL logic in record_workflow_step_tx:
+    // If an existing idempotency record is found under lock, but its stored request_hash is empty or NULL,
+    // the transaction must reject with 'Idempotency key reuse violation' rather than returning unverified payload.
+    const legacyRecords: Array<{ description: string; existingHash: string | null }> = [
+      { description: 'empty string hash', existingHash: '' },
+      { description: 'null hash', existingHash: null },
+    ];
+
+    for (const { description, existingHash } of legacyRecords) {
+      const mockClient = {
+        rpc: async (fn: string, args: Record<string, unknown>) => {
+          if (fn === 'record_workflow_step_tx') {
+            const p_request_hash = args.p_request_hash as string | undefined;
+            const v_existing_hash = existingHash;
+            const v_existing_payload = { message: 'Legacy response', nextStep: 'explore' };
+
+            if (args.p_client_request_id && v_existing_payload) {
+              if (p_request_hash && p_request_hash !== '') {
+                if (v_existing_hash === null || v_existing_hash === '' || p_request_hash !== v_existing_hash) {
+                  return {
+                    data: null,
+                    error: {
+                      message: `Idempotency key reuse violation: request_id "${args.p_client_request_id}" was previously used with different or unverified payload`,
+                    },
+                  };
+                }
+              }
+              return { data: v_existing_payload, error: null };
+            }
+          }
+          return { data: null, error: null };
+        },
+      } as unknown as SupabaseClient;
+
+      const repo = new SupabaseThinkingRepository(mockClient);
+      const clientRequestId = `req-legacy-rpc-${Date.now()}-${Math.random()}`;
+
+      await assert.rejects(
+        async () => {
+          await repo.recordWorkflowStep(
+            {
+              sessionId: 'sess-legacy-1',
+              userMessage: 'New prompt',
+              assistantMessage: 'New answer',
+              nextStage: 'clarify_objective',
+              nextMode: 'understand',
+              expectedStage: 'welcome',
+              expectedMode: 'understand',
+              clientRequestId,
+            },
+            'user-legacy-test'
+          );
+        },
+        (err: Error) => {
+          return err.message.includes('Idempotency key reuse violation') && err.message.includes('unverified payload');
+        },
+        `RPC must reject legacy record with ${description} when caller provides a verified payload hash`
+      );
+    }
+  });
+
+  test('record_workflow_step_tx rejects concurrent requests using same clientRequestId but different payloads', async () => {
+    // Simulates two concurrent requests with same clientRequestId:
+    // Request 1 commits with payload hash H1.
+    // Request 2 arrives concurrently with payload hash H2.
+    // RPC lock serializes them: Request 2 finds Request 1's record and rejects due to hash mismatch.
+    let storedPayload: Record<string, unknown> | null = null;
+    let storedHash: string | null = null;
+
+    const mockClient = {
+      rpc: async (fn: string, args: Record<string, unknown>) => {
+        if (fn === 'record_workflow_step_tx') {
+          const p_request_hash = args.p_request_hash as string;
+          if (args.p_client_request_id && storedPayload) {
+            if (p_request_hash && p_request_hash !== '') {
+              if (storedHash === null || storedHash === '' || p_request_hash !== storedHash) {
+                return {
+                  data: null,
+                  error: {
+                    message: `Idempotency key reuse violation: request_id "${args.p_client_request_id}" was previously used with different or unverified payload`,
+                  },
+                };
+              }
+            }
+            return { data: { ...storedPayload, isIdempotentReplay: true }, error: null };
+          }
+
+          // First request sets the record
+          storedPayload = {
+            sessionId: args.p_session_id,
+            assistantMessageId: 'asst-msg-tx-1',
+            nextStage: args.p_next_stage,
+            nextMode: args.p_next_mode,
+            message: 'First request output',
+            nextStep: args.p_next_stage,
+          };
+          storedHash = p_request_hash;
+
+          return { data: storedPayload, error: null };
+        }
+        return { data: null, error: null };
+      },
+    } as unknown as SupabaseClient;
+
+    const repo = new SupabaseThinkingRepository(mockClient);
+    const sharedRequestId = `req-concurrent-shared-${Date.now()}`;
+
+    // Request 1 commits
+    const req1 = await repo.recordWorkflowStep(
+      {
+        sessionId: 'sess-conc-1',
+        userMessage: 'Original question',
+        assistantMessage: 'First request output',
+        nextStage: 'clarify_objective',
+        nextMode: 'understand',
+        expectedStage: 'welcome',
+        expectedMode: 'understand',
+        clientRequestId: sharedRequestId,
+      },
+      'user-conc'
+    );
+    assert.strictEqual(req1.nextStage, 'clarify_objective');
+
+    // Clear in-memory cache to force transaction RPC path
+    SupabaseThinkingRepository.idempotencyCache.clear();
+
+    // Request 2 uses same ID but different userMessage (producing different hash)
+    await assert.rejects(
+      async () => {
+        await repo.recordWorkflowStep(
+          {
+            sessionId: 'sess-conc-1',
+            userMessage: 'DIFFERENT concurrent question',
+            assistantMessage: 'First request output',
+            nextStage: 'clarify_objective',
+            nextMode: 'understand',
+            expectedStage: 'welcome',
+            expectedMode: 'understand',
+            clientRequestId: sharedRequestId,
+          },
+          'user-conc'
+        );
+      },
+      (err: Error) => {
+        return err.message.includes('Idempotency key reuse violation');
+      },
+      'RPC must reject concurrent request reusing ID with different payload'
+    );
+  });
 });
+

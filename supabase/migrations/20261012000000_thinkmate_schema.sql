@@ -279,10 +279,12 @@ BEGIN
       AND client_request_id = p_client_request_id;
 
     IF v_existing_payload IS NOT NULL THEN
-      -- Enforce payload consistency: reject if same key is reused with different content
-      IF p_request_hash IS NOT NULL AND v_existing_hash IS NOT NULL AND p_request_hash != v_existing_hash THEN
-        RAISE EXCEPTION 'Idempotency key reuse violation: request_id "%" was previously used with different payload',
-          p_client_request_id;
+      -- Enforce payload consistency: require existing hash to be non-empty and equal
+      IF p_request_hash IS NOT NULL AND p_request_hash != '' THEN
+        IF v_existing_hash IS NULL OR v_existing_hash = '' OR p_request_hash != v_existing_hash THEN
+          RAISE EXCEPTION 'Idempotency key reuse violation: request_id "%" was previously used with different or unverified payload',
+            p_client_request_id;
+        END IF;
       END IF;
       RETURN v_existing_payload;
     END IF;

@@ -226,6 +226,25 @@ export function getActiveRateLimitStore(): RateLimitStore {
     return new UpstashRedisRateLimitStore(upstashUrl, upstashToken);
   }
 
+  // In production, reject rate-limited API requests when distributed Redis credentials are missing
+  // to prevent per-instance quota bypasses in serverless / multi-instance environments.
+  if (process.env.NODE_ENV === 'production') {
+    return {
+      get: () => new Array(10000).fill(Date.now()),
+      set: () => {},
+      checkAndRecord: (_key: string, _limit: number, windowMs: number) => {
+        console.error(
+          '[RateLimiter] Critical configuration failure: UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN must be configured in production to enforce distributed rate limits.'
+        );
+        return {
+          allowed: false,
+          remaining: 0,
+          resetMs: windowMs || 60000,
+        };
+      },
+    };
+  }
+
   return memoryStore;
 }
 
