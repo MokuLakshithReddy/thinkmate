@@ -4,6 +4,7 @@ import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { getAuthenticatedUser } from '@/lib/server-auth';
 import { STAGE_TO_MODE, MODE_TO_DEFAULT_STAGE } from '@/services/workflow/state-machine';
 import { readBoundedJson } from '@/lib/request-utils';
+import { checkRateLimitAsync } from '@/lib/rate-limiter';
 
 const CreateSessionSchema = z
   .object({
@@ -51,6 +52,18 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    // Rate Limiting: 120 req/min for authenticated session reads
+    const rateCheck = await checkRateLimitAsync(`read:sessions:${authUser.id}`, 120, 60000);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded: too many session read requests. Please wait before retrying.' },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
+        }
+      );
+    }
+
     const id = req.nextUrl.searchParams.get('id');
     if (id) {
       const session = await getRepository().getSession(id, authUser.id);
@@ -89,6 +102,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { error: 'Authentication required: please provide a valid Supabase bearer token' },
         { status: 401 }
+      );
+    }
+
+    // Rate Limiting: 30 req/min for authenticated session mutations (create)
+    const rateCheck = await checkRateLimitAsync(`mutation:sessions:${authUser.id}`, 30, 60000);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded: too many session creation requests. Please wait before retrying.' },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
+        }
       );
     }
 
@@ -144,6 +169,18 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json(
         { error: 'Authentication required: please provide a valid Supabase bearer token' },
         { status: 401 }
+      );
+    }
+
+    // Rate Limiting: 30 req/min for authenticated session mutations (delete)
+    const rateCheck = await checkRateLimitAsync(`mutation:sessions:${authUser.id}`, 30, 60000);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded: too many session deletion requests. Please wait before retrying.' },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
+        }
       );
     }
 

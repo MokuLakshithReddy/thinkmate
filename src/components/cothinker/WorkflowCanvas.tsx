@@ -47,68 +47,96 @@ export function WorkflowCanvas({
 
   const currentStageInfo = WORKFLOW_STAGES[currentStep];
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === '+' || e.key === '=') {
+      e.preventDefault();
+      setZoom((z) => Math.min(z + 10, 150));
+    } else if (e.key === '-') {
+      e.preventDefault();
+      setZoom((z) => Math.max(z - 10, 70));
+    } else if (e.key === '0') {
+      e.preventDefault();
+      setZoom(100);
+    }
+  };
+
   return (
-    <div className="flex-1 bg-[#f9fafb] relative overflow-hidden flex flex-col justify-center items-center p-6 select-none border-r border-slate-200">
+    <div
+      role="region"
+      aria-label="Workflow progress overview"
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      className="flex-1 bg-[#f9fafb] relative overflow-hidden flex flex-col justify-center items-center p-6 border-r border-slate-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-purple-400 focus-visible:ring-inset"
+    >
       {/* Subtle Dot Grid Canvas Pattern */}
       <div
-        className="absolute inset-0 pointer-events-none opacity-40"
+        aria-hidden="true"
+        className="absolute inset-0 pointer-events-none select-none opacity-40"
         style={{
           backgroundImage: 'radial-gradient(#cbd5e1 1px, transparent 1px)',
           backgroundSize: '20px 20px',
         }}
       />
 
-      {/* Main Node Card: Co-think Assistant */}
+      {/* Main Node Card: Co-think Assistant Overview */}
       <div
         className="relative z-10 transition-transform duration-200"
         style={{ transform: `scale(${zoom / 100})` }}
       >
-        <div className="w-80 md:w-88 rounded-2xl bg-[#f0f4fa] border-2 border-purple-300 p-5 shadow-lg shadow-purple-900/5 relative">
+        <div className="w-80 md:w-88 rounded-2xl bg-[#f0f4fa] border-2 border-purple-300 p-5 shadow-lg shadow-purple-900/5 relative select-text">
           {/* Connector handle on top right */}
-          <div className="absolute -top-1.5 -right-1.5 h-3.5 w-3.5 rounded-full bg-slate-900 border-2 border-white" />
+          <div aria-hidden="true" className="absolute -top-1.5 -right-1.5 h-3.5 w-3.5 rounded-full bg-slate-900 border-2 border-white" />
 
           {/* Card Header: ✦ Co-think Assistant */}
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
               <span className="text-slate-900 font-semibold text-sm flex items-center gap-1.5">
-                <Sparkles className="h-4 w-4 text-purple-600 fill-purple-600" />
+                <Sparkles className="h-4 w-4 text-purple-600 fill-purple-600" aria-hidden="true" />
                 Co-think Assistant
               </span>
             </div>
 
             {/* Spinner indicator */}
             {isLoading ? (
-              <div className="h-4 w-4 rounded-full border-2 border-purple-600 border-t-transparent animate-spin" />
+              <div
+                role="status"
+                aria-label="Thinking in progress"
+                className="h-4 w-4 rounded-full border-2 border-purple-600 border-t-transparent animate-spin"
+              />
             ) : (
-              <div className="h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-200" />
+              <div
+                role="status"
+                aria-label="Assistant ready"
+                className="h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-200"
+              />
             )}
           </div>
 
           {/* Card Instructions */}
-          <p className="text-xs text-slate-700 leading-relaxed font-sans mb-4">
+          <p className="text-xs text-slate-700 leading-relaxed font-sans mb-4 select-text">
             {currentStageInfo.nodeInstruction}
           </p>
 
           {/* Used in this step badge */}
-          <div className="pt-2 border-t border-purple-200/80 flex items-center justify-between text-[11px] text-slate-500">
+          <div className="pt-2 border-t border-purple-200/80 flex items-center justify-between text-[11px] text-slate-500 select-text">
             <span>Used in this step</span>
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-purple-200 text-slate-800 font-medium shadow-2xs">
-              <Database className="h-3 w-3 text-purple-600" />
+              <Database className="h-3 w-3 text-purple-600" aria-hidden="true" />
               {currentStageInfo.memoryKey || 'Co-Thinker Memory'}
             </span>
           </div>
         </div>
 
         {/* Visual Flowchart Overview */}
-        <div className="mt-6 w-80 md:w-88 bg-white/90 backdrop-blur-xs border border-slate-200 rounded-xl p-3 shadow-xs">
+        <div className="mt-6 w-80 md:w-88 bg-white/90 backdrop-blur-xs border border-slate-200 rounded-xl p-3 shadow-xs select-text">
           <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center justify-between">
-            <span>Active Thinking Pipeline</span>
+            <span id="pipeline-heading">Workflow Progress Overview</span>
             <span className="text-purple-600 font-mono">
               Step {currentStageInfo.number}/8
             </span>
           </div>
 
-          <div className="space-y-1">
+          <div className="space-y-1" role="list" aria-labelledby="pipeline-heading">
             {stepsList.map((stepKey) => {
               const info = WORKFLOW_STAGES[stepKey];
               const isCurrent = currentStep === stepKey;
@@ -117,8 +145,10 @@ export function WorkflowCanvas({
               return (
                 <div
                   key={stepKey}
+                  role="listitem"
+                  aria-current={isCurrent ? 'step' : undefined}
                   className={cn(
-                    'flex items-center justify-between px-2.5 py-1 rounded-lg text-[11px] transition-all',
+                    'flex items-center justify-between px-2.5 py-1 rounded-lg text-[11px] transition-all select-text',
                     isCurrent
                       ? 'bg-purple-100/90 text-purple-900 font-semibold border border-purple-300'
                       : isPassed
@@ -132,10 +162,16 @@ export function WorkflowCanvas({
                   </div>
 
                   {isCurrent && (
-                    <span className="h-1.5 w-1.5 rounded-full bg-purple-600 animate-pulse shrink-0" />
+                    <span
+                      aria-label="Current active step"
+                      className="h-1.5 w-1.5 rounded-full bg-purple-600 animate-pulse shrink-0"
+                    />
                   )}
                   {isPassed && (
-                    <CheckCircle2 className="h-3 w-3 text-emerald-600 shrink-0" />
+                    <CheckCircle2
+                      aria-label="Step completed"
+                      className="h-3 w-3 text-emerald-600 shrink-0"
+                    />
                   )}
                 </div>
               );
@@ -143,52 +179,66 @@ export function WorkflowCanvas({
           </div>
 
           {/* Loopback Note */}
-          <div className="mt-2 text-[10px] text-slate-500 bg-slate-50 rounded p-1.5 flex items-center gap-1.5">
-            <RotateCcw className="h-3 w-3 text-purple-600 shrink-0" />
+          <div className="mt-2 text-[10px] text-slate-500 bg-slate-50 rounded p-1.5 flex items-center gap-1.5 select-text">
+            <RotateCcw className="h-3 w-3 text-purple-600 shrink-0" aria-hidden="true" />
             <span>If understanding is incomplete at Step 6, workflow loops back to Step 4.</span>
           </div>
         </div>
       </div>
 
-      {/* Canvas Zoom & Controls Bar */}
-      <div className="absolute bottom-4 right-4 z-20 flex flex-col items-center bg-white border border-slate-200 rounded-lg p-1 shadow-md">
+      {/* Canvas Zoom & Controls Toolbar */}
+      <div
+        role="toolbar"
+        aria-label="Workflow overview controls"
+        className="absolute bottom-4 right-4 z-20 flex flex-col items-center bg-white border border-slate-200 rounded-lg p-1 shadow-md select-none"
+      >
         <button
+          type="button"
           onClick={() => setZoom(100)}
-          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer"
-          title="Fit to 100%"
+          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer focus:outline-hidden focus-visible:ring-2 focus-visible:ring-purple-500"
+          title={`Fit to 100% (current: ${zoom}%)`}
+          aria-label={`Reset zoom to 100 percent. Current zoom is ${zoom} percent.`}
         >
-          <Maximize2 className="h-3.5 w-3.5" />
+          <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
         <button
+          type="button"
           onClick={() => setZoom((z) => Math.min(z + 10, 150))}
-          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer"
-          title="Zoom in"
+          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer focus:outline-hidden focus-visible:ring-2 focus-visible:ring-purple-500"
+          title="Zoom in (+)"
+          aria-label="Zoom in pipeline overview"
         >
-          <Plus className="h-3.5 w-3.5" />
+          <Plus className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
         <button
+          type="button"
           onClick={() => setZoom((z) => Math.max(z - 10, 70))}
-          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer"
-          title="Zoom out"
+          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer focus:outline-hidden focus-visible:ring-2 focus-visible:ring-purple-500"
+          title="Zoom out (-)"
+          aria-label="Zoom out pipeline overview"
         >
-          <Minus className="h-3.5 w-3.5" />
+          <Minus className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
-        <div className="w-full h-px bg-slate-200 my-0.5" />
+        <div className="w-full h-px bg-slate-200 my-0.5" aria-hidden="true" />
         <button
+          type="button"
           onClick={onUndo}
           disabled={!canUndo}
-          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed focus:outline-hidden focus-visible:ring-2 focus-visible:ring-purple-500"
           title="Undo to previous step"
+          aria-label="Undo to previous step"
         >
-          <Undo2 className="h-3.5 w-3.5" />
+          <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
         <button
+          type="button"
           onClick={onRedo}
           disabled={!canRedo}
-          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed focus:outline-hidden focus-visible:ring-2 focus-visible:ring-purple-500"
           title="Redo to next step"
+          aria-label="Redo to next step"
         >
-          <Redo2 className="h-3.5 w-3.5" />
+          <Redo2 className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
       </div>
     </div>

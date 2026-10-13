@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { getAuthenticatedUser } from '@/lib/server-auth';
 import { readBoundedJson } from '@/lib/request-utils';
+import { checkRateLimitAsync } from '@/lib/rate-limiter';
 
 const InsightMutationSchema = z.object({
   id: z.string().optional(),
@@ -34,6 +35,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { error: 'Authentication required: please provide a valid Supabase bearer token' },
         { status: 401 }
+      );
+    }
+
+    // Rate Limiting: 60 req/min for authenticated insight mutations (create/update)
+    const rateCheck = await checkRateLimitAsync(`mutation:insights:${authUser.id}`, 60, 60000);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded: too many insight mutations. Please wait before retrying.' },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
+        }
       );
     }
 
@@ -88,6 +101,18 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json(
         { error: 'Authentication required: please provide a valid Supabase bearer token' },
         { status: 401 }
+      );
+    }
+
+    // Rate Limiting: 60 req/min for authenticated insight mutations (delete)
+    const rateCheck = await checkRateLimitAsync(`mutation:insights:${authUser.id}`, 60, 60000);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded: too many insight deletion requests. Please wait before retrying.' },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
+        }
       );
     }
 

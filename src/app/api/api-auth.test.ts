@@ -770,4 +770,100 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       if (origToken !== undefined) process.env.UPSTASH_REDIS_REST_TOKEN = origToken;
     }
   });
+
+  test('POST /api/sessions, POST /api/insights, and POST /api/workflow/transition enforce mutation rate limits', async () => {
+    const origGetUser = supabase.auth.getUser;
+    const testUserId = `usr-ratelimit-${Date.now()}`;
+
+    // @ts-expect-error test stub
+    supabase.auth.getUser = async (token: string) => {
+      if (token === 'mock-token-ratelimit') {
+        return { data: { user: { id: testUserId, email: 'rate@example.com' } }, error: null };
+      }
+      return origGetUser.call(supabase.auth, token);
+    };
+
+    try {
+      // Simulate exhausting session creation mutation limit (30 req/min)
+      for (let i = 0; i < 30; i++) {
+        await checkRateLimitAsync(`mutation:sessions:${testUserId}`, 30, 60000);
+      }
+
+      const req = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-ratelimit',
+        },
+        body: JSON.stringify({
+          title: 'Rate Limit Session',
+          problemStatement: 'Testing rate limits',
+        }),
+      });
+
+      const res = await sessionsPost(req);
+      assert.strictEqual(res.status, 429, 'Session creation must return 429 when mutation limit exceeded');
+      assert.ok(res.headers.get('Retry-After'), 'Must include Retry-After header');
+      const json = await res.json();
+      assert.ok(json.error.includes('Rate limit exceeded'));
+    } finally {
+      supabase.auth.getUser = origGetUser;
+    }
+  });
+
+  test('Cookie-based authentication enforces CSRF protection on state-changing requests', async () => {
+    const origGetUser = supabase.auth.getUser;
+    const origCreateSession = SupabaseThinkingRepository.prototype.createSession;
+    const testUserId = `usr-csrf-${Date.now()}`;
+
+    // @ts-expect-error test stub
+    supabase.auth.getUser = async (token: string) => {
+      if (token === 'mock-cookie-token') {
+        return { data: { user: { id: testUserId, email: 'csrf@example.com' } }, error: null };
+      }
+      return origGetUser.call(supabase.auth, token);
+    };
+
+    SupabaseThinkingRepository.prototype.createSession = async (session) => session;
+
+    try {
+      // 1. Cross-origin POST request with cookie authentication must be rejected
+      const crossOriginReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://malicious-attacker.com',
+          Cookie: 'sb-access-token=mock-cookie-token',
+        },
+        body: JSON.stringify({
+          title: 'CSRF Attack Attempt',
+          problemStatement: 'Malicious payload',
+        }),
+      });
+
+      const crossOriginRes = await sessionsPost(crossOriginReq);
+      assert.strictEqual(crossOriginRes.status, 401, 'Cross-origin cookie POST must be rejected by CSRF protection');
+
+      // 2. Same-origin POST request with cookie authentication is accepted
+      const sameOriginReq = new NextRequest('http://localhost:3000/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'http://localhost:3000',
+          Host: 'localhost:3000',
+          Cookie: 'sb-access-token=mock-cookie-token',
+        },
+        body: JSON.stringify({
+          title: 'Legitimate Same-Origin Session',
+          problemStatement: 'Legitimate request',
+        }),
+      });
+
+      const sameOriginRes = await sessionsPost(sameOriginReq);
+      assert.strictEqual(sameOriginRes.status, 200, 'Same-origin cookie POST must pass CSRF validation');
+    } finally {
+      supabase.auth.getUser = origGetUser;
+      SupabaseThinkingRepository.prototype.createSession = origCreateSession;
+    }
+  });
 });

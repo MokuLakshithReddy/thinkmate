@@ -3,6 +3,7 @@ import { ModeTransitionRequestSchema, WorkflowStateMachine } from '@/services/wo
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { getAuthenticatedUser } from '@/lib/server-auth';
 import { readBoundedJson } from '@/lib/request-utils';
+import { checkRateLimitAsync } from '@/lib/rate-limiter';
 
 let repositoryInstance: SupabaseThinkingRepository | null = null;
 function getRepository() {
@@ -19,6 +20,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { error: 'Authentication required: please provide a valid Supabase bearer token' },
         { status: 401 }
+      );
+    }
+
+    // Rate Limiting: 30 req/min for authenticated workflow mode transitions
+    const rateCheck = await checkRateLimitAsync(`mutation:workflow_transition:${authUser.id}`, 30, 60000);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded: too many workflow transition requests. Please wait before retrying.' },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
+        }
       );
     }
 
