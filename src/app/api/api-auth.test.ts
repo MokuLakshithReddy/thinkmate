@@ -2,7 +2,7 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import type { Session, User, AuthError, SupabaseClient } from '@supabase/supabase-js';
+import type { AuthError, SupabaseClient } from '@supabase/supabase-js';
 import { NextRequest } from 'next/server';
 import { POST as coThinkPost } from './cothink/route';
 import { POST as thinkStreamPost } from './think/stream/route';
@@ -21,9 +21,9 @@ import { checkRateLimitAsync, checkRateLimit, getClientIp, MemoryRateLimitStore,
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
-import { proxy } from '@/proxy';
-import { SECURE_COOKIE_OPTIONS, RotationGraceCache, rotationGraceCache, revokeUserSession, hashTokenKey, getClusterEncryptionKey, refreshUserSession } from '@/lib/server-auth';
+import { SECURE_COOKIE_OPTIONS, RotationGraceCache, rotationGraceCache, revokeUserSession, hashTokenKey, getClusterEncryptionKey, refreshUserSession, saveDistributedRotatedSession } from '@/lib/server-auth';
 import { normalizeInsightCategory, normalizeInsightStatus } from '@/types';
+import { proxy } from '@/proxy';
 
 describe('API Security Boundaries & Authentication Enforcement', () => {
   test('POST /api/cothink rejects unauthenticated callers with 401', async () => {
@@ -221,24 +221,31 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
 
   test('getClientIp sanitizes proxy headers and prioritizes verified edge headers', async () => {
     const { getClientIp } = await import('@/lib/rate-limiter');
+    const oldProvider = process.env.TRUSTED_PROXY_PROVIDER;
 
-    // CF header priority
-    const cfReq = new Request('https://thinkmate.test', {
-      headers: {
-        'cf-connecting-ip': '203.0.113.195',
-        'x-forwarded-for': '198.51.100.1, 10.0.0.1',
-      },
-    });
-    assert.strictEqual(getClientIp(cfReq), '203.0.113.195');
+    try {
+      // CF header priority when provider is configured as cloudflare
+      process.env.TRUSTED_PROXY_PROVIDER = 'cloudflare';
+      const cfReq = new Request('https://thinkmate.test', {
+        headers: {
+          'cf-connecting-ip': '203.0.113.195',
+          'x-forwarded-for': '198.51.100.1, 10.0.0.1',
+        },
+      });
+      assert.strictEqual(getClientIp(cfReq), '203.0.113.195');
 
-    // Real-IP header priority
-    const realIpReq = new Request('https://thinkmate.test', {
-      headers: {
-        'x-real-ip': '198.51.100.42:8080',
-        'x-forwarded-for': 'attacker-spoofed-string, 198.51.100.42',
-      },
-    });
-    assert.strictEqual(getClientIp(realIpReq), '198.51.100.42');
+      // Real-IP header priority when provider is configured as nginx
+      process.env.TRUSTED_PROXY_PROVIDER = 'nginx';
+      const realIpReq = new Request('https://thinkmate.test', {
+        headers: {
+          'x-real-ip': '198.51.100.42:8080',
+          'x-forwarded-for': 'attacker-spoofed-string, 198.51.100.42',
+        },
+      });
+      assert.strictEqual(getClientIp(realIpReq), '198.51.100.42');
+    } finally {
+      process.env.TRUSTED_PROXY_PROVIDER = oldProvider;
+    }
 
     // X-Forwarded-For extracts valid IP and filters invalid input
     const xffReq = new Request('https://thinkmate.test', {
@@ -2414,39 +2421,87 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
 
   test('Multi-instance refresh race recovers rotated session from distributed store when GoTrue reports error', async () => {
     const origRefresh = supabase.auth.refreshSession;
+    const origFetch = global.fetch;
+    const origUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const origToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+    const origKey = process.env.SESSION_ENCRYPTION_KEY;
+
     const testOldToken = 'multi-instance-race-old-token-' + Date.now();
     const testNewToken = 'multi-instance-race-new-token-' + Date.now();
     const mockUser = { id: 'usr-race-test', email: 'race@example.com', app_metadata: {}, user_metadata: {}, aud: 'authenticated', created_at: '' };
     const mockNewSession = { access_token: 'new-acc-tok', refresh_token: testNewToken, expires_in: 3600, token_type: 'bearer', user: mockUser };
 
-    try {
-      // Set up rotation grace cache with the distributed session directly to simulate Instance A's write
-      rotationGraceCache.set(testOldToken, {
-        session: mockNewSession as unknown as Session,
-        user: mockUser as unknown as User,
-        expiresAt: Date.now() + 8000,
-      });
+    // Shared mock Redis cluster store accessible by both independent instances
+    const redisStore = new Map<string, string>();
 
-      // Now Instance B receives a request with the SAME old refresh token.
-      // GoTrue rejects it with an error ("Already used" or invalid grant) because Instance A used it first.
+    try {
+      process.env.UPSTASH_REDIS_REST_URL = 'https://upstash.redis.cluster.test';
+      process.env.UPSTASH_REDIS_REST_TOKEN = 'secret-redis-token-32-chars-long!';
+      process.env.SESSION_ENCRYPTION_KEY = 'a-32-byte-test-cluster-encryption-secret-key!';
+
+      global.fetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const urlStr = String(url);
+        if (urlStr.includes('upstash.redis.cluster.test')) {
+          if (init?.method === 'POST') {
+            const body = JSON.parse(init.body as string);
+            if (Array.isArray(body)) {
+              const cmd = body[0];
+              if (cmd === 'SET') {
+                const [, key, val] = body;
+                redisStore.set(key, val);
+                return new Response(JSON.stringify({ result: 'OK' }), { status: 200 });
+              } else if (cmd === 'GET') {
+                const [, key] = body;
+                const val = redisStore.get(key) || null;
+                return new Response(JSON.stringify({ result: val }), { status: 200 });
+              }
+            }
+          }
+        }
+        return origFetch(url, init);
+      };
+
+      // Ensure Instance 2's local in-memory cache is completely EMPTY for this token
+      rotationGraceCache.clear();
+      assert.strictEqual(rotationGraceCache.get(testOldToken), undefined, 'Instance 2 local memory cache must start empty');
+
+      // Simulate Instance 1 writing the rotated session to the shared Redis cluster with a slight network delay
+      setTimeout(async () => {
+        await saveDistributedRotatedSession(testOldToken, mockNewSession, mockUser);
+      }, 40);
+
+      // Simultaneously, Instance 2 receives a request with the SAME old refresh token.
+      // GoTrue rejects it with an error ("Already used" / invalid grant) because Instance 1 rotated it first.
       supabase.auth.refreshSession = async () => ({
         data: { session: null, user: null },
         error: { message: 'Refresh token already rotated / invalid grant' } as unknown as AuthError,
       });
 
-      // Instance B calls refreshUserSession
+      // Instance 2 calls refreshUserSession
       const result = await refreshUserSession(testOldToken);
 
-      // Instance B recovers the session rotated by Instance A!
-      assert.strictEqual(result.error, null, 'Must successfully recover without error');
-      assert.strictEqual(result.data.session?.refresh_token, testNewToken, 'Must recover rotated refresh token from distributed cache');
-      assert.strictEqual(result.data.user?.id, mockUser.id, 'Must recover user profile');
+      // Instance 2 successfully recovers the rotated credentials from shared Redis after backoff!
+      assert.strictEqual(result.error, null, 'Instance 2 must successfully recover without error');
+      assert.strictEqual(result.data.session?.refresh_token, testNewToken, 'Instance 2 must recover rotated refresh token from shared Redis');
+      assert.strictEqual(result.data.user?.id, mockUser.id, 'Instance 2 must recover user profile');
+
+      // Verify that Instance 2's local in-memory cache has now been populated by the distributed recovery
+      const instance2Cached = rotationGraceCache.get(testOldToken);
+      assert.ok(instance2Cached, 'Instance 2 local memory cache must be populated after distributed recovery');
+      assert.strictEqual(instance2Cached?.session.refresh_token, testNewToken);
     } finally {
       supabase.auth.refreshSession = origRefresh;
+      global.fetch = origFetch;
+      if (origUrl !== undefined) process.env.UPSTASH_REDIS_REST_URL = origUrl;
+      else delete process.env.UPSTASH_REDIS_REST_URL;
+      if (origToken !== undefined) process.env.UPSTASH_REDIS_REST_TOKEN = origToken;
+      else delete process.env.UPSTASH_REDIS_REST_TOKEN;
+      if (origKey !== undefined) process.env.SESSION_ENCRYPTION_KEY = origKey;
+      else delete process.env.SESSION_ENCRYPTION_KEY;
     }
   });
 
-  test('getClusterEncryptionKey enforces 32-byte entropy in production', () => {
+  test('getClusterEncryptionKey derives uniform 32-byte key via HKDF and prohibits service-role fallback in production', () => {
     const origEnv = process.env.NODE_ENV;
     const origKey = process.env.SESSION_ENCRYPTION_KEY;
     const origSecret = process.env.ROTATION_SECRET;
@@ -2458,19 +2513,23 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       delete process.env.ROTATION_SECRET;
       delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-      // 1. Missing keys in production throws fatal error
+      // 1. Missing dedicated secret in production throws fatal error
       assert.throws(() => getClusterEncryptionKey(), /SECURITY FATAL/);
 
-      // 2. Secret with < 32 characters in production throws fatal error
-      process.env.SESSION_ENCRYPTION_KEY = 'short-weak-key';
-      assert.throws(() => getClusterEncryptionKey(), /must be at least 32 characters/);
+      // 2. Service-role fallback in production is strictly prohibited
+      process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-key-that-must-never-be-used-for-token-encryption-32-chars!';
+      assert.throws(() => getClusterEncryptionKey(), /Service-role key derivation is strictly prohibited in production/);
 
-      // 3. Valid 32-character key produces 32-byte Buffer
+      // 3. Secret with < 32 bytes in production throws fatal error
+      process.env.SESSION_ENCRYPTION_KEY = 'short-weak-key';
+      assert.throws(() => getClusterEncryptionKey(), /must provide at least 32 bytes of entropy/);
+
+      // 4. Dedicated high-entropy secret derives uniform 32-byte Buffer via HKDF-SHA256
       process.env.SESSION_ENCRYPTION_KEY = 'a-super-secret-high-entropy-key-32-chars-long!';
       const keyBuffer = getClusterEncryptionKey();
       assert.strictEqual(keyBuffer.length, 32);
 
-      // 4. In test/development, weak key derives 32-byte SHA-256 hash smoothly
+      // 5. In test/development, weak key derives 32-byte key safely via HKDF without crashing
       (process.env as Record<string, string | undefined>).NODE_ENV = 'test';
       process.env.SESSION_ENCRYPTION_KEY = 'short';
       const devBuffer = getClusterEncryptionKey();
@@ -2486,19 +2545,28 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     }
   });
 
-  test('getClientIp uses TRUSTED_PROXY_DEPTH to prevent leftmost IP header spoofing', () => {
+  test('getClientIp uses TRUSTED_PROXY_DEPTH and prevents edge header spoofing without designated provider', () => {
     const origDepth = process.env.TRUSTED_PROXY_DEPTH;
+    const origProvider = process.env.TRUSTED_PROXY_PROVIDER;
+    const origHeader = process.env.TRUSTED_PROXY_HEADER;
+
     try {
-      // Depth 1: picks the rightmost valid proxy hop (closest to our server)
+      delete process.env.TRUSTED_PROXY_PROVIDER;
+      delete process.env.TRUSTED_PROXY_HEADER;
+
+      // 1. Standard mode: Attacker injects fake cf-connecting-ip and x-real-ip
+      // Must NOT trust spoofed headers; uses verified x-forwarded-for with TRUSTED_PROXY_DEPTH
       process.env.TRUSTED_PROXY_DEPTH = '1';
-      const spoofedReq1 = new Request('http://localhost:3000', {
+      const spoofedReq = new Request('http://localhost:3000', {
         headers: {
-          'x-forwarded-for': '203.0.113.195, 198.51.100.1', // Left is client-forged, Right is proxy
+          'cf-connecting-ip': '1.1.1.1', // Spoofed client header
+          'x-real-ip': '2.2.2.2',        // Spoofed client header
+          'x-forwarded-for': '203.0.113.195, 198.51.100.1', // Left is client-forged, Right is edge proxy hop
         },
       });
-      assert.strictEqual(getClientIp(spoofedReq1), '198.51.100.1');
+      assert.strictEqual(getClientIp(spoofedReq), '198.51.100.1', 'Must ignore spoofed edge headers in standard mode');
 
-      // Depth 2: picks 2nd from right
+      // 2. Depth 2: picks 2nd from right
       process.env.TRUSTED_PROXY_DEPTH = '2';
       const spoofedReq2 = new Request('http://localhost:3000', {
         headers: {
@@ -2506,9 +2574,23 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
         },
       });
       assert.strictEqual(getClientIp(spoofedReq2), '203.0.113.50');
+
+      // 3. Designated Cloudflare provider: honors cf-connecting-ip when explicitly configured
+      process.env.TRUSTED_PROXY_PROVIDER = 'cloudflare';
+      const cfReq = new Request('http://localhost:3000', {
+        headers: {
+          'cf-connecting-ip': '198.51.100.99',
+          'x-forwarded-for': '203.0.113.195, 198.51.100.1',
+        },
+      });
+      assert.strictEqual(getClientIp(cfReq), '198.51.100.99', 'Must honor cf-connecting-ip when Cloudflare provider is designated');
     } finally {
       if (origDepth !== undefined) process.env.TRUSTED_PROXY_DEPTH = origDepth;
       else delete process.env.TRUSTED_PROXY_DEPTH;
+      if (origProvider !== undefined) process.env.TRUSTED_PROXY_PROVIDER = origProvider;
+      else delete process.env.TRUSTED_PROXY_PROVIDER;
+      if (origHeader !== undefined) process.env.TRUSTED_PROXY_HEADER = origHeader;
+      else delete process.env.TRUSTED_PROXY_HEADER;
     }
   });
 

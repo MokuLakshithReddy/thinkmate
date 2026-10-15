@@ -1234,3 +1234,498 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
   });
 });
 
+describe('Service-Role Complete Cross-User Ownership & IDOR Audit', () => {
+  interface DbState {
+    sessions: Map<string, Record<string, unknown>>;
+    messages: Map<string, Record<string, unknown>>;
+    insights: Map<string, Record<string, unknown>>;
+    idempotency: Map<string, Record<string, unknown>>;
+  }
+
+  function createStatefulClient(state: DbState): SupabaseClient {
+    return {
+      rpc: async (fn: string, args: Record<string, unknown>) => {
+        if (fn === 'record_workflow_step_tx') {
+          const session = state.sessions.get(args.p_session_id as string);
+          if (!session || session.user_id !== args.p_user_id) {
+            return {
+              data: null,
+              error: { message: 'Forbidden: session not found or unauthorized' },
+            };
+          }
+          return {
+            data: {
+              sessionId: args.p_session_id,
+              assistantMessageId: 'asst-msg-tx',
+              nextStage: args.p_next_stage,
+              nextMode: args.p_next_mode,
+            },
+            error: null,
+          };
+        }
+        if (fn === 'transition_workflow_mode_tx') {
+          const session = state.sessions.get(args.p_session_id as string);
+          if (!session || session.user_id !== args.p_user_id) {
+            return {
+              data: null,
+              error: { message: 'Forbidden: session not found or unauthorized' },
+            };
+          }
+          return {
+            data: {
+              sessionId: args.p_session_id,
+              fromMode: args.p_expected_mode,
+              toMode: args.p_to_mode,
+              stage: 'describe_problem',
+            },
+            error: null,
+          };
+        }
+        return { data: null, error: null };
+      },
+      from: (table: string) => {
+        return {
+          select: () => {
+            const filters: Array<{ col: string; val: unknown }> = [];
+            const queryObj = {
+              eq: (col: string, val: unknown) => {
+                filters.push({ col, val });
+                return queryObj;
+              },
+              order: () => {
+                let rows: Record<string, unknown>[] = [];
+                if (table === 'thinking_sessions') {
+                  rows = Array.from(state.sessions.values());
+                } else if (table === 'session_messages') {
+                  rows = Array.from(state.messages.values());
+                } else if (table === 'session_insights') {
+                  rows = Array.from(state.insights.values());
+                }
+                const filtered = rows.filter((r) =>
+                  filters.every((f) => r[f.col] === f.val)
+                );
+                return { data: filtered, error: null };
+              },
+              maybeSingle: async () => {
+                let rows: Record<string, unknown>[] = [];
+                if (table === 'thinking_sessions') {
+                  rows = Array.from(state.sessions.values());
+                } else if (table === 'session_insights') {
+                  rows = Array.from(state.insights.values());
+                } else if (table === 'workflow_idempotency_keys') {
+                  rows = Array.from(state.idempotency.values());
+                }
+                const found = rows.find((r) =>
+                  filters.every((f) => r[f.col] === f.val)
+                );
+                return { data: found || null, error: null };
+              },
+            };
+            return queryObj;
+          },
+          insert: (payload: Record<string, unknown>) => {
+            const rowId = (payload.id as string) || `auto-${Date.now()}-${Math.random()}`;
+            const rowWithId = { ...payload, id: rowId };
+            if (table === 'thinking_sessions') {
+              state.sessions.set(rowId, rowWithId);
+            } else if (table === 'session_messages') {
+              state.messages.set(rowId, rowWithId);
+            } else if (table === 'session_insights') {
+              state.insights.set(rowId, rowWithId);
+            }
+            return {
+              select: () => ({
+                single: async () => ({ data: rowWithId, error: null }),
+              }),
+              then: (resolve: (val: { data: unknown; error: null }) => void) =>
+                resolve({ data: rowWithId, error: null }),
+            };
+          },
+          update: (payload: Record<string, unknown>) => {
+            const filters: Array<{ col: string; val: unknown }> = [];
+            const queryObj = {
+              eq: (col: string, val: unknown) => {
+                filters.push({ col, val });
+                return queryObj;
+              },
+              select: () => ({
+                single: async () => {
+                  let rows: Record<string, unknown>[] = [];
+                  if (table === 'thinking_sessions') rows = Array.from(state.sessions.values());
+                  if (table === 'session_insights') rows = Array.from(state.insights.values());
+                  const found = rows.find((r) => filters.every((f) => r[f.col] === f.val));
+                  if (found) {
+                    Object.assign(found, payload);
+                    return { data: found, error: null };
+                  }
+                  return { data: null, error: { message: 'Row not found for update' } };
+                },
+              }),
+              then: (resolve: (val: { error: null }) => void) => {
+                let rows: Record<string, unknown>[] = [];
+                if (table === 'thinking_sessions') rows = Array.from(state.sessions.values());
+                if (table === 'session_insights') rows = Array.from(state.insights.values());
+                const found = rows.find((r) => filters.every((f) => r[f.col] === f.val));
+                if (found) {
+                  Object.assign(found, payload);
+                }
+                resolve({ error: null });
+              },
+            };
+            return queryObj;
+          },
+          delete: () => {
+            const filters: Array<{ col: string; val: unknown }> = [];
+            const queryObj = {
+              eq: (col: string, val: unknown) => {
+                filters.push({ col, val });
+                return queryObj;
+              },
+              then: (resolve: (val: { error: null }) => void) => {
+                const checkAndDel = (map: Map<string, Record<string, unknown>>) => {
+                  for (const [id, row] of Array.from(map.entries())) {
+                    if (filters.every((f) => row[f.col] === f.val)) {
+                      map.delete(id);
+                    }
+                  }
+                };
+                if (table === 'thinking_sessions') checkAndDel(state.sessions);
+                if (table === 'session_messages') checkAndDel(state.messages);
+                if (table === 'session_insights') checkAndDel(state.insights);
+                resolve({ error: null });
+              },
+            };
+            return queryObj;
+          },
+        };
+      },
+    } as unknown as SupabaseClient;
+  }
+
+  const VICTIM_USER = 'victim-user-0001';
+  const ATTACKER_USER = 'attacker-user-9999';
+
+  const VICTIM_SESSION_ID = '00000000-0000-0000-0000-000000000001';
+  const VICTIM_MESSAGE_ID = '00000000-0000-0000-0000-000000000011';
+  const VICTIM_INSIGHT_ID = '00000000-0000-0000-0000-000000000021';
+
+  function initTestState(): DbState {
+    const state: DbState = {
+      sessions: new Map(),
+      messages: new Map(),
+      insights: new Map(),
+      idempotency: new Map(),
+    };
+
+    state.sessions.set(VICTIM_SESSION_ID, {
+      id: VICTIM_SESSION_ID,
+      user_id: VICTIM_USER,
+      title: 'Victim Confidential Dilemma',
+      problem_statement: 'Private strategic strategy',
+      current_mode: 'understand',
+      current_stage: 'welcome',
+      status: 'active',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    state.messages.set(VICTIM_MESSAGE_ID, {
+      id: VICTIM_MESSAGE_ID,
+      session_id: VICTIM_SESSION_ID,
+      role: 'user',
+      content: 'Victim secret thought',
+      mode: 'understand',
+      created_at: new Date().toISOString(),
+    });
+
+    state.insights.set(VICTIM_INSIGHT_ID, {
+      id: VICTIM_INSIGHT_ID,
+      session_id: VICTIM_SESSION_ID,
+      category: 'goal',
+      title: 'Victim Core Insight',
+      content: 'Critical proprietary formula',
+      status: 'accepted',
+      metadata: { priority: 'high' },
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    state.idempotency.set(`${VICTIM_USER}:${VICTIM_SESSION_ID}:req-victim-init`, {
+      user_id: VICTIM_USER,
+      session_id: VICTIM_SESSION_ID,
+      client_request_id: 'req-victim-init',
+      request_hash: 'hash-victim-123',
+      response_payload: {
+        sessionId: VICTIM_SESSION_ID,
+        assistantMessageId: 'asst-msg-secret',
+        message: 'Victim secret AI response',
+      },
+    });
+
+    return state;
+  }
+
+  test('Session Ownership: Attacker cannot read, list, update, or delete Victim session', async () => {
+    const state = initTestState();
+    const repo = new SupabaseThinkingRepository(createStatefulClient(state));
+
+    // 1. Attacker listing sessions must NOT see victim session
+    const attackerSessions = await repo.getSessions(ATTACKER_USER);
+    assert.strictEqual(attackerSessions.length, 0, 'Attacker should not see any of victim sessions in getSessions');
+
+    // 2. Attacker reading victim session by ID must throw Unauthorized
+    await assert.rejects(
+      async () => {
+        await repo.getSession(VICTIM_SESSION_ID, ATTACKER_USER);
+      },
+      { message: 'Unauthorized session access: ownership verification failed' }
+    );
+
+    // 3. Attacker updating victim session must fail and leave victim session unchanged
+    await assert.rejects(
+      async () => {
+        await repo.updateSession(
+          VICTIM_SESSION_ID,
+          { title: 'Attacker Hijacked Title', problemStatement: 'Pwned' },
+          ATTACKER_USER
+        );
+      },
+      { message: 'Unauthorized session access: ownership verification failed' }
+    );
+    const sessionInDb = state.sessions.get(VICTIM_SESSION_ID);
+    assert.strictEqual(sessionInDb?.title, 'Victim Confidential Dilemma', 'Victim title must remain unchanged');
+    assert.strictEqual(sessionInDb?.problem_statement, 'Private strategic strategy', 'Victim problem statement must remain unchanged');
+
+    // 4. Attacker deleting victim session must fail and leave victim session intact in DB
+    await assert.rejects(
+      async () => {
+        await repo.deleteSession(VICTIM_SESSION_ID, ATTACKER_USER);
+      },
+      { message: 'Unauthorized session access: ownership verification failed' }
+    );
+    assert.ok(state.sessions.has(VICTIM_SESSION_ID), 'Victim session must remain in DB after attacker delete attempt');
+
+    // 5. Attacker calling deleteAllUserSessions must not delete victim sessions
+    const deletedCount = await repo.deleteAllUserSessions(ATTACKER_USER);
+    assert.strictEqual(deletedCount, 0);
+    assert.ok(state.sessions.has(VICTIM_SESSION_ID), 'Victim session must remain intact after deleteAllUserSessions');
+  });
+
+  test('Message Ownership: Attacker cannot read or inject messages into Victim session', async () => {
+    const state = initTestState();
+    const repo = new SupabaseThinkingRepository(createStatefulClient(state));
+
+    // 1. Attacker reading victim messages must fail
+    await assert.rejects(
+      async () => {
+        await repo.getMessages(VICTIM_SESSION_ID, ATTACKER_USER);
+      },
+      { message: 'Unauthorized session access: ownership verification failed' }
+    );
+
+    // 2. Attacker inserting message into victim session must fail
+    await assert.rejects(
+      async () => {
+        await repo.addMessage(
+          {
+            id: 'attacker-injected-msg-1',
+            sessionId: VICTIM_SESSION_ID,
+            role: 'user',
+            content: 'Injected malicious prompt',
+            mode: 'understand',
+            createdAt: new Date().toISOString(),
+          },
+          ATTACKER_USER
+        );
+      },
+      { message: 'Unauthorized session access: ownership verification failed' }
+    );
+
+    // Verify messages table has only victim's original message
+    const allMessages = Array.from(state.messages.values());
+    assert.strictEqual(allMessages.length, 1);
+    assert.strictEqual(allMessages[0].id, VICTIM_MESSAGE_ID);
+    assert.strictEqual(allMessages[0].content, 'Victim secret thought');
+  });
+
+  test('Insight Ownership: Attacker cannot read, insert, overwrite, reassign, or delete Victim insights', async () => {
+    const state = initTestState();
+    const repo = new SupabaseThinkingRepository(createStatefulClient(state));
+
+    // 1. Attacker reading victim insights must fail
+    await assert.rejects(
+      async () => {
+        await repo.getInsights(VICTIM_SESSION_ID, ATTACKER_USER);
+      },
+      { message: 'Unauthorized session access: ownership verification failed' }
+    );
+
+    // 2. Attacker inserting a new insight targeting victim's session must fail
+    await assert.rejects(
+      async () => {
+        await repo.upsertInsight(
+          {
+            id: '00000000-0000-0000-0000-000000000099',
+            sessionId: VICTIM_SESSION_ID,
+            category: 'uncertainty',
+            title: 'Injected Risk',
+            content: 'Fake vulnerability',
+            status: 'under_review',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+          ATTACKER_USER
+        );
+      },
+      { message: 'Unauthorized session access: ownership verification failed' }
+    );
+
+    // 3. Attacker trying to overwrite victim's existing insight must fail
+    await assert.rejects(
+      async () => {
+        await repo.upsertInsight(
+          {
+            id: VICTIM_INSIGHT_ID,
+            sessionId: VICTIM_SESSION_ID,
+            category: 'goal',
+            title: 'Defaced Insight Title',
+            content: 'Wiped content',
+            status: 'rejected',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+          ATTACKER_USER
+        );
+      },
+      { message: 'Unauthorized session access: ownership verification failed' }
+    );
+    const insightInDb = state.insights.get(VICTIM_INSIGHT_ID);
+    assert.strictEqual(insightInDb?.title, 'Victim Core Insight', 'Victim insight title must remain unaltered');
+    assert.strictEqual(insightInDb?.content, 'Critical proprietary formula', 'Victim insight content must remain unaltered');
+
+    // 4. Cross-Session IDOR Reassignment: Attacker creates an attacker session, then tries to update insight passing victim's insight ID
+    const attackerSessionId = '00000000-0000-0000-0000-000000000088';
+    state.sessions.set(attackerSessionId, {
+      id: attackerSessionId,
+      user_id: ATTACKER_USER,
+      title: 'Attacker Private Session',
+      problem_statement: 'Attack setup',
+      current_mode: 'understand',
+      current_stage: 'welcome',
+      status: 'active',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    await assert.rejects(
+      async () => {
+        await repo.upsertInsight(
+          {
+            id: VICTIM_INSIGHT_ID,
+            sessionId: attackerSessionId, // trying to steal or reassign victim's insight to attacker session
+            category: 'option',
+            title: 'Stolen Insight',
+            content: 'Hijacked',
+            status: 'accepted',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+          ATTACKER_USER
+        );
+      },
+      { message: 'Security violation: Cannot reassign insight belonging to another session' }
+    );
+    // Verify victim's insight is still bound to VICTIM_SESSION_ID
+    assert.strictEqual(state.insights.get(VICTIM_INSIGHT_ID)?.session_id, VICTIM_SESSION_ID);
+
+    // 5. Attacker deleting victim's insight must fail
+    await assert.rejects(
+      async () => {
+        await repo.deleteInsight(VICTIM_INSIGHT_ID, ATTACKER_USER);
+      },
+      { message: 'Unauthorized session access: ownership verification failed' }
+    );
+    assert.ok(state.insights.has(VICTIM_INSIGHT_ID), 'Victim insight must still exist in DB');
+  });
+
+  test('Workflow & Transition Ownership: Attacker cannot transition mode or record workflow step on Victim session', async () => {
+    const state = initTestState();
+    const repo = new SupabaseThinkingRepository(createStatefulClient(state));
+
+    // 1. Attacker calling transitionMode on victim session must fail
+    await assert.rejects(
+      async () => {
+        await repo.transitionMode(
+          {
+            sessionId: VICTIM_SESSION_ID,
+            expectedMode: 'understand',
+            toMode: 'explore',
+          },
+          ATTACKER_USER
+        );
+      },
+      { message: 'Session not found or unauthorized' }
+    );
+    assert.strictEqual(state.sessions.get(VICTIM_SESSION_ID)?.current_mode, 'understand');
+
+    // 2. Attacker calling recordWorkflowStep on victim session must fail
+    await assert.rejects(
+      async () => {
+        await repo.recordWorkflowStep(
+          {
+            sessionId: VICTIM_SESSION_ID,
+            userMessage: 'Attacker step prompt',
+            assistantMessage: 'Attacker step answer',
+            nextStage: 'clarify_objective',
+            nextMode: 'understand',
+            expectedStage: 'welcome',
+            expectedMode: 'understand',
+          },
+          ATTACKER_USER
+        );
+      },
+      { message: 'Session not found or unauthorized' }
+    );
+    assert.strictEqual(state.sessions.get(VICTIM_SESSION_ID)?.current_stage, 'welcome');
+  });
+
+  test('Idempotency Scoping: Attacker cannot read or leak Victim idempotency record', async () => {
+    const state = initTestState();
+    const repo = new SupabaseThinkingRepository(createStatefulClient(state));
+
+    // Clear LRU cache before checking
+    SupabaseThinkingRepository.idempotencyCache.clear();
+
+    // Attacker queries victim's idempotency key
+    const attackerLookup = await repo.getIdempotencyRecord(
+      VICTIM_SESSION_ID,
+      ATTACKER_USER,
+      'req-victim-init',
+      'hash-victim-123'
+    );
+    assert.strictEqual(attackerLookup, null, 'Attacker must not retrieve victim idempotency record');
+
+    // Verify cache isolation: seed cache under victim user, attacker lookup must still return null
+    SupabaseThinkingRepository.idempotencyCache.set(
+      `${VICTIM_USER}:${VICTIM_SESSION_ID}:req-victim-init`,
+      {
+        result: {
+          sessionId: VICTIM_SESSION_ID,
+          assistantMessageId: 'asst-msg-secret',
+          nextStage: 'clarify_objective',
+          nextMode: 'understand',
+        },
+        requestHash: 'hash-victim-123',
+      }
+    );
+
+    const attackerCacheLookup = await repo.getIdempotencyRecord(
+      VICTIM_SESSION_ID,
+      ATTACKER_USER,
+      'req-victim-init',
+      'hash-victim-123'
+    );
+    assert.strictEqual(attackerCacheLookup, null, 'Cache key isolation must prevent attacker retrieving victim cached entry');
+  });
+});
+

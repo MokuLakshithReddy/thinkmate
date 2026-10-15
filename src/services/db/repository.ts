@@ -1116,7 +1116,11 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       throw new Error('Insight not found or unauthorized');
     }
 
-    const { error } = await this.client.from('session_insights').delete().eq('id', id);
+    const { error } = await this.client
+      .from('session_insights')
+      .delete()
+      .eq('id', id)
+      .eq('session_id', item.session_id);
     if (error) {
       console.error('Failed to delete insight:', error.message);
       throw new Error(`Failed to delete insight: ${error.message}`);

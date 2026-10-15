@@ -334,38 +334,60 @@ export const rotationGraceCache = new RotationGraceCache(100);
 
 /**
  * Resolves a 256-bit AES cluster encryption key shared across server instances.
- * In production, strictly requires a dedicated SESSION_ENCRYPTION_KEY or ROTATION_SECRET (>= 32 chars).
- * Allows multiple distinct server nodes/containers to encrypt and decrypt distributed rotation records
- * in Upstash Redis without storing plaintext JWTs or refresh tokens in the Redis datastore.
+ * In production, strictly requires a dedicated SESSION_ENCRYPTION_KEY or ROTATION_SECRET (>= 32 bytes).
+ * Derives a fixed 32-byte key using RFC 5869 HKDF-SHA256 with domain-separated salt and info context.
+ * Coupling encryption keys to the database service-role key is strictly prohibited in production.
  */
 export function getClusterEncryptionKey(): Buffer {
   const customSecret = process.env.SESSION_ENCRYPTION_KEY || process.env.ROTATION_SECRET;
   if (customSecret) {
-    if (customSecret.length < 32) {
+    const secretBytes = Buffer.from(customSecret, 'utf8');
+    if (secretBytes.length < 32) {
       if (process.env.NODE_ENV === 'production') {
-        throw new Error('SECURITY FATAL: SESSION_ENCRYPTION_KEY must be at least 32 characters (256-bit entropy) in production.');
+        throw new Error('SECURITY FATAL: SESSION_ENCRYPTION_KEY must provide at least 32 bytes of entropy in production.');
       }
-      return crypto.createHash('sha256').update(customSecret).digest();
+      return Buffer.from(
+        crypto.hkdfSync(
+          'sha256',
+          secretBytes,
+          Buffer.from('thinkmate:token-rotation:cluster-salt:v1'),
+          Buffer.from('thinkmate:token-rotation:aes-256-gcm:v1'),
+          32
+        )
+      );
     }
-    return Buffer.from(customSecret.slice(0, 32), 'utf8');
-  }
-
-  if (process.env.NODE_ENV === 'production') {
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (serviceKey && serviceKey.length >= 32) {
-      return crypto.createHmac('sha256', 'thinkmate:rotation:cluster:v1').update(serviceKey).digest();
-    }
-    throw new Error(
-      'SECURITY FATAL: SESSION_ENCRYPTION_KEY (>= 32 characters) must be configured in production for distributed token encryption.'
+    return Buffer.from(
+      crypto.hkdfSync(
+        'sha256',
+        secretBytes,
+        Buffer.from('thinkmate:token-rotation:cluster-salt:v1'),
+        Buffer.from('thinkmate:token-rotation:aes-256-gcm:v1'),
+        32
+      )
     );
   }
 
-  const clusterSeed =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'SECURITY FATAL: Dedicated SESSION_ENCRYPTION_KEY (>= 32 bytes) must be configured in production for distributed token encryption. Service-role key derivation is strictly prohibited in production.'
+    );
+  }
+
+  const clusterSeed = Buffer.from(
     process.env.UPSTASH_REDIS_REST_TOKEN ||
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-    'thinkmate-cluster-rotation-default-seed';
-  return crypto.createHmac('sha256', 'thinkmate:rotation:cluster:v1').update(clusterSeed).digest();
+    'thinkmate-dev-cluster-rotation-default-seed-v1',
+    'utf8'
+  );
+  return Buffer.from(
+    crypto.hkdfSync(
+      'sha256',
+      clusterSeed,
+      Buffer.from('thinkmate:token-rotation:cluster-salt:v1'),
+      Buffer.from('thinkmate:token-rotation:aes-256-gcm:v1'),
+      32
+    )
+  );
 }
 
 function encryptDistributedPayload(payload: { session: unknown; user: unknown }): string {

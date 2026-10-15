@@ -476,8 +476,13 @@ export function getClientIp(req: Request): string {
   // If a specific trusted proxy header is explicitly configured, strictly use only that header
   if (trustedHeader) {
     const val = req.headers.get(trustedHeader)?.trim();
-    if (val && isValidIp(val)) {
-      return val;
+    if (val) {
+      const parts = val.split(',').map((p) => p.trim().replace(/:\d+$/, '')).filter(isValidIp);
+      if (parts.length > 0) {
+        const depth = Math.max(1, parseInt(process.env.TRUSTED_PROXY_DEPTH || '1', 10));
+        const targetIndex = Math.max(0, parts.length - depth);
+        return parts[targetIndex] || parts[parts.length - 1];
+      }
     }
     return '127.0.0.1';
   }
@@ -487,25 +492,32 @@ export function getClientIp(req: Request): string {
     return '127.0.0.1';
   }
 
-  // 1. Cloudflare edge verified client IP
-  const cfConnectingIp = req.headers.get('cf-connecting-ip')?.trim();
-  if (cfConnectingIp && isValidIp(cfConnectingIp)) {
-    return cfConnectingIp;
+  const proxyProvider = (process.env.TRUSTED_PROXY_PROVIDER || '').toLowerCase().trim();
+
+  // 1. Cloudflare edge verified client IP: ONLY trust when explicitly configured or designated
+  if (proxyProvider === 'cloudflare') {
+    const cfConnectingIp = req.headers.get('cf-connecting-ip')?.trim();
+    if (cfConnectingIp && isValidIp(cfConnectingIp)) {
+      return cfConnectingIp;
+    }
   }
 
-  // 2. Reverse proxy verified single IP
-  const realIp = req.headers.get('x-real-ip')?.trim();
-  if (realIp) {
-    const cleanReal = realIp.replace(/:\d+$/, '');
-    if (isValidIp(cleanReal)) {
-      return cleanReal;
+  // 2. Reverse proxy verified single IP: ONLY trust when explicitly configured for Nginx / custom proxy
+  if (proxyProvider === 'nginx' || proxyProvider === 'custom') {
+    const realIp = req.headers.get('x-real-ip')?.trim();
+    if (realIp) {
+      const cleanReal = realIp.replace(/:\d+$/, '');
+      if (isValidIp(cleanReal)) {
+        return cleanReal;
+      }
     }
   }
 
   // 3. X-Forwarded-For:
-  // When behind reverse proxies (Vercel, Cloudflare, AWS ALB), each trusted proxy appends
+  // When behind reverse proxies (Vercel, AWS ALB, Node cluster), each trusted proxy appends
   // the client IP to the end of the header list. The leftmost IPs can be spoofed by clients.
   // We inspect from the right based on TRUSTED_PROXY_DEPTH (default: 1) to select the true hop.
+  // We do NOT trust unverified cf-connecting-ip or x-real-ip without explicit proxy provider configuration.
   const forwardedFor = req.headers.get('x-forwarded-for');
   if (forwardedFor) {
     const validIps = forwardedFor
@@ -516,6 +528,14 @@ export function getClientIp(req: Request): string {
       const depth = Math.max(1, parseInt(process.env.TRUSTED_PROXY_DEPTH || '1', 10));
       const targetIndex = Math.max(0, validIps.length - depth);
       return validIps[targetIndex] || validIps[validIps.length - 1];
+    }
+  }
+
+  // 4. In test/development only, allow x-real-ip or cf-connecting-ip as ergonomic fallback
+  if (process.env.NODE_ENV !== 'production') {
+    const fallbackReal = req.headers.get('x-real-ip')?.trim().replace(/:\d+$/, '') || req.headers.get('cf-connecting-ip')?.trim();
+    if (fallbackReal && isValidIp(fallbackReal)) {
+      return fallbackReal;
     }
   }
 
