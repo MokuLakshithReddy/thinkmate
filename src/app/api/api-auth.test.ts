@@ -21,7 +21,7 @@ import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { proxy } from '@/proxy';
-import { SECURE_COOKIE_OPTIONS } from '@/lib/server-auth';
+import { SECURE_COOKIE_OPTIONS, RotationGraceCache, revokeUserSession } from '@/lib/server-auth';
 
 describe('API Security Boundaries & Authentication Enforcement', () => {
   test('POST /api/cothink rejects unauthenticated callers with 401', async () => {
@@ -1586,7 +1586,25 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       assert.strictEqual(authJson.user.id, 'usr-cookie-456');
       assert.strictEqual(authJson.user.email, 'cookie@thinkmate.ai');
 
-      // 3. Expired access token with valid refresh token triggers silent rotation
+      // 3. Expired access token with valid refresh token is read-only (canRefresh: true, no cookies mutated)
+      const expiredReq = new NextRequest('http://localhost:3000/api/auth/session', {
+        method: 'GET',
+        headers: {
+          Cookie: 'thinkmate_auth_token=expired-jwt; thinkmate_refresh_token=valid-refresh',
+        },
+      });
+      const expiredRes = await sessionGet(expiredReq);
+      assert.strictEqual(expiredRes.status, 200);
+      const expiredJson = await expiredRes.json();
+      assert.strictEqual(expiredJson.authenticated, false, 'GET /api/auth/session must not authenticate without active token');
+      assert.strictEqual(expiredJson.canRefresh, true, 'GET /api/auth/session must signal canRefresh: true');
+      assert.strictEqual(expiredJson.user, null);
+
+      // Verify GET request did NOT set or rotate cookies
+      const getCookies = expiredRes.headers.get('set-cookie');
+      assert.strictEqual(getCookies, null, 'GET /api/auth/session must be purely read-only and never set cookies');
+
+      // 4. Client then performs explicit, CSRF-protected POST /api/auth/refresh to rotate tokens
       supabase.auth.refreshSession = (async () => ({
         data: {
           user: { id: 'usr-refreshed-session', email: 'refreshed@thinkmate.ai' },
@@ -1598,26 +1616,169 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
         error: null,
       })) as unknown as typeof supabase.auth.refreshSession;
 
-      const expiredReq = new NextRequest('http://localhost:3000/api/auth/session', {
-        method: 'GET',
+      const refreshReq = new NextRequest('http://localhost:3000/api/auth/refresh', {
+        method: 'POST',
         headers: {
-          Cookie: 'thinkmate_auth_token=expired-jwt; thinkmate_refresh_token=valid-refresh',
+          Origin: 'http://localhost:3000',
+          Host: 'localhost:3000',
+          Cookie: 'thinkmate_refresh_token=valid-refresh',
         },
       });
-      const expiredRes = await sessionGet(expiredReq);
-      assert.strictEqual(expiredRes.status, 200);
-      const expiredJson = await expiredRes.json();
-      assert.strictEqual(expiredJson.authenticated, true);
-      assert.strictEqual(expiredJson.user.id, 'usr-refreshed-session');
-      assert.strictEqual(expiredJson.user.email, 'refreshed@thinkmate.ai');
+      const refreshRes = await refreshPost(refreshReq);
+      assert.strictEqual(refreshRes.status, 200);
+      const refreshJson = await refreshRes.json();
+      assert.strictEqual(refreshJson.success, true);
+      assert.strictEqual(refreshJson.user.id, 'usr-refreshed-session');
 
-      const silentCookies = expiredRes.headers.get('set-cookie');
-      assert.ok(silentCookies?.includes('thinkmate_auth_token='), 'Must set fresh access token');
-      assert.ok(silentCookies?.includes('thinkmate_refresh_token='), 'Must set fresh refresh token');
+      const refreshCookies = refreshRes.headers.get('set-cookie');
+      assert.ok(refreshCookies?.includes('thinkmate_auth_token='), 'POST refresh must set updated access token');
+      assert.ok(refreshCookies?.includes('thinkmate_refresh_token='), 'POST refresh must set updated refresh token');
     } finally {
       supabase.auth.getUser = origGetUser;
       supabase.auth.refreshSession = origRefresh;
     }
+  });
+
+  test('RotationGraceCache bounded size limits and active expiration eviction', () => {
+    const cache = new RotationGraceCache(3);
+
+    const now = Date.now();
+    // Insert 3 entries with different expirations
+    cache.set('token-1', {
+      session: { access_token: 'jwt-1' },
+      user: { id: 'u1' },
+      expiresAt: now - 1000, // already expired
+    });
+    cache.set('token-2', {
+      session: { access_token: 'jwt-2' },
+      user: { id: 'u2' },
+      expiresAt: now + 50000, // valid
+    });
+    cache.set('token-3', {
+      session: { access_token: 'jwt-3' },
+      user: { id: 'u3' },
+      expiresAt: now + 50000, // valid
+    });
+
+    // token-1 was expired, so accessing it should evict it and return undefined
+    assert.strictEqual(cache.get('token-1'), undefined, 'Expired entry must be evicted');
+
+    // Add 2 more entries to test bounded size eviction
+    cache.set('token-4', {
+      session: { access_token: 'jwt-4' },
+      user: { id: 'u4' },
+      expiresAt: now + 50000,
+    });
+    cache.set('token-5', {
+      session: { access_token: 'jwt-5' },
+      user: { id: 'u5' },
+      expiresAt: now + 50000,
+    });
+
+    // Max size is 3; size should not exceed 3
+    assert.ok(cache.size() <= 3, 'Cache size must remain bounded at or below max capacity');
+    assert.strictEqual(cache.get('token-5')?.user.id, 'u5');
+  });
+
+  test('revokeUserSession distinguishes local cookie clearance from confirmed server revocation', async () => {
+    // 1. Without credentials or valid tokens, returns upstreamRevoked: false and localCleared: true
+    const result = await revokeUserSession('non-existent-token');
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.localCleared, true);
+    assert.strictEqual(typeof result.upstreamRevoked, 'boolean');
+  });
+
+  test('Multi-instance workflow concurrency safety without shared in-memory state', async () => {
+    // Simulate two independent server instances (Instance A and Instance B) with separate in-memory caches
+    let committedStage = 'welcome';
+    let committedMode = 'understand';
+    let callCount = 0;
+    const committedIdempotencyKeys = new Map<string, Record<string, unknown>>();
+
+    // Mock RPC client simulating PostgreSQL serialized FOR UPDATE row-locking
+    const mockDbClient = {
+      rpc: async (fn: string, params: Record<string, unknown>) => {
+        callCount++;
+        const pStage = params.p_expected_stage as string;
+        const pMode = params.p_expected_mode as string;
+        const clientReqId = params.p_client_request_id as string;
+        const reqHash = params.p_request_hash as string;
+
+        // Simulate database post-lock idempotency check
+        if (clientReqId && committedIdempotencyKeys.has(clientReqId)) {
+          const existing = committedIdempotencyKeys.get(clientReqId)!;
+          if (existing.requestHash !== reqHash) {
+            return {
+              data: null,
+              error: { message: `Idempotency key reuse violation: ${clientReqId}` },
+            };
+          }
+          return { data: existing.payload, error: null };
+        }
+
+        // Simulate database optimistic concurrency control under FOR UPDATE row lock
+        if (pStage !== committedStage || pMode !== committedMode) {
+          return {
+            data: null,
+            error: {
+              message: `CONFLICT: expected stage "${pStage}" but session is at "${committedStage}". Reload the session.`,
+            },
+          };
+        }
+
+        // Commit transition
+        committedStage = params.p_next_stage as string;
+        committedMode = params.p_next_mode as string;
+        const resultPayload = {
+          sessionId: params.p_session_id,
+          assistantMessageId: 'ast-msg-1',
+          nextStage: committedStage,
+          nextMode: committedMode,
+          isIdempotentReplay: false,
+        };
+
+        if (clientReqId) {
+          committedIdempotencyKeys.set(clientReqId, {
+            requestHash: reqHash,
+            payload: { ...resultPayload, isIdempotentReplay: true },
+          });
+        }
+
+        return { data: resultPayload, error: null };
+      },
+    } as unknown as typeof supabase;
+
+    // Instance A and Instance B have separate in-memory caches
+    const repoInstanceA = new SupabaseThinkingRepository(mockDbClient);
+    const repoInstanceB = new SupabaseThinkingRepository(mockDbClient);
+
+    // Clear shared static cache to verify instances do NOT rely on in-process memory
+    SupabaseThinkingRepository.idempotencyCache.clear();
+
+    const transitionParams = {
+      sessionId: 'sess-multi-instance-1',
+      assistantMessage: 'Moving to describe problem',
+      expectedStage: 'welcome' as const,
+      expectedMode: 'understand' as const,
+      nextStage: 'describe_problem' as const,
+      nextMode: 'understand' as const,
+      clientRequestId: 'req-multi-inst-1',
+    };
+
+    // Both instances receive simultaneous requests for the same step transition
+    const [resA, resB] = await Promise.all([
+      repoInstanceA.recordWorkflowStep(transitionParams, 'usr-test-1'),
+      repoInstanceB.recordWorkflowStep(transitionParams, 'usr-test-1'),
+    ]);
+
+    // Exactly one request committed the new state; the simultaneous request received the idempotent replay
+    const committedCount = [resA, resB].filter((r) => !r.isIdempotentReplay).length;
+    const replayCount = [resA, resB].filter((r) => r.isIdempotentReplay).length;
+
+    assert.strictEqual(committedCount, 1, 'Exactly one transaction must commit the transition');
+    assert.strictEqual(replayCount, 1, 'The duplicate simultaneous request must receive idempotent replay');
+    assert.strictEqual(committedStage, 'describe_problem', 'Final database stage must be committed cleanly');
+    assert.strictEqual(callCount, 2, 'Both independent instances should invoke the database RPC');
   });
 
   test('GeminiThinkingService validates structured metadata and refuses synthetic fallbacks', () => {

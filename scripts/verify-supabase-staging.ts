@@ -407,7 +407,8 @@ async function runStagingVerification() {
       },
     });
 
-    // 6a. Direct Table RLS SELECT: Attacker attempts to read Victim's session
+    // 6a. Table RLS: thinking_sessions (SELECT, UPDATE, DELETE, INSERT)
+    // 6a.1: Attacker attempts to read Victim's session
     const { data: foreignSessions, error: foreignSessErr } = await attackerScopedClient
       .from('thinking_sessions')
       .select('*')
@@ -419,19 +420,7 @@ async function runStagingVerification() {
       'PostgreSQL RLS violation: Attacker was able to read victim thinking_sessions row'
     );
 
-    // 6b. Direct Table RLS SELECT: Attacker attempts to read Victim's messages
-    const { data: foreignMsgs, error: foreignMsgsErr } = await attackerScopedClient
-      .from('session_messages')
-      .select('*')
-      .eq('session_id', testSessionId);
-    if (foreignMsgsErr) throw new Error(`RLS query error: ${foreignMsgsErr.message}`);
-    assert.strictEqual(
-      foreignMsgs?.length || 0,
-      0,
-      'PostgreSQL RLS violation: Attacker was able to read victim session_messages'
-    );
-
-    // 6c. Direct Table RLS UPDATE: Attacker attempts to modify Victim's session
+    // 6a.2: Attacker attempts to modify Victim's session
     const { data: updatedRows, error: updateErr } = await attackerScopedClient
       .from('thinking_sessions')
       .update({ title: 'Cross-Tenant Malicious Tampering' })
@@ -444,7 +433,7 @@ async function runStagingVerification() {
       'PostgreSQL RLS violation: Attacker was able to update victim thinking_sessions row'
     );
 
-    // 6d. Direct Table RLS DELETE: Attacker attempts to delete Victim's session
+    // 6a.3: Attacker attempts to delete Victim's session
     const { data: deletedRows, error: deleteErr } = await attackerScopedClient
       .from('thinking_sessions')
       .delete()
@@ -456,9 +445,263 @@ async function runStagingVerification() {
       0,
       'PostgreSQL RLS violation: Attacker was able to delete victim thinking_sessions row'
     );
-    console.log('  ✔ Passed: PostgreSQL RLS strictly blocks cross-user read, update, and delete.');
 
-    // 6e. RPC Authorization Check: Attacker attempts to tamper via transactional RPCs
+    // 6a.4: Attacker attempts to forge a session using Victim's user_id
+    const { data: forgedSess, error: forgedSessErr } = await attackerScopedClient
+      .from('thinking_sessions')
+      .insert({
+        id: crypto.randomUUID(),
+        user_id: testUserId, // Victim user ID
+        title: 'Forged Victim Session',
+        problem_statement: 'Injected problem',
+        current_mode: 'understand',
+        current_stage: 'welcome',
+        status: 'active',
+      })
+      .select();
+    assert.ok(
+      forgedSessErr || !forgedSess || forgedSess.length === 0,
+      'PostgreSQL RLS violation: Attacker was able to insert thinking_sessions row with victim user_id'
+    );
+    console.log('  ✔ Passed: thinking_sessions RLS strictly blocks unauthorized SELECT, UPDATE, DELETE, and INSERT.');
+
+    // 6b. Table RLS: session_messages (SELECT, UPDATE, DELETE, INSERT)
+    // 6b.1: Attacker attempts to read Victim's messages
+    const { data: foreignMsgs, error: foreignMsgsErr } = await attackerScopedClient
+      .from('session_messages')
+      .select('*')
+      .eq('session_id', testSessionId);
+    if (foreignMsgsErr) throw new Error(`RLS query error: ${foreignMsgsErr.message}`);
+    assert.strictEqual(
+      foreignMsgs?.length || 0,
+      0,
+      'PostgreSQL RLS violation: Attacker was able to read victim session_messages'
+    );
+
+    // 6b.2: Attacker attempts to insert message into Victim's session
+    const { data: injectedMsg, error: injectedMsgErr } = await attackerScopedClient
+      .from('session_messages')
+      .insert({
+        id: crypto.randomUUID(),
+        session_id: testSessionId,
+        role: 'user',
+        content: 'Malicious injected message',
+        mode: 'understand',
+      })
+      .select();
+    assert.ok(
+      injectedMsgErr || !injectedMsg || injectedMsg.length === 0,
+      'PostgreSQL RLS violation: Attacker was able to insert message into victim session'
+    );
+
+    // 6b.3: Attacker attempts to update messages in Victim's session
+    const { data: tamperedMsgs, error: tamperedMsgsErr } = await attackerScopedClient
+      .from('session_messages')
+      .update({ content: 'Tampered content' })
+      .eq('session_id', testSessionId)
+      .select();
+    if (tamperedMsgsErr) throw new Error(`RLS query error: ${tamperedMsgsErr.message}`);
+    assert.strictEqual(
+      tamperedMsgs?.length || 0,
+      0,
+      'PostgreSQL RLS violation: Attacker was able to update victim session_messages'
+    );
+
+    // 6b.4: Attacker attempts to delete messages in Victim's session
+    const { data: deletedMsgs, error: deletedMsgsErr } = await attackerScopedClient
+      .from('session_messages')
+      .delete()
+      .eq('session_id', testSessionId)
+      .select();
+    if (deletedMsgsErr) throw new Error(`RLS query error: ${deletedMsgsErr.message}`);
+    assert.strictEqual(
+      deletedMsgs?.length || 0,
+      0,
+      'PostgreSQL RLS violation: Attacker was able to delete victim session_messages'
+    );
+    console.log('  ✔ Passed: session_messages RLS strictly blocks unauthorized SELECT, INSERT, UPDATE, and DELETE.');
+
+    // 6c. Table RLS: session_insights (SELECT, INSERT, UPDATE, DELETE)
+    // Seed an insight for the victim session via serviceClient
+    const testInsightId = crypto.randomUUID();
+    const { error: seedInsightErr } = await serviceClient.from('session_insights').insert({
+      id: testInsightId,
+      session_id: testSessionId,
+      category: 'decision',
+      status: 'accepted',
+      title: 'Victim Decision Insight',
+      content: 'Core architecture decision record',
+    });
+    if (seedInsightErr) throw new Error(`Failed to seed victim insight: ${seedInsightErr.message}`);
+
+    // 6c.1: Attacker attempts to read Victim's insight
+    const { data: foreignInsights, error: foreignInsightsErr } = await attackerScopedClient
+      .from('session_insights')
+      .select('*')
+      .eq('id', testInsightId);
+    if (foreignInsightsErr) throw new Error(`RLS query error: ${foreignInsightsErr.message}`);
+    assert.strictEqual(
+      foreignInsights?.length || 0,
+      0,
+      'PostgreSQL RLS violation: Attacker was able to read victim session_insights'
+    );
+
+    // 6c.2: Attacker attempts to insert insight into Victim's session
+    const { data: injectedInsight, error: injectedInsightErr } = await attackerScopedClient
+      .from('session_insights')
+      .insert({
+        id: crypto.randomUUID(),
+        session_id: testSessionId,
+        category: 'decision',
+        status: 'tentative',
+        title: 'Attacker Malicious Insight',
+        content: 'Fabricated decision record',
+      })
+      .select();
+    assert.ok(
+      injectedInsightErr || !injectedInsight || injectedInsight.length === 0,
+      'PostgreSQL RLS violation: Attacker was able to insert insight into victim session'
+    );
+
+    // 6c.3: Attacker attempts to update Victim's insight
+    const { data: updatedInsights, error: updateInsightErr } = await attackerScopedClient
+      .from('session_insights')
+      .update({ status: 'rejected' })
+      .eq('id', testInsightId)
+      .select();
+    if (updateInsightErr) throw new Error(`RLS query error: ${updateInsightErr.message}`);
+    assert.strictEqual(
+      updatedInsights?.length || 0,
+      0,
+      'PostgreSQL RLS violation: Attacker was able to update victim session_insights'
+    );
+
+    // 6c.4: Attacker attempts to delete Victim's insight
+    const { data: deletedInsights, error: deleteInsightErr } = await attackerScopedClient
+      .from('session_insights')
+      .delete()
+      .eq('id', testInsightId)
+      .select();
+    if (deleteInsightErr) throw new Error(`RLS query error: ${deleteInsightErr.message}`);
+    assert.strictEqual(
+      deletedInsights?.length || 0,
+      0,
+      'PostgreSQL RLS violation: Attacker was able to delete victim session_insights'
+    );
+    console.log('  ✔ Passed: session_insights RLS strictly blocks unauthorized SELECT, INSERT, UPDATE, and DELETE.');
+
+    // 6d. Table RLS: workflow_transitions (SELECT, INSERT)
+    // 6d.1: Attacker attempts to read transitions for Victim's session
+    const { data: foreignTransitions, error: foreignTransErr } = await attackerScopedClient
+      .from('workflow_transitions')
+      .select('*')
+      .eq('session_id', testSessionId);
+    if (foreignTransErr) throw new Error(`RLS query error: ${foreignTransErr.message}`);
+    assert.strictEqual(
+      foreignTransitions?.length || 0,
+      0,
+      'PostgreSQL RLS violation: Attacker was able to read victim workflow_transitions'
+    );
+
+    // 6d.2: Attacker attempts to insert transition for Victim's session
+    const { data: injectedTrans, error: injectedTransErr } = await attackerScopedClient
+      .from('workflow_transitions')
+      .insert({
+        session_id: testSessionId,
+        from_mode: 'understand',
+        to_mode: 'explore',
+        reason: 'Malicious transition record',
+      })
+      .select();
+    assert.ok(
+      injectedTransErr || !injectedTrans || injectedTrans.length === 0,
+      'PostgreSQL RLS violation: Attacker was able to insert workflow_transitions for victim session'
+    );
+    console.log('  ✔ Passed: workflow_transitions RLS strictly blocks unauthorized SELECT and INSERT.');
+
+    // 6e. Table Permissions & RLS: workflow_idempotency_keys
+    // 6e.1: Attacker attempts direct SELECT on workflow_idempotency_keys
+    const { data: foreignKeys, error: foreignKeysErr } = await attackerScopedClient
+      .from('workflow_idempotency_keys')
+      .select('*')
+      .eq('session_id', testSessionId);
+    if (foreignKeysErr) {
+      assert.ok(
+        foreignKeysErr.code === '42501' || foreignKeysErr.message.includes('permission denied'),
+        `Expected permission denied (code 42501) for direct table query, got: ${foreignKeysErr.message}`
+      );
+    } else {
+      assert.strictEqual(
+        foreignKeys?.length || 0,
+        0,
+        'PostgreSQL RLS violation: Attacker was able to read victim workflow_idempotency_keys'
+      );
+    }
+
+    // 6e.2: Attacker attempts direct INSERT on workflow_idempotency_keys
+    const { data: injectedKey, error: injectedKeyErr } = await attackerScopedClient
+      .from('workflow_idempotency_keys')
+      .insert({
+        user_id: testUserId,
+        session_id: testSessionId,
+        client_request_id: 'malicious-req-id',
+        request_hash: 'tampered-hash',
+        response_payload: { malicious: true },
+      })
+      .select();
+    assert.ok(
+      injectedKeyErr || !injectedKey || injectedKey.length === 0,
+      'PostgreSQL RLS violation: Attacker was able to insert directly into workflow_idempotency_keys'
+    );
+    console.log('  ✔ Passed: workflow_idempotency_keys strictly protected from direct unauthorized access.');
+
+    // 6f. Direct RPC Privilege Checks via Attacker Credentials
+    // Both record_workflow_step_tx and transition_workflow_mode_tx must be denied to authenticated non-service callers
+    const { data: attackerDirectRpcData, error: attackerDirectRpcErr } = await attackerScopedClient.rpc(
+      'record_workflow_step_tx',
+      {
+        p_session_id: testSessionId,
+        p_user_id: attackerUserId,
+        p_user_message: 'Direct RPC bypass attempt',
+        p_assistant_message: 'Should be denied at grant level',
+        p_next_stage: 'break_subproblems',
+        p_next_mode: 'explore',
+        p_expected_stage: sessionAfter.current_stage,
+        p_expected_mode: sessionAfter.current_mode,
+      }
+    );
+    assert.strictEqual(attackerDirectRpcData, null, 'Attacker direct RPC call must return null');
+    assert.ok(attackerDirectRpcErr, 'Attacker direct RPC call must return an error');
+    assert.ok(
+      attackerDirectRpcErr.code === '42501' ||
+        attackerDirectRpcErr.message.includes('permission denied') ||
+        attackerDirectRpcErr.message.includes('Forbidden') ||
+        attackerDirectRpcErr.message.includes('does not exist'),
+      `Expected permission denied (42501) on direct RPC execution, got: ${attackerDirectRpcErr.message} (${attackerDirectRpcErr.code})`
+    );
+
+    const { data: attackerModeRpcData, error: attackerModeRpcErr } = await attackerScopedClient.rpc(
+      'transition_workflow_mode_tx',
+      {
+        p_session_id: testSessionId,
+        p_user_id: attackerUserId,
+        p_expected_mode: sessionAfter.current_mode,
+        p_to_mode: 'explore',
+        p_reason: 'Direct mode shift bypass',
+      }
+    );
+    assert.strictEqual(attackerModeRpcData, null, 'Attacker direct mode RPC must return null');
+    assert.ok(attackerModeRpcErr, 'Attacker direct mode RPC must return an error');
+    assert.ok(
+      attackerModeRpcErr.code === '42501' ||
+        attackerModeRpcErr.message.includes('permission denied') ||
+        attackerModeRpcErr.message.includes('Forbidden') ||
+        attackerModeRpcErr.message.includes('does not exist'),
+      `Expected permission denied (42501) on direct mode RPC execution, got: ${attackerModeRpcErr.message} (${attackerModeRpcErr.code})`
+    );
+    console.log('  ✔ Passed: Direct transactional RPC execution strictly denied to authenticated users (restricted to service_role).');
+
+    // 6g. Service-Role Cross-User Rejection Check: Verify RPC rejects cross-tenant IDs under row locks
     const { data: crossUserData, error: crossUserErr } = await serviceClient.rpc('record_workflow_step_tx', {
       p_session_id: testSessionId,
       p_user_id: attackerUserId, // Unauthorized cross-user attempt
@@ -497,7 +740,7 @@ async function runStagingVerification() {
     );
     console.log('  ✔ Passed: Multi-user cross-tenant tampering strictly rejected under database locks.');
 
-    // 6f. Server-Side Session Revocation Test: Revoke attacker session
+    // 6h. Server-Side Session Revocation Test: Revoke attacker session
     const { error: revokeErr } = await serviceClient.auth.admin.signOut(attackerToken);
     if (revokeErr) throw new Error(`Server-side signOut failed: ${revokeErr.message}`);
     const { data: userAfterRevoke, error: postLogoutErr } = await serviceClient.auth.getUser(attackerToken);
@@ -520,6 +763,18 @@ async function runStagingVerification() {
       .delete()
       .eq('session_id', testSessionId);
     if (delIdempErr) cleanupErrors.push(`workflow_idempotency_keys deletion failed: ${delIdempErr.message}`);
+
+    const { error: delInsightsErr } = await serviceClient
+      .from('session_insights')
+      .delete()
+      .eq('session_id', testSessionId);
+    if (delInsightsErr) cleanupErrors.push(`session_insights deletion failed: ${delInsightsErr.message}`);
+
+    const { error: delTransErr } = await serviceClient
+      .from('workflow_transitions')
+      .delete()
+      .eq('session_id', testSessionId);
+    if (delTransErr) cleanupErrors.push(`workflow_transitions deletion failed: ${delTransErr.message}`);
 
     const { error: delMsgsErr } = await serviceClient
       .from('session_messages')

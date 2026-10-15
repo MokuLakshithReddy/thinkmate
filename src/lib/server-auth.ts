@@ -60,15 +60,29 @@ export function clearAuthCookies(res: NextResponse) {
   res.cookies.set('sb-refresh-token', '', expired);
 }
 
+export interface RevocationResult {
+  success: boolean;
+  upstreamRevoked: boolean;
+  localCleared: boolean;
+  error?: string;
+}
+
 /**
  * Server-side session revocation.
  * Revokes the session in Supabase Auth via admin.signOut if privileged credentials exist,
  * or through an authenticated user-scoped client session termination.
+ * Returns a typed RevocationResult distinguishing local cookie clearance from confirmed upstream revocation.
  */
-export async function revokeUserSession(token: string, refreshToken?: string): Promise<void> {
+export async function revokeUserSession(
+  token?: string,
+  refreshToken?: string
+): Promise<RevocationResult> {
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.STAGING_SUPABASE_SERVICE_ROLE_KEY;
   const supabaseUrl = process.env.STAGING_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
   const supabaseAnonKey = process.env.STAGING_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+
+  let upstreamRevoked = false;
+  let lastError: string | undefined;
 
   // 1. Authoritative admin revocation via GoTrue admin API if service key is present
   if (serviceRoleKey && supabaseUrl && token) {
@@ -76,27 +90,68 @@ export async function revokeUserSession(token: string, refreshToken?: string): P
       const adminClient = createClient(supabaseUrl, serviceRoleKey, {
         auth: { persistSession: false },
       });
-      await adminClient.auth.admin.signOut(token);
-      return;
-    } catch (err) {
+      const { error } = await adminClient.auth.admin.signOut(token);
+      if (!error) {
+        upstreamRevoked = true;
+      } else {
+        lastError = error.message;
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastError = msg;
       console.warn('[ServerAuth] Admin signOut attempt error:', err);
     }
   }
 
-  // 2. Request-scoped user client revocation
-  if (supabaseUrl && supabaseAnonKey && token) {
+  // 2. User-scoped client revocation if admin revocation did not succeed (e.g. invalid access token but valid refresh token)
+  if (!upstreamRevoked && supabaseUrl && supabaseAnonKey && (token || refreshToken)) {
     try {
       const userScopedClient = createClient(supabaseUrl, supabaseAnonKey, {
         auth: { persistSession: false },
       });
       if (refreshToken) {
-        await userScopedClient.auth.setSession({ access_token: token, refresh_token: refreshToken });
+        const { error: sessionError } = await userScopedClient.auth.setSession({
+          access_token: token || '',
+          refresh_token: refreshToken,
+        });
+        if (!sessionError) {
+          const { error: signOutError } = await userScopedClient.auth.signOut();
+          if (!signOutError) {
+            upstreamRevoked = true;
+            lastError = undefined;
+          } else {
+            lastError = signOutError.message;
+          }
+        } else {
+          lastError = sessionError.message;
+        }
+      } else if (token) {
+        const { error: signOutError } = await userScopedClient.auth.signOut();
+        if (!signOutError) {
+          upstreamRevoked = true;
+          lastError = undefined;
+        } else {
+          lastError = signOutError.message;
+        }
       }
-      await userScopedClient.auth.signOut();
-    } catch (err) {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastError = msg;
       console.warn('[ServerAuth] User client session revocation error:', err);
     }
   }
+
+  // Clean up cache entry for this refresh token if present
+  if (refreshToken) {
+    rotationGraceCache.delete(refreshToken);
+  }
+
+  return {
+    success: true,
+    upstreamRevoked,
+    localCleared: true,
+    error: lastError,
+  };
 }
 
 interface CachedRotation {
@@ -104,6 +159,68 @@ interface CachedRotation {
   user: { id: string; email?: string };
   expiresAt: number;
 }
+
+/**
+ * Bounded, self-cleaning cache for token rotation grace periods.
+ * Evicts expired entries on every access/mutation and limits total stored entries
+ * to prevent memory leaks in long-running Node.js processes.
+ */
+export class RotationGraceCache {
+  private cache = new Map<string, CachedRotation>();
+  private readonly maxSize: number;
+
+  constructor(maxSize: number = 100) {
+    this.maxSize = maxSize;
+  }
+
+  private evictExpired(): void {
+    const now = Date.now();
+    for (const [key, item] of this.cache.entries()) {
+      if (now >= item.expiresAt) {
+        this.cache.delete(key);
+      }
+    }
+  }
+
+  get(token: string): CachedRotation | undefined {
+    this.evictExpired();
+    const entry = this.cache.get(token);
+    if (!entry) return undefined;
+    if (Date.now() >= entry.expiresAt) {
+      this.cache.delete(token);
+      return undefined;
+    }
+    return entry;
+  }
+
+  set(token: string, entry: CachedRotation): void {
+    this.evictExpired();
+    while (this.cache.size >= this.maxSize) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.cache.delete(oldestKey);
+      } else {
+        break;
+      }
+    }
+    this.cache.set(token, entry);
+  }
+
+  delete(token: string): boolean {
+    return this.cache.delete(token);
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  size(): number {
+    this.evictExpired();
+    return this.cache.size;
+  }
+}
+
+export const rotationGraceCache = new RotationGraceCache(100);
 
 const inFlightRefreshes = new Map<
   string,
@@ -116,8 +233,6 @@ const inFlightRefreshes = new Map<
   }>
 >();
 
-const recentRotations = new Map<string, CachedRotation>();
-
 /**
  * Concurrency-resilient session refresh with in-flight Promise deduplication and a 15-second grace window.
  * Protects concurrent requests from multiple browser tabs or parallel API calls from race conditions
@@ -129,7 +244,7 @@ export async function refreshUserSession(refreshToken: string) {
   }
 
   // 1. Check if this token was recently rotated within the 15-second grace window
-  const cached = recentRotations.get(refreshToken);
+  const cached = rotationGraceCache.get(refreshToken);
   if (cached && Date.now() < cached.expiresAt) {
     return {
       data: {
@@ -159,9 +274,9 @@ export async function refreshUserSession(refreshToken: string) {
           },
           expiresAt: Date.now() + 15000,
         };
-        recentRotations.set(refreshToken, rotationEntry);
+        rotationGraceCache.set(refreshToken, rotationEntry);
         if (result.data.session.refresh_token) {
-          recentRotations.set(result.data.session.refresh_token, rotationEntry);
+          rotationGraceCache.set(result.data.session.refresh_token, rotationEntry);
         }
       }
       return result;

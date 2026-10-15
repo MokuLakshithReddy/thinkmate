@@ -22,13 +22,22 @@ export async function POST(req: NextRequest) {
     req.cookies.get('thinkmate_refresh_token')?.value ||
     req.cookies.get('sb-refresh-token')?.value;
 
-  if (token) {
-    await revokeUserSession(token, refreshToken);
+  let revocation: { success: boolean; upstreamRevoked: boolean; error?: string } = {
+    success: true,
+    upstreamRevoked: false,
+  };
+
+  if (token || refreshToken) {
+    revocation = await revokeUserSession(token, refreshToken);
   }
 
   const response = NextResponse.json({
     success: true,
-    message: 'Signed out successfully',
+    upstreamRevoked: revocation.upstreamRevoked,
+    message: revocation.upstreamRevoked
+      ? 'Signed out and session revoked successfully'
+      : 'Signed out locally (upstream session expired or unrevoked)',
+    ...(revocation.error ? { upstreamError: revocation.error } : {}),
   });
 
   // Expire all auth and refresh cookies immediately

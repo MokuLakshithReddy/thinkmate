@@ -95,16 +95,39 @@ export default function Home() {
       localStorage.removeItem('thinkmate_auth_token');
     }
 
-    // Verify authentication status
+    // Verify authentication status (read-only GET)
     fetch('/api/auth/session', {
       credentials: 'same-origin',
     })
       .then((res) => res.json())
-      .then((data) => {
+      .then(async (data) => {
         if (ignore) return;
         if (data.authenticated && data.user) {
           setIsAuthenticated(true);
           setUserEmail(data.user.email);
+        } else if (data.canRefresh) {
+          // Access token expired but refresh token cookie is present: trigger explicit CSRF-protected POST refresh
+          try {
+            const refreshRes = await fetch('/api/auth/refresh', {
+              method: 'POST',
+              credentials: 'same-origin',
+            });
+            if (refreshRes.ok) {
+              const refreshData = await refreshRes.json();
+              if (!ignore && refreshData.user) {
+                setIsAuthenticated(true);
+                setUserEmail(refreshData.user.email);
+                refreshCloudSessions();
+                return;
+              }
+            }
+          } catch (refreshErr) {
+            console.warn('Initial session refresh attempt failed:', refreshErr);
+          }
+          if (!ignore) {
+            setIsAuthenticated(false);
+            setUserEmail(undefined);
+          }
         } else {
           setIsAuthenticated(false);
           setUserEmail(undefined);
@@ -140,7 +163,7 @@ export default function Home() {
     return () => {
       ignore = true;
     };
-  }, [isSettingsOpen, isAuthModalOpen, refreshCloudTrigger]);
+  }, [isSettingsOpen, isAuthModalOpen, refreshCloudTrigger, refreshCloudSessions]);
 
   // Workflow State
   const [currentStep, setCurrentStep] = useState<CoThinkerStep>('welcome');
