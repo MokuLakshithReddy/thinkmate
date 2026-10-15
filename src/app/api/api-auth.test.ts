@@ -1297,8 +1297,14 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
 
   test('GeminiThinkingService validates structured metadata and refuses synthetic fallbacks', () => {
     const service = new GeminiThinkingService('dummy-test-key');
-    const events: unknown[] = [];
-    const onEvent = (e: unknown) => events.push(e);
+    interface TestEvent {
+      type: string;
+      questions?: string[];
+      insights?: unknown[];
+      mode?: string;
+    }
+    const events: TestEvent[] = [];
+    const onEvent = (e: unknown) => events.push(e as TestEvent);
 
     // 1. Valid metadata emits validated structured questions and insights
     const validMeta = JSON.stringify({
@@ -1316,7 +1322,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     service.parseAndEmitMetadata(validMeta, 'understand', onEvent);
     assert.strictEqual(events.length, 3);
     assert.strictEqual(events[0].type, 'questions');
-    assert.strictEqual(events[0].questions.length, 2);
+    assert.strictEqual(events[0].questions?.length, 2);
     assert.strictEqual(events[1].type, 'insights');
     assert.strictEqual(events[2].type, 'suggestedMode');
     assert.strictEqual(events[2].mode, 'explore');
