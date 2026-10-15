@@ -667,10 +667,14 @@ export default function Home() {
 
   const handleSignOut = async () => {
     try {
-      await fetch('/api/auth/logout', {
+      const res = await fetch('/api/auth/logout', {
         method: 'POST',
         credentials: 'same-origin',
       });
+      const data = await res.json().catch(() => null);
+      if (data && !data.upstreamRevoked && data.upstreamError) {
+        console.warn('Local cookies cleared, but upstream session revocation could not be confirmed:', data.upstreamError);
+      }
     } catch (err) {
       console.warn('Sign out request failed:', err);
     }

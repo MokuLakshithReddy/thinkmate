@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { clearAuthCookies, isSameOriginRequest, revokeUserSession } from '@/lib/server-auth';
+import { clearAuthCookies, isSameOriginRequest, revokeUserSession, RevocationResult } from '@/lib/server-auth';
 
 export async function POST(req: NextRequest) {
   // CSRF validation on state-changing logout
@@ -22,25 +22,38 @@ export async function POST(req: NextRequest) {
     req.cookies.get('thinkmate_refresh_token')?.value ||
     req.cookies.get('sb-refresh-token')?.value;
 
-  let revocation: { success: boolean; upstreamRevoked: boolean; error?: string } = {
+  const hasCredentials = Boolean(token || refreshToken);
+  let revocation: RevocationResult = {
     success: true,
     upstreamRevoked: false,
+    localCleared: true,
   };
 
-  if (token || refreshToken) {
+  if (hasCredentials) {
     revocation = await revokeUserSession(token, refreshToken);
   }
 
-  const response = NextResponse.json({
-    success: true,
-    upstreamRevoked: revocation.upstreamRevoked,
-    message: revocation.upstreamRevoked
-      ? 'Signed out and session revoked successfully'
-      : 'Signed out locally (upstream session expired or unrevoked)',
-    ...(revocation.error ? { upstreamError: revocation.error } : {}),
-  });
+  // Contract: Never report overall success if session tokens were provided but upstream
+  // server-side revocation could not be confirmed.
+  const overallSuccess = hasCredentials ? revocation.upstreamRevoked : true;
+  const status = overallSuccess ? 200 : 502;
 
-  // Expire all auth and refresh cookies immediately
+  const response = NextResponse.json(
+    {
+      success: overallSuccess,
+      upstreamRevoked: revocation.upstreamRevoked,
+      localCleared: true,
+      message: revocation.upstreamRevoked
+        ? 'Signed out and session revoked successfully'
+        : hasCredentials
+          ? 'Signed out locally, but upstream session revocation could not be confirmed'
+          : 'Signed out locally (no active session credentials provided)',
+      ...(revocation.error ? { upstreamError: revocation.error } : {}),
+    },
+    { status }
+  );
+
+  // Expire all auth and refresh cookies immediately across all cases
   clearAuthCookies(response);
 
   return response;

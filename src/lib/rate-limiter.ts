@@ -184,18 +184,34 @@ export class UpstashRedisRateLimitStore implements RateLimitStore {
 
       throw new Error('Unexpected format in Redis EVAL response');
     } catch (providerError) {
-      // Explicit Production Policy:
-      // In production (NODE_ENV=production), fail-closed is active by default to prevent quota bypassing
-      // across distributed serverless instances, unless explicitly overridden with RATE_LIMIT_FAIL_CLOSED=false.
-      // In non-production environments (development/test), defaults to degraded in-memory sliding window fallback.
+      // Endpoint policy:
+      // 1. Critical authentication mutations (auth:login, auth:signup, auth:refresh) MUST fail closed in production
+      //    to prevent brute-force attacks and credential stuffing during Redis degradation.
+      // 2. Non-auth endpoints (e.g. cothink, stream, sessions) default to fail-closed in production unless
+      //    operators explicitly configure RATE_LIMIT_FAIL_CLOSED=false for emergency degraded in-memory availability.
       const isProduction = process.env.NODE_ENV === 'production';
-      const failClosed = process.env.RATE_LIMIT_FAIL_CLOSED === 'true' || (isProduction && process.env.RATE_LIMIT_FAIL_CLOSED !== 'false');
+      const isAuthEndpoint = key.startsWith('auth:');
+      const failClosedExplicit = process.env.RATE_LIMIT_FAIL_CLOSED;
 
-      if (failClosed) {
-        console.error(
-          '[RateLimiter] Upstash Redis execution failed and fail-closed policy is active. Rejecting request to protect global quotas:',
-          providerError
-        );
+      let shouldFailClosed = false;
+      if (failClosedExplicit === 'true') {
+        shouldFailClosed = true;
+      } else if (failClosedExplicit === 'false') {
+        // Operators explicitly turned off fail-closed for emergency recovery
+        shouldFailClosed = false;
+      } else if (isProduction) {
+        // In production without explicit override: auth always fails closed; general endpoints fail closed
+        shouldFailClosed = true;
+      }
+
+      if (shouldFailClosed) {
+        emitOperatorAlert('REDIS_OUTAGE', {
+          key,
+          action: 'FAIL_CLOSED_REJECT',
+          isAuthEndpoint,
+          error: providerError instanceof Error ? providerError.message : String(providerError),
+          runbook: 'Check Upstash Redis status. For emergency degraded availability on non-auth routes, set RATE_LIMIT_FAIL_CLOSED=false.',
+        });
         return {
           allowed: false,
           remaining: 0,
@@ -203,16 +219,83 @@ export class UpstashRedisRateLimitStore implements RateLimitStore {
         };
       }
 
-      console.warn(
-        '[RateLimiter] Upstash Redis execution failed. Engaging degraded in-memory sliding window fallback (per-node bounded):',
-        providerError
-      );
+      emitOperatorAlert('REDIS_OUTAGE', {
+        key,
+        action: 'DEGRADED_MEMORY_FALLBACK',
+        isAuthEndpoint,
+        error: providerError instanceof Error ? providerError.message : String(providerError),
+        runbook: 'Engaged per-node in-memory sliding window fallback. Monitor node memory and restore Redis connectivity.',
+      });
       return memoryStore.checkAndRecord(key, limit, windowMs);
     }
   }
 }
 
 const memoryStore = new MemoryRateLimitStore();
+
+/**
+ * Emits a structured, high-visibility operator alert to console.error
+ * for logging aggregators (Datadog, CloudWatch, GCP Cloud Logging).
+ */
+export function emitOperatorAlert(
+  alertType: 'CONFIG_MISSING' | 'REDIS_OUTAGE' | 'CONFIG_INVALID',
+  details: Record<string, unknown>
+): void {
+  const alertPayload = {
+    tag: 'THINKMATE_OPERATOR_ALERT',
+    type: alertType,
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    ...details,
+  };
+  console.error(`\n[OPERATOR ALERT] ${alertType}:`, JSON.stringify(alertPayload, null, 2), '\n');
+}
+
+/**
+ * Verifies production environment variables for rate limiting.
+ * Returns health and configuration diagnostics for deployment readiness probes.
+ */
+export function verifyRateLimiterConfig(): {
+  valid: boolean;
+  isProduction: boolean;
+  hasUpstash: boolean;
+  failClosedActive: boolean;
+  error?: string;
+} {
+  const isProduction = process.env.NODE_ENV === 'production';
+  const upstashUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const hasUpstash = Boolean(upstashUrl && upstashToken);
+  const failClosedActive =
+    process.env.RATE_LIMIT_FAIL_CLOSED === 'true' ||
+    (isProduction && process.env.RATE_LIMIT_FAIL_CLOSED !== 'false');
+
+  if (isProduction && !hasUpstash) {
+    const errorMsg =
+      'UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN must be configured in production to enforce distributed rate limits.';
+    emitOperatorAlert('CONFIG_MISSING', {
+      error: errorMsg,
+      recovery:
+        'Provision Upstash Redis credentials or set RATE_LIMIT_FAIL_CLOSED=false for emergency degraded per-node memory limiting.',
+    });
+    return { valid: false, isProduction, hasUpstash, failClosedActive, error: errorMsg };
+  }
+
+  if (upstashUrl) {
+    try {
+      const parsed = new URL(upstashUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        throw new Error('Protocol must be http: or https:');
+      }
+    } catch (urlErr) {
+      const errorMsg = `UPSTASH_REDIS_REST_URL is invalid: ${upstashUrl} (${urlErr instanceof Error ? urlErr.message : String(urlErr)})`;
+      emitOperatorAlert('CONFIG_INVALID', { error: errorMsg });
+      return { valid: false, isProduction, hasUpstash, failClosedActive, error: errorMsg };
+    }
+  }
+
+  return { valid: true, isProduction, hasUpstash, failClosedActive };
+}
 
 /**
  * Resolves the active distributed store.
@@ -229,13 +312,24 @@ export function getActiveRateLimitStore(): RateLimitStore {
   // In production, reject rate-limited API requests when distributed Redis credentials are missing
   // to prevent per-instance quota bypasses in serverless / multi-instance environments.
   if (process.env.NODE_ENV === 'production') {
+    // If operators explicitly set RATE_LIMIT_FAIL_CLOSED=false for emergency recovery, fall back to memory
+    if (process.env.RATE_LIMIT_FAIL_CLOSED === 'false') {
+      emitOperatorAlert('CONFIG_MISSING', {
+        action: 'EMERGENCY_MEMORY_FALLBACK',
+        warning: 'RATE_LIMIT_FAIL_CLOSED=false active in production without Redis. Operating in degraded in-memory mode.',
+      });
+      return memoryStore;
+    }
+
     return {
       get: () => new Array(10000).fill(Date.now()),
       set: () => {},
       checkAndRecord: (_key: string, _limit: number, windowMs: number) => {
-        console.error(
-          '[RateLimiter] Critical configuration failure: UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN must be configured in production to enforce distributed rate limits.'
-        );
+        emitOperatorAlert('CONFIG_MISSING', {
+          action: 'FAIL_CLOSED_REJECT',
+          error: 'UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN missing in production.',
+          recovery: 'Set Redis environment variables or configure RATE_LIMIT_FAIL_CLOSED=false for emergency recovery.',
+        });
         return {
           allowed: false,
           remaining: 0,

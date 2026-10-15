@@ -385,9 +385,74 @@ async function runStagingVerification() {
     console.log('  ✔ Passed: Partial writes (messages & session updates) atomically rolled back on failure.');
 
     // -------------------------------------------------------------------------
-    // TEST 6: Multi-User Cross-Tenant Isolation & PostgreSQL RLS Enforcement
+    // TEST 6: Multi-User Cross-Tenant Isolation, PostgreSQL RLS & Data Integrity
     // -------------------------------------------------------------------------
     console.log('\n[Test 6/6] Verifying multi-user cross-tenant isolation & PostgreSQL RLS...');
+
+    // 1. Seed baseline records for all sensitive child tables before capturing baseline snapshot
+    const testInsightId = crypto.randomUUID();
+    const { error: seedInsightErr } = await serviceClient.from('session_insights').insert({
+      id: testInsightId,
+      session_id: testSessionId,
+      category: 'decision',
+      status: 'accepted',
+      title: 'Victim Decision Insight',
+      content: 'Core architecture decision record',
+    });
+    if (seedInsightErr) throw new Error(`Failed to seed victim insight: ${seedInsightErr.message}`);
+
+    const testTransitionId = crypto.randomUUID();
+    const { error: seedTransErr } = await serviceClient.from('workflow_transitions').insert({
+      id: testTransitionId,
+      session_id: testSessionId,
+      from_mode: 'understand',
+      to_mode: 'explore',
+      reason: 'Baseline valid workflow transition record',
+    });
+    if (seedTransErr) throw new Error(`Failed to seed baseline transition: ${seedTransErr.message}`);
+
+    // 2. Capture complete cryptographic baseline snapshot of Victim state across ALL sensitive tables
+    const { data: baselineSession, error: bSessErr } = await serviceClient
+      .from('thinking_sessions')
+      .select('id, user_id, title, problem_statement, current_mode, current_stage, status')
+      .eq('id', testSessionId)
+      .single();
+    if (bSessErr) throw new Error(`Failed to capture baseline session: ${bSessErr.message}`);
+
+    const { data: baselineMessages, error: bMsgErr } = await serviceClient
+      .from('session_messages')
+      .select('id, session_id, role, content, mode')
+      .eq('session_id', testSessionId)
+      .order('id', { ascending: true });
+    if (bMsgErr) throw new Error(`Failed to capture baseline messages: ${bMsgErr.message}`);
+    assert.ok((baselineMessages?.length || 0) > 0, 'Baseline victim messages must be non-empty');
+
+    const { data: baselineInsights, error: bInsErr } = await serviceClient
+      .from('session_insights')
+      .select('id, session_id, category, status, title, content')
+      .eq('session_id', testSessionId)
+      .order('id', { ascending: true });
+    if (bInsErr) throw new Error(`Failed to capture baseline insights: ${bInsErr.message}`);
+    assert.ok((baselineInsights?.length || 0) > 0, 'Baseline victim insights must be non-empty');
+
+    const { data: baselineTransitions, error: bTransErr } = await serviceClient
+      .from('workflow_transitions')
+      .select('id, session_id, from_mode, to_mode, reason')
+      .eq('session_id', testSessionId)
+      .order('id', { ascending: true });
+    if (bTransErr) throw new Error(`Failed to capture baseline transitions: ${bTransErr.message}`);
+    assert.ok((baselineTransitions?.length || 0) > 0, 'Baseline victim transitions must be non-empty');
+
+    const { data: baselineIdempotencyKeys, error: bIdempErr } = await serviceClient
+      .from('workflow_idempotency_keys')
+      .select('session_id, user_id, client_request_id, request_hash')
+      .eq('session_id', testSessionId)
+      .order('client_request_id', { ascending: true });
+    if (bIdempErr) throw new Error(`Failed to capture baseline idempotency keys: ${bIdempErr.message}`);
+
+    console.log(`  Baseline captured across 5 sensitive tables (${baselineMessages.length} msgs, ${baselineInsights.length} insights, ${baselineTransitions.length} transitions).`);
+
+    // 3. Create disposable Attacker user and obtain JWT scoped to attacker's identity
     const attackerEmail = `staging-attacker-${crypto.randomUUID()}@thinkmate.local`;
     const attackerPassword = 'StagingAttackerPassword123!';
     const { data: attackerAuth, error: attackerAuthErr } = await serviceClient.auth.admin.createUser({
@@ -420,46 +485,18 @@ async function runStagingVerification() {
       },
     });
 
-    // 6a. Table RLS: thinking_sessions (SELECT, UPDATE, DELETE, INSERT)
-    // 6a.1: Attacker attempts to read Victim's session
+    // -------------------------------------------------------------------------
+    // 6a. Table RLS: thinking_sessions (SELECT, INSERT, UPDATE, DELETE)
+    // -------------------------------------------------------------------------
+    // 6a.1: Attacker attempts to read Victim's session (must return 0 rows)
     const { data: foreignSessions, error: foreignSessErr } = await attackerScopedClient
       .from('thinking_sessions')
       .select('*')
       .eq('id', testSessionId);
     if (foreignSessErr) throw new Error(`RLS query error: ${foreignSessErr.message}`);
-    assert.strictEqual(
-      foreignSessions?.length || 0,
-      0,
-      'PostgreSQL RLS violation: Attacker was able to read victim thinking_sessions row'
-    );
+    assert.strictEqual(foreignSessions?.length || 0, 0, 'RLS violation: Attacker read victim thinking_sessions');
 
-    // 6a.2: Attacker attempts to modify Victim's session
-    const { data: updatedRows, error: updateErr } = await attackerScopedClient
-      .from('thinking_sessions')
-      .update({ title: 'Cross-Tenant Malicious Tampering' })
-      .eq('id', testSessionId)
-      .select();
-    if (updateErr) throw new Error(`RLS update error: ${updateErr.message}`);
-    assert.strictEqual(
-      updatedRows?.length || 0,
-      0,
-      'PostgreSQL RLS violation: Attacker was able to update victim thinking_sessions row'
-    );
-
-    // 6a.3: Attacker attempts to delete Victim's session
-    const { data: deletedRows, error: deleteErr } = await attackerScopedClient
-      .from('thinking_sessions')
-      .delete()
-      .eq('id', testSessionId)
-      .select();
-    if (deleteErr) throw new Error(`RLS delete error: ${deleteErr.message}`);
-    assert.strictEqual(
-      deletedRows?.length || 0,
-      0,
-      'PostgreSQL RLS violation: Attacker was able to delete victim thinking_sessions row'
-    );
-
-    // 6a.4: Attacker attempts to forge a session using Victim's user_id
+    // 6a.2: Attacker attempts to forge a session using Victim's user_id (must fail with 42501 / RLS error)
     const { data: forgedSess, error: forgedSessErr } = await attackerScopedClient
       .from('thinking_sessions')
       .insert({
@@ -472,50 +509,46 @@ async function runStagingVerification() {
         status: 'active',
       })
       .select();
-
     assert.strictEqual(forgedSess?.length || 0, 0, 'No rows should be inserted by attacker');
-    assert.ok(forgedSessErr, 'Expected specific RLS policy violation error on unauthorized session insert');
+    assert.ok(forgedSessErr, 'Expected specific RLS violation on unauthorized session insert');
     assert.ok(
       forgedSessErr.code === '42501' ||
         forgedSessErr.message.includes('violates row-level security policy') ||
         forgedSessErr.message.includes('permission denied'),
-      `Expected authorization violation (code 42501 or RLS policy), got: ${forgedSessErr.message} (${forgedSessErr.code})`
+      `Expected authorization violation (42501/RLS), got: ${forgedSessErr.message} (${forgedSessErr.code})`
     );
 
-    // Verify victim session row remains completely intact and unchanged
-    const { data: verifiedVictimSess, error: verifySessErr } = await serviceClient
+    // 6a.3: Attacker attempts to modify Victim's session (must affect 0 rows)
+    const { data: updatedSess, error: updateSessErr } = await attackerScopedClient
       .from('thinking_sessions')
-      .select('*')
+      .update({ title: 'Cross-Tenant Malicious Tampering' })
       .eq('id', testSessionId)
-      .single();
-    if (verifySessErr) throw new Error(`Victim verification failed: ${verifySessErr.message}`);
-    assert.strictEqual(verifiedVictimSess.user_id, testUserId, 'Victim session user_id must remain unchanged');
-    assert.strictEqual(verifiedVictimSess.current_stage, sessionAfter.current_stage, 'Victim current_stage must remain unchanged');
-    assert.strictEqual(verifiedVictimSess.current_mode, sessionAfter.current_mode, 'Victim current_mode must remain unchanged');
-    console.log('  ✔ Passed: thinking_sessions RLS strictly blocks unauthorized SELECT, UPDATE, DELETE, and INSERT.');
+      .select();
+    if (updateSessErr) throw new Error(`RLS update error: ${updateSessErr.message}`);
+    assert.strictEqual(updatedSess?.length || 0, 0, 'RLS violation: Attacker updated victim thinking_sessions');
 
-    // 6b. Table RLS: session_messages (SELECT, UPDATE, DELETE, INSERT)
-    // Capture baseline victim message count before attack attempts
-    const { count: baselineMsgCount, error: baselineMsgErr } = await serviceClient
-      .from('session_messages')
-      .select('*', { count: 'exact', head: true })
-      .eq('session_id', testSessionId);
-    if (baselineMsgErr) throw new Error(`Failed to query baseline message count: ${baselineMsgErr.message}`);
-    assert.ok((baselineMsgCount || 0) > 0, 'Baseline victim message count must be greater than 0');
+    // 6a.4: Attacker attempts to delete Victim's session (must affect 0 rows)
+    const { data: deletedSess, error: deleteSessErr } = await attackerScopedClient
+      .from('thinking_sessions')
+      .delete()
+      .eq('id', testSessionId)
+      .select();
+    if (deleteSessErr) throw new Error(`RLS delete error: ${deleteSessErr.message}`);
+    assert.strictEqual(deletedSess?.length || 0, 0, 'RLS violation: Attacker deleted victim thinking_sessions');
+    console.log('  ✔ Passed: thinking_sessions RLS strictly blocks unauthorized SELECT, INSERT, UPDATE, and DELETE.');
 
-    // 6b.1: Attacker attempts to read Victim's messages
+    // -------------------------------------------------------------------------
+    // 6b. Table RLS: session_messages (SELECT, INSERT, UPDATE, DELETE)
+    // -------------------------------------------------------------------------
+    // 6b.1: Attacker attempts to read Victim's messages (must return 0 rows)
     const { data: foreignMsgs, error: foreignMsgsErr } = await attackerScopedClient
       .from('session_messages')
       .select('*')
       .eq('session_id', testSessionId);
     if (foreignMsgsErr) throw new Error(`RLS query error: ${foreignMsgsErr.message}`);
-    assert.strictEqual(
-      foreignMsgs?.length || 0,
-      0,
-      'PostgreSQL RLS violation: Attacker was able to read victim session_messages'
-    );
+    assert.strictEqual(foreignMsgs?.length || 0, 0, 'RLS violation: Attacker read victim session_messages');
 
-    // 6b.2: Attacker attempts to insert message into Victim's session
+    // 6b.2: Attacker attempts to insert message into Victim's session (must fail with 42501 / RLS error)
     const { data: injectedMsg, error: injectedMsgErr } = await attackerScopedClient
       .from('session_messages')
       .insert({
@@ -526,7 +559,6 @@ async function runStagingVerification() {
         mode: 'understand',
       })
       .select();
-
     assert.strictEqual(injectedMsg?.length || 0, 0, 'No message rows should be inserted by attacker');
     assert.ok(injectedMsgErr, 'Expected specific RLS policy violation on message insert into victim session');
     assert.ok(
@@ -536,67 +568,37 @@ async function runStagingVerification() {
       `Expected authorization violation on message insert, got: ${injectedMsgErr.message} (${injectedMsgErr.code})`
     );
 
-    // 6b.3: Attacker attempts to update messages in Victim's session
+    // 6b.3: Attacker attempts to update messages in Victim's session (must affect 0 rows)
     const { data: tamperedMsgs, error: tamperedMsgsErr } = await attackerScopedClient
       .from('session_messages')
       .update({ content: 'Tampered content' })
       .eq('session_id', testSessionId)
       .select();
     if (tamperedMsgsErr) throw new Error(`RLS query error: ${tamperedMsgsErr.message}`);
-    assert.strictEqual(
-      tamperedMsgs?.length || 0,
-      0,
-      'PostgreSQL RLS violation: Attacker was able to update victim session_messages'
-    );
+    assert.strictEqual(tamperedMsgs?.length || 0, 0, 'RLS violation: Attacker updated victim session_messages');
 
-    // 6b.4: Attacker attempts to delete messages in Victim's session
+    // 6b.4: Attacker attempts to delete messages in Victim's session (must affect 0 rows)
     const { data: deletedMsgs, error: deletedMsgsErr } = await attackerScopedClient
       .from('session_messages')
       .delete()
       .eq('session_id', testSessionId)
       .select();
     if (deletedMsgsErr) throw new Error(`RLS query error: ${deletedMsgsErr.message}`);
-    assert.strictEqual(
-      deletedMsgs?.length || 0,
-      0,
-      'PostgreSQL RLS violation: Attacker was able to delete victim session_messages'
-    );
-
-    // Verify victim session messages count remains strictly unaltered
-    const { count: victimMsgCount, error: countMsgErr } = await serviceClient
-      .from('session_messages')
-      .select('*', { count: 'exact', head: true })
-      .eq('session_id', testSessionId);
-    if (countMsgErr) throw new Error(`Failed to count victim messages: ${countMsgErr.message}`);
-    assert.strictEqual(victimMsgCount, baselineMsgCount, 'Victim session messages count must be strictly unmodified');
+    assert.strictEqual(deletedMsgs?.length || 0, 0, 'RLS violation: Attacker deleted victim session_messages');
     console.log('  ✔ Passed: session_messages RLS strictly blocks unauthorized SELECT, INSERT, UPDATE, and DELETE.');
 
+    // -------------------------------------------------------------------------
     // 6c. Table RLS: session_insights (SELECT, INSERT, UPDATE, DELETE)
-    // Seed an insight for the victim session via serviceClient
-    const testInsightId = crypto.randomUUID();
-    const { error: seedInsightErr } = await serviceClient.from('session_insights').insert({
-      id: testInsightId,
-      session_id: testSessionId,
-      category: 'decision',
-      status: 'accepted',
-      title: 'Victim Decision Insight',
-      content: 'Core architecture decision record',
-    });
-    if (seedInsightErr) throw new Error(`Failed to seed victim insight: ${seedInsightErr.message}`);
-
-    // 6c.1: Attacker attempts to read Victim's insight
+    // -------------------------------------------------------------------------
+    // 6c.1: Attacker attempts to read Victim's insight (must return 0 rows)
     const { data: foreignInsights, error: foreignInsightsErr } = await attackerScopedClient
       .from('session_insights')
       .select('*')
       .eq('id', testInsightId);
     if (foreignInsightsErr) throw new Error(`RLS query error: ${foreignInsightsErr.message}`);
-    assert.strictEqual(
-      foreignInsights?.length || 0,
-      0,
-      'PostgreSQL RLS violation: Attacker was able to read victim session_insights'
-    );
+    assert.strictEqual(foreignInsights?.length || 0, 0, 'RLS violation: Attacker read victim session_insights');
 
-    // 6c.2: Attacker attempts to insert insight into Victim's session
+    // 6c.2: Attacker attempts to insert insight into Victim's session (must fail with 42501 / RLS error)
     const { data: injectedInsight, error: injectedInsightErr } = await attackerScopedClient
       .from('session_insights')
       .insert({
@@ -608,7 +610,6 @@ async function runStagingVerification() {
         content: 'Fabricated decision record',
       })
       .select();
-
     assert.strictEqual(injectedInsight?.length || 0, 0, 'No insight rows should be inserted by attacker');
     assert.ok(injectedInsightErr, 'Expected specific RLS policy violation on insight insert into victim session');
     assert.ok(
@@ -618,57 +619,37 @@ async function runStagingVerification() {
       `Expected authorization violation on insight insert, got: ${injectedInsightErr.message} (${injectedInsightErr.code})`
     );
 
-    // 6c.3: Attacker attempts to update Victim's insight
+    // 6c.3: Attacker attempts to update Victim's insight (must affect 0 rows)
     const { data: updatedInsights, error: updateInsightErr } = await attackerScopedClient
       .from('session_insights')
       .update({ status: 'rejected' })
       .eq('id', testInsightId)
       .select();
     if (updateInsightErr) throw new Error(`RLS query error: ${updateInsightErr.message}`);
-    assert.strictEqual(
-      updatedInsights?.length || 0,
-      0,
-      'PostgreSQL RLS violation: Attacker was able to update victim session_insights'
-    );
+    assert.strictEqual(updatedInsights?.length || 0, 0, 'RLS violation: Attacker updated victim session_insights');
 
-    // 6c.4: Attacker attempts to delete Victim's insight
+    // 6c.4: Attacker attempts to delete Victim's insight (must affect 0 rows)
     const { data: deletedInsights, error: deleteInsightErr } = await attackerScopedClient
       .from('session_insights')
       .delete()
       .eq('id', testInsightId)
       .select();
     if (deleteInsightErr) throw new Error(`RLS query error: ${deleteInsightErr.message}`);
-    assert.strictEqual(
-      deletedInsights?.length || 0,
-      0,
-      'PostgreSQL RLS violation: Attacker was able to delete victim session_insights'
-    );
-
-    // Verify victim insight remains intact and unaltered
-    const { data: verifiedVictimInsight, error: verifyInsightErr } = await serviceClient
-      .from('session_insights')
-      .select('*')
-      .eq('id', testInsightId)
-      .single();
-    if (verifyInsightErr) throw new Error(`Failed to verify victim insight: ${verifyInsightErr.message}`);
-    assert.strictEqual(verifiedVictimInsight.status, 'accepted', 'Victim insight status must remain accepted');
-    assert.strictEqual(verifiedVictimInsight.content, 'Core architecture decision record', 'Victim insight content must remain unchanged');
+    assert.strictEqual(deletedInsights?.length || 0, 0, 'RLS violation: Attacker deleted victim session_insights');
     console.log('  ✔ Passed: session_insights RLS strictly blocks unauthorized SELECT, INSERT, UPDATE, and DELETE.');
 
-    // 6d. Table RLS: workflow_transitions (SELECT, INSERT)
-    // 6d.1: Attacker attempts to read transitions for Victim's session
+    // -------------------------------------------------------------------------
+    // 6d. Table RLS: workflow_transitions (SELECT, INSERT, UPDATE, DELETE)
+    // -------------------------------------------------------------------------
+    // 6d.1: Attacker attempts to read transitions for Victim's session (must return 0 rows)
     const { data: foreignTransitions, error: foreignTransErr } = await attackerScopedClient
       .from('workflow_transitions')
       .select('*')
       .eq('session_id', testSessionId);
     if (foreignTransErr) throw new Error(`RLS query error: ${foreignTransErr.message}`);
-    assert.strictEqual(
-      foreignTransitions?.length || 0,
-      0,
-      'PostgreSQL RLS violation: Attacker was able to read victim workflow_transitions'
-    );
+    assert.strictEqual(foreignTransitions?.length || 0, 0, 'RLS violation: Attacker read victim workflow_transitions');
 
-    // 6d.2: Attacker attempts to insert transition for Victim's session
+    // 6d.2: Attacker attempts to insert transition for Victim's session (must fail with 42501 / RLS error)
     const { data: injectedTrans, error: injectedTransErr } = await attackerScopedClient
       .from('workflow_transitions')
       .insert({
@@ -678,7 +659,6 @@ async function runStagingVerification() {
         reason: 'Malicious transition record',
       })
       .select();
-
     assert.strictEqual(injectedTrans?.length || 0, 0, 'No transition rows should be inserted by attacker');
     assert.ok(injectedTransErr, 'Expected specific RLS policy violation on transition insert for victim session');
     assert.ok(
@@ -687,9 +667,29 @@ async function runStagingVerification() {
         injectedTransErr.message.includes('permission denied'),
       `Expected authorization violation on transition insert, got: ${injectedTransErr.message} (${injectedTransErr.code})`
     );
-    console.log('  ✔ Passed: workflow_transitions RLS strictly blocks unauthorized SELECT and INSERT.');
 
-    // 6e. Table Permissions & RLS: workflow_idempotency_keys
+    // 6d.3: Attacker attempts to update Victim's transition (must affect 0 rows)
+    const { data: updatedTrans, error: updateTransErr } = await attackerScopedClient
+      .from('workflow_transitions')
+      .update({ reason: 'Tampered transition reason' })
+      .eq('id', testTransitionId)
+      .select();
+    if (updateTransErr) throw new Error(`RLS query error: ${updateTransErr.message}`);
+    assert.strictEqual(updatedTrans?.length || 0, 0, 'RLS violation: Attacker updated victim workflow_transitions');
+
+    // 6d.4: Attacker attempts to delete Victim's transition (must affect 0 rows)
+    const { data: deletedTrans, error: deleteTransErr } = await attackerScopedClient
+      .from('workflow_transitions')
+      .delete()
+      .eq('id', testTransitionId)
+      .select();
+    if (deleteTransErr) throw new Error(`RLS query error: ${deleteTransErr.message}`);
+    assert.strictEqual(deletedTrans?.length || 0, 0, 'RLS violation: Attacker deleted victim workflow_transitions');
+    console.log('  ✔ Passed: workflow_transitions RLS strictly blocks unauthorized SELECT, INSERT, UPDATE, and DELETE.');
+
+    // -------------------------------------------------------------------------
+    // 6e. Table Permissions & RLS: workflow_idempotency_keys (SELECT, INSERT, UPDATE, DELETE)
+    // -------------------------------------------------------------------------
     // 6e.1: Attacker attempts direct SELECT on workflow_idempotency_keys
     const { data: foreignKeys, error: foreignKeysErr } = await attackerScopedClient
       .from('workflow_idempotency_keys')
@@ -701,14 +701,10 @@ async function runStagingVerification() {
         `Expected permission denied (code 42501) for direct table query, got: ${foreignKeysErr.message}`
       );
     } else {
-      assert.strictEqual(
-        foreignKeys?.length || 0,
-        0,
-        'PostgreSQL RLS violation: Attacker was able to read victim workflow_idempotency_keys'
-      );
+      assert.strictEqual(foreignKeys?.length || 0, 0, 'RLS violation: Attacker read victim workflow_idempotency_keys');
     }
 
-    // 6e.2: Attacker attempts direct INSERT on workflow_idempotency_keys
+    // 6e.2: Attacker attempts direct INSERT on workflow_idempotency_keys (must fail)
     const { data: injectedKey, error: injectedKeyErr } = await attackerScopedClient
       .from('workflow_idempotency_keys')
       .insert({
@@ -719,7 +715,6 @@ async function runStagingVerification() {
         response_payload: { malicious: true },
       })
       .select();
-
     assert.strictEqual(injectedKey?.length || 0, 0, 'No idempotency key rows should be inserted by attacker');
     assert.ok(injectedKeyErr, 'Expected permission denied or RLS violation on idempotency key insert');
     assert.ok(
@@ -728,9 +723,41 @@ async function runStagingVerification() {
         injectedKeyErr.message.includes('violates row-level security policy'),
       `Expected permission denied (42501) on idempotency key insert, got: ${injectedKeyErr.message} (${injectedKeyErr.code})`
     );
-    console.log('  ✔ Passed: workflow_idempotency_keys strictly protected from direct unauthorized access.');
 
-    // 6f. Direct RPC Privilege Checks via Attacker Credentials
+    // 6e.3: Attacker attempts direct UPDATE on workflow_idempotency_keys
+    const { data: updatedKeys, error: updateKeyErr } = await attackerScopedClient
+      .from('workflow_idempotency_keys')
+      .update({ request_hash: 'tampered-hash' })
+      .eq('session_id', testSessionId)
+      .select();
+    if (updateKeyErr) {
+      assert.ok(
+        updateKeyErr.code === '42501' || updateKeyErr.message.includes('permission denied'),
+        `Expected permission denied on idempotency key update, got: ${updateKeyErr.message}`
+      );
+    } else {
+      assert.strictEqual(updatedKeys?.length || 0, 0, 'RLS violation: Attacker updated victim workflow_idempotency_keys');
+    }
+
+    // 6e.4: Attacker attempts direct DELETE on workflow_idempotency_keys
+    const { data: deletedKeys, error: deleteKeyErr } = await attackerScopedClient
+      .from('workflow_idempotency_keys')
+      .delete()
+      .eq('session_id', testSessionId)
+      .select();
+    if (deleteKeyErr) {
+      assert.ok(
+        deleteKeyErr.code === '42501' || deleteKeyErr.message.includes('permission denied'),
+        `Expected permission denied on idempotency key delete, got: ${deleteKeyErr.message}`
+      );
+    } else {
+      assert.strictEqual(deletedKeys?.length || 0, 0, 'RLS violation: Attacker deleted victim workflow_idempotency_keys');
+    }
+    console.log('  ✔ Passed: workflow_idempotency_keys strictly protected from direct unauthorized SELECT, INSERT, UPDATE, and DELETE.');
+
+    // -------------------------------------------------------------------------
+    // 6f. Separate Direct RPC Privilege Checks via Authenticated Non-Service Caller
+    // -------------------------------------------------------------------------
     // Both record_workflow_step_tx and transition_workflow_mode_tx must be denied to authenticated non-service callers
     const { data: attackerDirectRpcData, error: attackerDirectRpcErr } = await attackerScopedClient.rpc(
       'record_workflow_step_tx',
@@ -774,9 +801,11 @@ async function runStagingVerification() {
         attackerModeRpcErr.message.includes('does not exist'),
       `Expected permission denied (42501) on direct mode RPC execution, got: ${attackerModeRpcErr.message} (${attackerModeRpcErr.code})`
     );
-    console.log('  ✔ Passed: Direct transactional RPC execution strictly denied to authenticated users (restricted to service_role).');
+    console.log('  ✔ Passed: Direct transactional RPC execution strictly denied to authenticated non-service users (restricted to service_role).');
 
+    // -------------------------------------------------------------------------
     // 6g. Service-Role Cross-User Rejection Check: Verify RPC rejects cross-tenant IDs under row locks
+    // -------------------------------------------------------------------------
     const { data: crossUserData, error: crossUserErr } = await serviceClient.rpc('record_workflow_step_tx', {
       p_session_id: testSessionId,
       p_user_id: attackerUserId, // Unauthorized cross-user attempt
@@ -815,7 +844,55 @@ async function runStagingVerification() {
     );
     console.log('  ✔ Passed: Multi-user cross-tenant tampering strictly rejected under database locks.');
 
-    // 6h. Server-Side Session Revocation Test: Revoke attacker session
+    // -------------------------------------------------------------------------
+    // 6h. End-to-End Cryptographic Data Integrity Verification
+    // Confirm that protected records remain 100% byte-for-byte identical to baseline after entire attack sequence
+    // -------------------------------------------------------------------------
+    const { data: postAttackSession, error: pSessErr } = await serviceClient
+      .from('thinking_sessions')
+      .select('id, user_id, title, problem_statement, current_mode, current_stage, status')
+      .eq('id', testSessionId)
+      .single();
+    if (pSessErr) throw new Error(`Failed to query post-attack session: ${pSessErr.message}`);
+
+    const { data: postAttackMessages, error: pMsgErr } = await serviceClient
+      .from('session_messages')
+      .select('id, session_id, role, content, mode')
+      .eq('session_id', testSessionId)
+      .order('id', { ascending: true });
+    if (pMsgErr) throw new Error(`Failed to query post-attack messages: ${pMsgErr.message}`);
+
+    const { data: postAttackInsights, error: pInsErr } = await serviceClient
+      .from('session_insights')
+      .select('id, session_id, category, status, title, content')
+      .eq('session_id', testSessionId)
+      .order('id', { ascending: true });
+    if (pInsErr) throw new Error(`Failed to query post-attack insights: ${pInsErr.message}`);
+
+    const { data: postAttackTransitions, error: pTransErr } = await serviceClient
+      .from('workflow_transitions')
+      .select('id, session_id, from_mode, to_mode, reason')
+      .eq('session_id', testSessionId)
+      .order('id', { ascending: true });
+    if (pTransErr) throw new Error(`Failed to query post-attack transitions: ${pTransErr.message}`);
+
+    const { data: postAttackIdempotencyKeys, error: pIdempErr } = await serviceClient
+      .from('workflow_idempotency_keys')
+      .select('session_id, user_id, client_request_id, request_hash')
+      .eq('session_id', testSessionId)
+      .order('client_request_id', { ascending: true });
+    if (pIdempErr) throw new Error(`Failed to query post-attack idempotency keys: ${pIdempErr.message}`);
+
+    assert.deepStrictEqual(postAttackSession, baselineSession, 'Data integrity violated: thinking_sessions altered during attack sequence');
+    assert.deepStrictEqual(postAttackMessages, baselineMessages, 'Data integrity violated: session_messages altered during attack sequence');
+    assert.deepStrictEqual(postAttackInsights, baselineInsights, 'Data integrity violated: session_insights altered during attack sequence');
+    assert.deepStrictEqual(postAttackTransitions, baselineTransitions, 'Data integrity violated: workflow_transitions altered during attack sequence');
+    assert.deepStrictEqual(postAttackIdempotencyKeys, baselineIdempotencyKeys, 'Data integrity violated: workflow_idempotency_keys altered during attack sequence');
+    console.log('  ✔ Passed: End-to-end data integrity verified. Victim records remain 100% identical to baseline across all sensitive tables after complete attack sequence.');
+
+    // -------------------------------------------------------------------------
+    // 6i. Server-Side Session Revocation Test: Revoke attacker session
+    // -------------------------------------------------------------------------
     const { error: revokeErr } = await serviceClient.auth.admin.signOut(attackerToken);
     if (revokeErr) throw new Error(`Server-side signOut failed: ${revokeErr.message}`);
     const { data: userAfterRevoke, error: postLogoutErr } = await serviceClient.auth.getUser(attackerToken);

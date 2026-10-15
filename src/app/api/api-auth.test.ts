@@ -16,7 +16,7 @@ import { GET as sessionGet } from './auth/session/route';
 import { POST as signupPost } from './auth/signup/route';
 import { POST as refreshPost } from './auth/refresh/route';
 import { GeminiThinkingService } from '@/services/ai/gemini-service';
-import { checkRateLimitAsync, MemoryRateLimitStore, UpstashRedisRateLimitStore, getActiveRateLimitStore } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, MemoryRateLimitStore, UpstashRedisRateLimitStore, getActiveRateLimitStore, verifyRateLimiterConfig } from '@/lib/rate-limiter';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
@@ -1239,24 +1239,52 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     assert.strictEqual(csrfRes.status, 403, 'Cross-origin logout with ambient cookie must return 403');
 
     // 2. Same-origin logout clears cookies with maxAge: 0
-    const logoutReq = new NextRequest('http://localhost:3000/api/auth/logout', {
-      method: 'POST',
-      headers: {
-        Origin: 'http://localhost:3000',
-        Host: 'localhost:3000',
-        Cookie: 'thinkmate_auth_token=existing-token; thinkmate_refresh_token=existing-refresh',
-      },
-    });
-    const logoutRes = await logoutPost(logoutReq);
-    assert.strictEqual(logoutRes.status, 200);
-    const json = await logoutRes.json();
-    assert.strictEqual(json.success, true);
+    const originalFetch = global.fetch;
+    const origUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const origAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'http://localhost:54321';
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'test-anon-key';
 
-    const cookieHeader = logoutRes.headers.get('set-cookie');
-    assert.ok(cookieHeader, 'Logout must send set-cookie header');
-    assert.ok(cookieHeader.includes('thinkmate_auth_token='), 'Must expire thinkmate_auth_token');
-    assert.ok(cookieHeader.includes('thinkmate_refresh_token='), 'Must expire thinkmate_refresh_token');
-    assert.ok(cookieHeader.includes('Max-Age=0') || cookieHeader.includes('Expires='), 'Must expire auth cookies');
+    try {
+      global.fetch = (async (url: string | URL | Request) => {
+        void url;
+        // Admin signOut or token or logout
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            access_token: 'mock-access',
+            refresh_token: 'mock-refresh',
+            user: { id: 'mock-usr' },
+          }),
+          text: async () => '',
+        } as unknown as Response;
+      }) as typeof global.fetch;
+
+      const logoutReq = new NextRequest('http://localhost:3000/api/auth/logout', {
+        method: 'POST',
+        headers: {
+          Origin: 'http://localhost:3000',
+          Host: 'localhost:3000',
+          Cookie: 'thinkmate_auth_token=existing-token; thinkmate_refresh_token=existing-refresh',
+        },
+      });
+      const logoutRes = await logoutPost(logoutReq);
+      assert.strictEqual(logoutRes.status, 200);
+      const json = await logoutRes.json();
+      assert.strictEqual(json.success, true);
+      assert.strictEqual(json.upstreamRevoked, true);
+
+      const cookieHeader = logoutRes.headers.get('set-cookie');
+      assert.ok(cookieHeader, 'Logout must send set-cookie header');
+      assert.ok(cookieHeader.includes('thinkmate_auth_token='), 'Must expire thinkmate_auth_token');
+      assert.ok(cookieHeader.includes('thinkmate_refresh_token='), 'Must expire thinkmate_refresh_token');
+      assert.ok(cookieHeader.includes('Max-Age=0') || cookieHeader.includes('Expires='), 'Must expire auth cookies');
+    } finally {
+      global.fetch = originalFetch;
+      process.env.NEXT_PUBLIC_SUPABASE_URL = origUrl;
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = origAnon;
+    }
   });
 
   test('POST /api/auth/signup distinguishes unconfirmed email signups from established sessions', async () => {
@@ -1639,7 +1667,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     }
   });
 
-  test('RotationGraceCache bounded size limits, hash indexing, and active expiration eviction', () => {
+  test('RotationGraceCache bounded size limits, hash indexing, in-memory AES-256-GCM encryption, and active expiration eviction', () => {
     const cache = new RotationGraceCache(3);
 
     const now = Date.now();
@@ -1650,23 +1678,43 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       expiresAt: now - 1000, // already expired
     });
     cache.set('token-2', {
-      session: { access_token: 'jwt-2' },
+      session: { access_token: 'jwt-secret-payload-2' },
       user: { id: 'u2' },
       expiresAt: now + 50000, // valid
     });
     cache.set('token-3', {
-      session: { access_token: 'jwt-3' },
+      session: { access_token: 'jwt-secret-payload-3' },
       user: { id: 'u3' },
       expiresAt: now + 50000, // valid
     });
 
-    // Verify raw token is never stored as plaintext key in memory
+    // 1. Verify raw token is never stored as plaintext key in memory
     assert.strictEqual(hashTokenKey('token-1').length, 64, 'Token key must be a 64-character SHA-256 hex string');
 
-    // token-1 was expired, so accessing it should evict it and return undefined
+    // 2. Verify cached tokens in memory buffers are AES-256-GCM encrypted and never plaintext
+    // @ts-expect-error test private property inspection
+    const internalMap = cache.cache;
+    const rawHashedKey = hashTokenKey('token-2');
+    const internalEntry = internalMap.get(rawHashedKey);
+    assert.ok(internalEntry?.encrypted?.ciphertext, 'Internal cache entry must store encrypted ciphertext');
+    assert.ok(internalEntry?.encrypted?.iv, 'Internal cache entry must store initialization vector');
+    assert.ok(internalEntry?.encrypted?.tag, 'Internal cache entry must store auth tag');
+    const serializedEntry = JSON.stringify(internalEntry);
+    assert.strictEqual(
+      serializedEntry.includes('jwt-secret-payload-2'),
+      false,
+      'Process heap memory buffer must NEVER retain plaintext JWT tokens'
+    );
+
+    // 3. token-1 was expired, so accessing it should evict it and return undefined
     assert.strictEqual(cache.get('token-1'), undefined, 'Expired entry must be evicted');
 
-    // Add 2 more entries to test bounded size eviction
+    // 4. Decrypts seamlessly on access for valid entries
+    const retrieved2 = cache.get('token-2');
+    assert.strictEqual(retrieved2?.session.access_token, 'jwt-secret-payload-2');
+    assert.strictEqual(retrieved2?.user.id, 'u2');
+
+    // 5. Add 2 more entries to test bounded size eviction
     cache.set('token-4', {
       session: { access_token: 'jwt-4' },
       user: { id: 'u4' },
@@ -1683,14 +1731,41 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     assert.strictEqual(cache.get('token-5')?.user.id, 'u5');
   });
 
-  test('revokeUserSession distinguishes local cookie clearance from confirmed server revocation', async () => {
-    // 1. Without credentials or valid tokens, returns upstreamRevoked: false and localCleared: true
-    const result = await revokeUserSession('non-existent-token');
-    assert.strictEqual(result.success, true);
-    assert.strictEqual(result.localCleared, true);
-    assert.strictEqual(typeof result.upstreamRevoked, 'boolean');
+  test('revokeUserSession and POST /api/auth/logout enforce confirmed revocation contract', async () => {
+    // 1. Without credentials or valid tokens, local logout succeeds
+    const emptyResult = await revokeUserSession();
+    assert.strictEqual(emptyResult.success, true);
+    assert.strictEqual(emptyResult.localCleared, true);
+    assert.strictEqual(emptyResult.upstreamRevoked, false);
 
-    // 2. Mock global.fetch to verify GoTrue /auth/v1/logout endpoint invocation
+    // 2. When a token is supplied but upstream revocation fails, overall success MUST be false!
+    const failedResult = await revokeUserSession('non-existent-or-expired-token');
+    assert.strictEqual(failedResult.success, false, 'Must report success: false when upstream revocation cannot be confirmed');
+    assert.strictEqual(failedResult.upstreamRevoked, false);
+    assert.strictEqual(failedResult.localCleared, true);
+    assert.ok(failedResult.error, 'Must provide detailed error description');
+
+    // 3. POST /api/auth/logout returns 502 with success: false when credentials provided but upstream revocation fails
+    const failLogoutReq = new NextRequest('http://localhost:3000/api/auth/logout', {
+      method: 'POST',
+      headers: {
+        Origin: 'http://localhost:3000',
+        Host: 'localhost:3000',
+        Cookie: 'thinkmate_auth_token=unrevocable-dead-token',
+      },
+    });
+    const failLogoutRes = await logoutPost(failLogoutReq);
+    assert.strictEqual(failLogoutRes.status, 502, 'Must return 502 Bad Gateway when upstream revocation fails');
+    const failLogoutJson = await failLogoutRes.json();
+    assert.strictEqual(failLogoutJson.success, false, 'Must report success: false when server revocation unconfirmed');
+    assert.strictEqual(failLogoutJson.upstreamRevoked, false);
+    assert.strictEqual(failLogoutJson.localCleared, true);
+    assert.ok(failLogoutJson.upstreamError);
+    // Crucial: Local cookies must STILL be cleared even when upstream revocation failed!
+    const clearedCookies = failLogoutRes.headers.get('set-cookie');
+    assert.ok(clearedCookies?.includes('Max-Age=0'), 'Must clear local cookies on failed upstream revocation');
+
+    // 4. When upstream revocation succeeds (mock GoTrue /auth/v1/logout 204), returns 200 and confirmed success
     const originalFetch = global.fetch;
     const origUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const origAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -1710,9 +1785,20 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
         } as unknown as Response;
       }) as typeof global.fetch;
 
-      const res = await revokeUserSession('active-jwt-token-123');
-      assert.strictEqual(res.success, true);
-      assert.strictEqual(res.upstreamRevoked, true, 'Must report upstreamRevoked: true on 204 response from GoTrue');
+      const okLogoutReq = new NextRequest('http://localhost:3000/api/auth/logout', {
+        method: 'POST',
+        headers: {
+          Origin: 'http://localhost:3000',
+          Host: 'localhost:3000',
+          Cookie: 'thinkmate_auth_token=active-jwt-token-123',
+        },
+      });
+      const okLogoutRes = await logoutPost(okLogoutReq);
+      assert.strictEqual(okLogoutRes.status, 200);
+      const okJson = await okLogoutRes.json();
+      assert.strictEqual(okJson.success, true);
+      assert.strictEqual(okJson.upstreamRevoked, true, 'Must report upstreamRevoked: true on 204 response from GoTrue');
+      assert.strictEqual(okJson.localCleared, true);
       assert.ok(logoutUrlCalled.includes('/auth/v1/logout'), 'Must target GoTrue /auth/v1/logout endpoint');
       assert.strictEqual(authHeaderSent, 'Bearer active-jwt-token-123', 'Must pass bearer token in Authorization header');
     } finally {
@@ -1722,46 +1808,201 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     }
   });
 
-  test('POST /api/auth/refresh recovers gracefully when parallel instance already completed rotation', async () => {
+  test('Multi-instance refresh recovery distributes rotated tokens so clients can continue refreshing', async () => {
     const origRefresh = supabase.auth.refreshSession;
-    const origGetUser = supabase.auth.getUser;
+    const origFetch = global.fetch;
+    const origRedisUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const origRedisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+    process.env.UPSTASH_REDIS_REST_URL = 'https://mock-distributed-redis.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'mock-redis-secret';
+
+    const distributedStore = new Map<string, string>();
+
     try {
-      // Simulate race condition: another server instance already consumed the refresh token (error from GoTrue)
-      supabase.auth.refreshSession = (async () => ({
-        data: { session: null, user: null },
-        error: { message: 'Already Used: Token has been revoked or already rotated' },
-      })) as unknown as typeof supabase.auth.refreshSession;
-
-      // But the client already possesses a valid access token from the winning instance
-      supabase.auth.getUser = (async (token: string) => {
-        if (token === 'valid-access-from-parallel-win') {
-          return { data: { user: { id: 'usr-parallel-win', email: 'winner@thinkmate.ai' } }, error: null };
+      // Mock distributed Upstash Redis REST API
+      global.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+        const urlStr = String(url);
+        if (urlStr.includes('mock-distributed-redis')) {
+          if (urlStr.includes('/set/')) {
+            const parts = urlStr.split('/set/')[1].split('?')[0].split('/');
+            const key = decodeURIComponent(parts[0]);
+            const val = decodeURIComponent(parts[1]);
+            distributedStore.set(key, val);
+            return { ok: true, json: async () => ({ result: 'OK' }) } as unknown as Response;
+          }
+          if (urlStr.includes('/get/')) {
+            const key = decodeURIComponent(urlStr.split('/get/')[1].split('?')[0]);
+            const val = distributedStore.get(key);
+            return {
+              ok: true,
+              json: async () => ({ result: val || null }),
+            } as unknown as Response;
+          }
         }
-        return { data: { user: null }, error: { message: 'Invalid JWT' } };
-      }) as unknown as typeof supabase.auth.getUser;
+        return origFetch(url, init);
+      }) as typeof global.fetch;
 
-      const parallelReq = new NextRequest('http://localhost:3000/api/auth/refresh', {
+      // 1. Instance A rotates R1 -> (A2, R2) and persists to distributed store
+      let instanceARefreshCalls = 0;
+      supabase.auth.refreshSession = (async ({ refresh_token }: { refresh_token: string }) => {
+        if (refresh_token === 'r1-initial-token') {
+          instanceARefreshCalls++;
+          return {
+            data: {
+              session: {
+                access_token: 'a2-fresh-access-token',
+                refresh_token: 'r2-fresh-refresh-token',
+                expires_at: Math.floor(Date.now() / 1000) + 3600,
+              },
+              user: { id: 'usr-distributed-refresh', email: 'distributed@thinkmate.ai' },
+            },
+            error: null,
+          };
+        }
+        if (refresh_token === 'r2-fresh-refresh-token') {
+          return {
+            data: {
+              session: {
+                access_token: 'a3-subsequent-access-token',
+                refresh_token: 'r3-subsequent-refresh-token',
+                expires_at: Math.floor(Date.now() / 1000) + 3600,
+              },
+              user: { id: 'usr-distributed-refresh', email: 'distributed@thinkmate.ai' },
+            },
+            error: null,
+          };
+        }
+        return {
+          data: { session: null, user: null },
+          error: { message: 'Already Used: Refresh token already rotated' },
+        };
+      }) as unknown as typeof supabase.auth.refreshSession;
+
+      // Simulate Instance A executing refresh
+      const { refreshUserSession } = await import('@/lib/server-auth');
+      const resA = await refreshUserSession('r1-initial-token');
+      assert.strictEqual(resA.data.session?.refresh_token, 'r2-fresh-refresh-token');
+      assert.strictEqual(instanceARefreshCalls, 1);
+
+      // Verify rotation was persisted to distributed Redis store
+      const distributedKey = `auth:rotation:${hashTokenKey('r1-initial-token')}`;
+      assert.ok(distributedStore.has(distributedKey), 'Rotated session must be persisted in distributed store');
+
+      // 2. Instance B receives concurrent request with old token r1-initial-token (separate in-memory cache)
+      const instanceBCache = new RotationGraceCache(10); // separate instance cache
+      assert.strictEqual(instanceBCache.get('r1-initial-token'), undefined, 'Instance B memory cache must be empty initially');
+
+      // Client sends POST /api/auth/refresh to Instance B
+      const reqToInstanceB = new NextRequest('http://localhost:3000/api/auth/refresh', {
         method: 'POST',
         headers: {
           Origin: 'http://localhost:3000',
           Host: 'localhost:3000',
-          Cookie: 'thinkmate_refresh_token=already-rotated-token; thinkmate_auth_token=valid-access-from-parallel-win',
+          Cookie: 'thinkmate_refresh_token=r1-initial-token',
         },
       });
 
-      const res = await refreshPost(parallelReq);
-      assert.strictEqual(res.status, 200, 'Cross-instance race recovery must return 200 when active access token exists');
-      const json = await res.json();
-      assert.strictEqual(json.success, true);
-      assert.strictEqual(json.user.id, 'usr-parallel-win');
-      assert.ok(json.message.includes('Active session confirmed'));
+      const resFromInstanceB = await refreshPost(reqToInstanceB);
+      assert.strictEqual(resFromInstanceB.status, 200, 'Instance B must recover rotation via distributed store');
+      const jsonB = await resFromInstanceB.json();
+      assert.strictEqual(jsonB.success, true);
+      assert.strictEqual(jsonB.user.id, 'usr-distributed-refresh');
 
-      // Crucial: Must NOT clear cookies when the user already has an active, valid session!
-      const setCookies = res.headers.get('set-cookie');
-      assert.ok(!setCookies?.includes('Max-Age=0'), 'Must not clear active cookies during parallel race recovery');
+      // Crucial: Instance B MUST issue updated cookies containing the new rotated refresh token r2!
+      const setCookiesB = resFromInstanceB.headers.get('set-cookie');
+      assert.ok(
+        setCookiesB?.includes('thinkmate_refresh_token=r2-fresh-refresh-token'),
+        'Instance B must set the newly rotated refresh token cookie for the browser'
+      );
+      assert.ok(
+        setCookiesB?.includes('thinkmate_auth_token=a2-fresh-access-token'),
+        'Instance B must set the newly rotated access token cookie for the browser'
+      );
+
+      // 3. Confirm that the browser can continue refreshing after access token expires using R2!
+      const reqWithR2 = new NextRequest('http://localhost:3000/api/auth/refresh', {
+        method: 'POST',
+        headers: {
+          Origin: 'http://localhost:3000',
+          Host: 'localhost:3000',
+          Cookie: 'thinkmate_refresh_token=r2-fresh-refresh-token',
+        },
+      });
+
+      const resSubsequent = await refreshPost(reqWithR2);
+      assert.strictEqual(resSubsequent.status, 200, 'Subsequent refresh with R2 must succeed');
+      const jsonSubsequent = await resSubsequent.json();
+      assert.strictEqual(jsonSubsequent.success, true);
+      const subsequentCookies = resSubsequent.headers.get('set-cookie');
+      assert.ok(
+        subsequentCookies?.includes('thinkmate_refresh_token=r3-subsequent-refresh-token'),
+        'Subsequent refresh must rotate to R3'
+      );
     } finally {
       supabase.auth.refreshSession = origRefresh;
-      supabase.auth.getUser = origGetUser;
+      global.fetch = origFetch;
+      if (origRedisUrl !== undefined) process.env.UPSTASH_REDIS_REST_URL = origRedisUrl;
+      else delete process.env.UPSTASH_REDIS_REST_URL;
+      if (origRedisToken !== undefined) process.env.UPSTASH_REDIS_REST_TOKEN = origRedisToken;
+      else delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    }
+  });
+
+  test('verifyRateLimiterConfig validates production settings and exercises fail-closed vs operator recovery', async () => {
+    const origEnv = process.env.NODE_ENV;
+    const origUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const origToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+    const origFailClosed = process.env.RATE_LIMIT_FAIL_CLOSED;
+
+    try {
+      // 1. Missing credentials in production fails validation and alerts operators
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+      delete process.env.UPSTASH_REDIS_REST_URL;
+      delete process.env.UPSTASH_REDIS_REST_TOKEN;
+
+      const invalidConfig = verifyRateLimiterConfig();
+      assert.strictEqual(invalidConfig.valid, false, 'Missing Upstash in production must be marked invalid');
+      assert.strictEqual(invalidConfig.isProduction, true);
+      assert.strictEqual(invalidConfig.hasUpstash, false);
+      assert.ok(invalidConfig.error?.includes('must be configured in production'));
+
+      // In production without Redis and without emergency override, getActiveRateLimitStore fails closed
+      const failClosedStore = getActiveRateLimitStore();
+      const failClosedCheck = await failClosedStore.checkAndRecord!('test-prod-key', 10, 60000);
+      assert.strictEqual(failClosedCheck.allowed, false, 'Production without Redis must fail closed by default');
+
+      // 2. Emergency Operator Recovery Runbook: setting RATE_LIMIT_FAIL_CLOSED=false engages memory fallback
+      process.env.RATE_LIMIT_FAIL_CLOSED = 'false';
+      const recoveryStore = getActiveRateLimitStore();
+      const recoveryCheck = await recoveryStore.checkAndRecord!('test-prod-key-recovery', 10, 60000);
+      assert.strictEqual(
+        recoveryCheck.allowed,
+        true,
+        'Operator recovery (RATE_LIMIT_FAIL_CLOSED=false) must engage degraded memory limiter'
+      );
+
+      // 3. Valid production configuration
+      process.env.UPSTASH_REDIS_REST_URL = 'https://valid-upstash-redis.upstash.io';
+      process.env.UPSTASH_REDIS_REST_TOKEN = 'valid-token';
+      const validConfig = verifyRateLimiterConfig();
+      assert.strictEqual(validConfig.valid, true);
+      assert.strictEqual(validConfig.hasUpstash, true);
+      assert.strictEqual(validConfig.error, undefined);
+
+      // 4. Invalid URL format
+      process.env.UPSTASH_REDIS_REST_URL = 'invalid-not-a-url';
+      const invalidUrlConfig = verifyRateLimiterConfig();
+      assert.strictEqual(invalidUrlConfig.valid, false);
+      assert.ok(invalidUrlConfig.error?.includes('UPSTASH_REDIS_REST_URL is invalid'));
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = origEnv;
+      if (origUrl !== undefined) process.env.UPSTASH_REDIS_REST_URL = origUrl;
+      else delete process.env.UPSTASH_REDIS_REST_URL;
+      if (origToken !== undefined) process.env.UPSTASH_REDIS_REST_TOKEN = origToken;
+      else delete process.env.UPSTASH_REDIS_REST_TOKEN;
+      if (origFailClosed !== undefined) process.env.RATE_LIMIT_FAIL_CLOSED = origFailClosed;
+      else delete process.env.RATE_LIMIT_FAIL_CLOSED;
     }
   });
 
