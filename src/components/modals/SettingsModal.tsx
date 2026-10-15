@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
-import { ShieldCheck, Database, Trash2, Cpu, Check, Lock, AlertTriangle, KeyRound } from 'lucide-react';
+import { ShieldCheck, Database, Trash2, Cpu, Check, Lock, AlertTriangle } from 'lucide-react';
 import {
   SUPPORTED_GEMINI_MODELS,
   GEMINI_MODEL_METADATA,

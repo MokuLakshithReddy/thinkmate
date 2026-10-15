@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
-import { Lock, Mail, ShieldCheck, AlertCircle, Sparkles } from 'lucide-react';
+import { Lock, Mail, ShieldCheck, AlertCircle } from 'lucide-react';
 
 interface AuthModalProps {
   isOpen: boolean;

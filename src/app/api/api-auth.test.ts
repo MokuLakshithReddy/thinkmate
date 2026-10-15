@@ -1177,10 +1177,10 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     // 2. Returns 401 on failed Supabase authentication
     const origSignIn = supabase.auth.signInWithPassword;
     try {
-      supabase.auth.signInWithPassword = async () => ({
+      supabase.auth.signInWithPassword = (async () => ({
         data: { user: null, session: null },
-        error: { message: 'Invalid login credentials', name: 'AuthApiError', status: 400 } as any,
-      });
+        error: { message: 'Invalid login credentials', name: 'AuthApiError', status: 400 },
+      })) as unknown as typeof supabase.auth.signInWithPassword;
 
       const failedReq = new NextRequest('http://localhost:3000/api/auth/login', {
         method: 'POST',
@@ -1191,13 +1191,13 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       assert.strictEqual(failedRes.status, 401, 'Invalid credentials must return 401');
 
       // 3. Returns 200 and sets HttpOnly cookies on successful login
-      supabase.auth.signInWithPassword = async () => ({
+      supabase.auth.signInWithPassword = (async () => ({
         data: {
-          user: { id: 'usr-verified-123', email: 'verified@thinkmate.ai' } as any,
-          session: { access_token: 'mock-jwt-token-xyz', refresh_token: 'mock-refresh' } as any,
+          user: { id: 'usr-verified-123', email: 'verified@thinkmate.ai' },
+          session: { access_token: 'mock-jwt-token-xyz', refresh_token: 'mock-refresh' },
         },
         error: null,
-      });
+      })) as unknown as typeof supabase.auth.signInWithPassword;
 
       const successReq = new NextRequest('http://localhost:3000/api/auth/login', {
         method: 'POST',
@@ -1268,15 +1268,15 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     // 2. Verified cookie returns authenticated: true with user details
     const origGetUser = supabase.auth.getUser;
     try {
-      supabase.auth.getUser = async (token: string) => {
+      supabase.auth.getUser = (async (token: string) => {
         if (token === 'valid-user-cookie') {
           return {
-            data: { user: { id: 'usr-cookie-456', email: 'cookie@thinkmate.ai' } as any },
+            data: { user: { id: 'usr-cookie-456', email: 'cookie@thinkmate.ai' } },
             error: null,
           };
         }
-        return { data: { user: null }, error: { message: 'Invalid token' } as any };
-      };
+        return { data: { user: null }, error: { message: 'Invalid token' } };
+      }) as unknown as typeof supabase.auth.getUser;
 
       const authReq = new NextRequest('http://localhost:3000/api/auth/session', {
         method: 'GET',
@@ -1297,8 +1297,8 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
 
   test('GeminiThinkingService validates structured metadata and refuses synthetic fallbacks', () => {
     const service = new GeminiThinkingService('dummy-test-key');
-    const events: any[] = [];
-    const onEvent = (e: any) => events.push(e);
+    const events: unknown[] = [];
+    const onEvent = (e: unknown) => events.push(e);
 
     // 1. Valid metadata emits validated structured questions and insights
     const validMeta = JSON.stringify({

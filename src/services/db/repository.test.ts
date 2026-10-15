@@ -668,7 +668,6 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
 
   test('idempotent replay returns complete client response matching original response field-by-field', async () => {
     let storedIdempotencyPayload: Record<string, unknown> | null = null;
-    let storedHash: string | null = null;
 
     const mockClient = {
       rpc: async (fn: string, args: Record<string, unknown>) => {
@@ -703,7 +702,6 @@ describe('Persistence, Security & Mandatory Ownership Verification', () => {
           };
 
           storedIdempotencyPayload = responseData;
-          storedHash = args.p_request_hash as string;
 
           return {
             data: responseData,

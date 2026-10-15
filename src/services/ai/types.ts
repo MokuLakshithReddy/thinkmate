@@ -7,7 +7,8 @@ export const MessageSchema = z.object({
   mode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']).optional(),
 });
 
-import { SUPPORTED_GEMINI_MODELS, SupportedGeminiModel, DEFAULT_GEMINI_MODEL } from '@/config/models';
+import { SUPPORTED_GEMINI_MODELS, DEFAULT_GEMINI_MODEL, type SupportedGeminiModel } from '@/config/models';
+export type { SupportedGeminiModel };
 
 export const ThinkStreamRequestSchema = z.object({
   sessionId: z.string().min(1).max(100),
