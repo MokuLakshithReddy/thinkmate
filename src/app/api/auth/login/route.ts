@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { supabase } from '@/services/db/supabase-client';
-import { SECURE_COOKIE_OPTIONS } from '@/lib/server-auth';
+import { setAuthCookies } from '@/lib/server-auth';
 import { readBoundedJson } from '@/lib/request-utils';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limiter';
 
@@ -61,7 +61,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const token = data.session.access_token;
     const user = {
       id: data.user.id,
       email: data.user.email,
@@ -73,9 +72,8 @@ export async function POST(req: NextRequest) {
       message: 'Signed in successfully',
     });
 
-    // Set secure HttpOnly cookies for ambient Same-Origin authentication
-    response.cookies.set('thinkmate_auth_token', token, SECURE_COOKIE_OPTIONS);
-    response.cookies.set('sb-access-token', token, SECURE_COOKIE_OPTIONS);
+    // Set secure HttpOnly cookies for ambient Same-Origin authentication (access + refresh tokens)
+    setAuthCookies(response, data.session);
 
     return response;
   } catch (err) {

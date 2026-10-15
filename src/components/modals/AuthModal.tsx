@@ -50,6 +50,16 @@ export function AuthModal({ isOpen, onClose, onAuthSuccess }: AuthModalProps) {
         return;
       }
 
+      if (tab === 'signup' && (data.requiresEmailConfirmation || !data.session)) {
+        // Email confirmation is required by Supabase Auth: no active session exists yet.
+        // Do not mark the user authenticated; keep the confirmation notice prominently displayed.
+        setSuccessNotice(
+          data.message || 'Account created! Please check your inbox to confirm your email before signing in.'
+        );
+        setPassword('');
+        return;
+      }
+
       if (data.user) {
         onAuthSuccess(data.user);
         setEmail('');

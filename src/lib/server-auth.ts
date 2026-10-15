@@ -1,4 +1,4 @@
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/services/db/supabase-client';
 
 export interface AuthenticatedUser {
@@ -23,6 +23,49 @@ export const SECURE_COOKIE_OPTIONS = {
   sameSite: 'lax' as const,
   path: '/',
 };
+
+/**
+ * Long-lived secure cookie options for refresh tokens (30 days).
+ */
+export const REFRESH_COOKIE_OPTIONS = {
+  ...SECURE_COOKIE_OPTIONS,
+  maxAge: 30 * 24 * 60 * 60, // 30 days
+};
+
+/**
+ * Sets both access and refresh cookies onto the response for ambient Same-Origin authentication.
+ */
+export function setAuthCookies(
+  res: NextResponse,
+  session: { access_token: string; refresh_token?: string }
+) {
+  res.cookies.set('thinkmate_auth_token', session.access_token, SECURE_COOKIE_OPTIONS);
+  res.cookies.set('sb-access-token', session.access_token, SECURE_COOKIE_OPTIONS);
+
+  if (session.refresh_token) {
+    res.cookies.set('thinkmate_refresh_token', session.refresh_token, REFRESH_COOKIE_OPTIONS);
+    res.cookies.set('sb-refresh-token', session.refresh_token, REFRESH_COOKIE_OPTIONS);
+  }
+}
+
+/**
+ * Expires both access and refresh cookies across all supported cookie names.
+ */
+export function clearAuthCookies(res: NextResponse) {
+  const expired = { ...SECURE_COOKIE_OPTIONS, maxAge: 0 };
+  res.cookies.set('thinkmate_auth_token', '', expired);
+  res.cookies.set('sb-access-token', '', expired);
+  res.cookies.set('thinkmate_refresh_token', '', expired);
+  res.cookies.set('sb-refresh-token', '', expired);
+}
+
+/**
+ * Refreshes an expired session using the Supabase Auth refresh token.
+ * Rotates the refresh token and returns the new session credentials.
+ */
+export async function refreshUserSession(refreshToken: string) {
+  return await supabase.auth.refreshSession({ refresh_token: refreshToken });
+}
 
 import { validateCsrf } from '@/lib/csrf';
 

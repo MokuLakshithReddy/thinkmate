@@ -13,6 +13,8 @@ import { GET as healthGet } from './health/route';
 import { POST as loginPost } from './auth/login/route';
 import { POST as logoutPost } from './auth/logout/route';
 import { GET as sessionGet } from './auth/session/route';
+import { POST as signupPost } from './auth/signup/route';
+import { POST as refreshPost } from './auth/refresh/route';
 import { GeminiThinkingService } from '@/services/ai/gemini-service';
 import { checkRateLimitAsync, MemoryRateLimitStore, UpstashRedisRateLimitStore, getActiveRateLimitStore } from '@/lib/rate-limiter';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
@@ -1212,10 +1214,11 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       assert.strictEqual(json.user.id, 'usr-verified-123');
       assert.strictEqual(json.user.email, 'verified@thinkmate.ai');
 
-      // Check cookie headers
+      // Check cookie headers: both access and refresh cookies must be set
       const cookieHeader = successRes.headers.get('set-cookie');
       assert.ok(cookieHeader, 'Response must set auth cookies');
       assert.ok(cookieHeader.includes('thinkmate_auth_token='), 'Must set thinkmate_auth_token cookie');
+      assert.ok(cookieHeader.includes('thinkmate_refresh_token='), 'Must set thinkmate_refresh_token cookie');
       assert.ok(cookieHeader.includes('HttpOnly'), 'Auth cookie must be HttpOnly');
     } finally {
       supabase.auth.signInWithPassword = origSignIn;
@@ -1241,7 +1244,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       headers: {
         Origin: 'http://localhost:3000',
         Host: 'localhost:3000',
-        Cookie: 'thinkmate_auth_token=existing-token',
+        Cookie: 'thinkmate_auth_token=existing-token; thinkmate_refresh_token=existing-refresh',
       },
     });
     const logoutRes = await logoutPost(logoutReq);
@@ -1251,10 +1254,149 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
 
     const cookieHeader = logoutRes.headers.get('set-cookie');
     assert.ok(cookieHeader, 'Logout must send set-cookie header');
+    assert.ok(cookieHeader.includes('thinkmate_auth_token='), 'Must expire thinkmate_auth_token');
+    assert.ok(cookieHeader.includes('thinkmate_refresh_token='), 'Must expire thinkmate_refresh_token');
     assert.ok(cookieHeader.includes('Max-Age=0') || cookieHeader.includes('Expires='), 'Must expire auth cookies');
   });
 
-  test('GET /api/auth/session reports verified identity from HttpOnly cookie', async () => {
+  test('POST /api/auth/signup distinguishes unconfirmed email signups from established sessions', async () => {
+    const origSignUp = supabase.auth.signUp;
+    try {
+      // 1. Signup requiring email confirmation (data.session === null)
+      supabase.auth.signUp = (async () => ({
+        data: {
+          user: { id: 'usr-unconfirmed-1', email: 'unconfirmed@thinkmate.ai' },
+          session: null,
+        },
+        error: null,
+      })) as unknown as typeof supabase.auth.signUp;
+
+      const unconfirmedReq = new NextRequest('http://localhost:3000/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'unconfirmed@thinkmate.ai', password: 'securepassword123' }),
+      });
+      const unconfirmedRes = await signupPost(unconfirmedReq);
+      assert.strictEqual(unconfirmedRes.status, 200);
+      const unconfirmedJson = await unconfirmedRes.json();
+
+      assert.strictEqual(unconfirmedJson.success, true);
+      assert.strictEqual(unconfirmedJson.authenticated, false, 'Must not mark unconfirmed signup as authenticated');
+      assert.strictEqual(unconfirmedJson.requiresEmailConfirmation, true, 'Must report requiresEmailConfirmation');
+      assert.strictEqual(unconfirmedJson.session, null);
+      assert.ok(unconfirmedJson.message.includes('check your email'));
+      assert.strictEqual(unconfirmedRes.headers.get('set-cookie'), null, 'Must not set auth cookies when session is null');
+
+      // 2. Signup with auto-confirmed / immediate session
+      supabase.auth.signUp = (async () => ({
+        data: {
+          user: { id: 'usr-confirmed-2', email: 'confirmed@thinkmate.ai' },
+          session: { access_token: 'mock-access-token-new', refresh_token: 'mock-refresh-token-new', expires_at: 1800000000 },
+        },
+        error: null,
+      })) as unknown as typeof supabase.auth.signUp;
+
+      const confirmedReq = new NextRequest('http://localhost:3000/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'confirmed@thinkmate.ai', password: 'securepassword123' }),
+      });
+      const confirmedRes = await signupPost(confirmedReq);
+      assert.strictEqual(confirmedRes.status, 200);
+      const confirmedJson = await confirmedRes.json();
+
+      assert.strictEqual(confirmedJson.success, true);
+      assert.strictEqual(confirmedJson.authenticated, true);
+      assert.strictEqual(confirmedJson.requiresEmailConfirmation, false);
+      const setCookieHeader = confirmedRes.headers.get('set-cookie');
+      assert.ok(setCookieHeader, 'Must set auth cookies on confirmed signup');
+      assert.ok(setCookieHeader.includes('thinkmate_auth_token='), 'Must set access cookie');
+      assert.ok(setCookieHeader.includes('thinkmate_refresh_token='), 'Must set refresh cookie');
+    } finally {
+      supabase.auth.signUp = origSignUp;
+    }
+  });
+
+  test('POST /api/auth/refresh enforces CSRF, rotates refresh tokens, and sets updated cookies', async () => {
+    // 1. Rejects cross-origin request with CSRF error
+    const crossOriginReq = new NextRequest('http://localhost:3000/api/auth/refresh', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://evil-attacker.com',
+        Host: 'localhost:3000',
+        Cookie: 'thinkmate_refresh_token=valid-token',
+      },
+    });
+    const crossOriginRes = await refreshPost(crossOriginReq);
+    assert.strictEqual(crossOriginRes.status, 403, 'Cross-origin refresh must return 403');
+
+    // 2. Missing refresh token returns 401
+    const missingReq = new NextRequest('http://localhost:3000/api/auth/refresh', {
+      method: 'POST',
+      headers: {
+        Origin: 'http://localhost:3000',
+        Host: 'localhost:3000',
+      },
+    });
+    const missingRes = await refreshPost(missingReq);
+    assert.strictEqual(missingRes.status, 401);
+
+    // 3. Invalid/revoked refresh token returns 401 and clears cookies
+    const origRefresh = supabase.auth.refreshSession;
+    try {
+      supabase.auth.refreshSession = (async () => ({
+        data: { user: null, session: null },
+        error: { message: 'Refresh token revoked', name: 'AuthApiError', status: 401 },
+      })) as unknown as typeof supabase.auth.refreshSession;
+
+      const revokedReq = new NextRequest('http://localhost:3000/api/auth/refresh', {
+        method: 'POST',
+        headers: {
+          Origin: 'http://localhost:3000',
+          Host: 'localhost:3000',
+          Cookie: 'thinkmate_refresh_token=revoked-token',
+        },
+      });
+      const revokedRes = await refreshPost(revokedReq);
+      assert.strictEqual(revokedRes.status, 401);
+      const revokedCookies = revokedRes.headers.get('set-cookie');
+      assert.ok(revokedCookies?.includes('Max-Age=0'), 'Must expire cookies on revoked token');
+
+      // 4. Successful refresh rotates token and sets new HttpOnly cookies
+      supabase.auth.refreshSession = (async () => ({
+        data: {
+          user: { id: 'usr-rotated-789', email: 'rotated@thinkmate.ai' },
+          session: {
+            access_token: 'new-access-token-rotated',
+            refresh_token: 'new-refresh-token-rotated',
+          },
+        },
+        error: null,
+      })) as unknown as typeof supabase.auth.refreshSession;
+
+      const validReq = new NextRequest('http://localhost:3000/api/auth/refresh', {
+        method: 'POST',
+        headers: {
+          Origin: 'http://localhost:3000',
+          Host: 'localhost:3000',
+          Cookie: 'thinkmate_refresh_token=valid-old-refresh',
+        },
+      });
+      const validRes = await refreshPost(validReq);
+      assert.strictEqual(validRes.status, 200);
+      const validJson = await validRes.json();
+      assert.strictEqual(validJson.success, true);
+      assert.strictEqual(validJson.user.id, 'usr-rotated-789');
+
+      const rotatedCookies = validRes.headers.get('set-cookie');
+      assert.ok(rotatedCookies?.includes('thinkmate_auth_token='), 'Must set new access token cookie');
+      assert.ok(rotatedCookies?.includes('thinkmate_refresh_token='), 'Must set new rotated refresh token cookie');
+    } finally {
+      supabase.auth.refreshSession = origRefresh;
+    }
+  });
+
+  test('GET /api/auth/session reports verified identity and performs silent token refresh', async () => {
     // 1. Unauthenticated request returns authenticated: false
     const unauthReq = new NextRequest('http://localhost:3000/api/auth/session', {
       method: 'GET',
@@ -1265,8 +1407,9 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     assert.strictEqual(unauthJson.authenticated, false);
     assert.strictEqual(unauthJson.user, null);
 
-    // 2. Verified cookie returns authenticated: true with user details
+    // 2. Verified active access token returns authenticated: true directly
     const origGetUser = supabase.auth.getUser;
+    const origRefresh = supabase.auth.refreshSession;
     try {
       supabase.auth.getUser = (async (token: string) => {
         if (token === 'valid-user-cookie') {
@@ -1275,7 +1418,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
             error: null,
           };
         }
-        return { data: { user: null }, error: { message: 'Invalid token' } };
+        return { data: { user: null }, error: { message: 'JWT expired' } };
       }) as unknown as typeof supabase.auth.getUser;
 
       const authReq = new NextRequest('http://localhost:3000/api/auth/session', {
@@ -1290,8 +1433,38 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       assert.strictEqual(authJson.authenticated, true);
       assert.strictEqual(authJson.user.id, 'usr-cookie-456');
       assert.strictEqual(authJson.user.email, 'cookie@thinkmate.ai');
+
+      // 3. Expired access token with valid refresh token triggers silent rotation
+      supabase.auth.refreshSession = (async () => ({
+        data: {
+          user: { id: 'usr-refreshed-session', email: 'refreshed@thinkmate.ai' },
+          session: {
+            access_token: 'fresh-jwt-token',
+            refresh_token: 'fresh-refresh-token',
+          },
+        },
+        error: null,
+      })) as unknown as typeof supabase.auth.refreshSession;
+
+      const expiredReq = new NextRequest('http://localhost:3000/api/auth/session', {
+        method: 'GET',
+        headers: {
+          Cookie: 'thinkmate_auth_token=expired-jwt; thinkmate_refresh_token=valid-refresh',
+        },
+      });
+      const expiredRes = await sessionGet(expiredReq);
+      assert.strictEqual(expiredRes.status, 200);
+      const expiredJson = await expiredRes.json();
+      assert.strictEqual(expiredJson.authenticated, true);
+      assert.strictEqual(expiredJson.user.id, 'usr-refreshed-session');
+      assert.strictEqual(expiredJson.user.email, 'refreshed@thinkmate.ai');
+
+      const silentCookies = expiredRes.headers.get('set-cookie');
+      assert.ok(silentCookies?.includes('thinkmate_auth_token='), 'Must set fresh access token');
+      assert.ok(silentCookies?.includes('thinkmate_refresh_token='), 'Must set fresh refresh token');
     } finally {
       supabase.auth.getUser = origGetUser;
+      supabase.auth.refreshSession = origRefresh;
     }
   });
 

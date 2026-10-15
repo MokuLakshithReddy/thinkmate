@@ -78,7 +78,14 @@ export function validateCsrf(req: Request | NextRequest): CsrfValidationResult {
   const hasAuthCookie =
     cookieHeader.includes('sb-access-token') ||
     cookieHeader.includes('thinkmate_auth_token') ||
-    (req instanceof NextRequest && (req.cookies.has('sb-access-token') || req.cookies.has('thinkmate_auth_token')));
+    cookieHeader.includes('sb-refresh-token') ||
+    cookieHeader.includes('thinkmate_refresh_token') ||
+    (req instanceof NextRequest && (
+      req.cookies.has('sb-access-token') ||
+      req.cookies.has('thinkmate_auth_token') ||
+      req.cookies.has('sb-refresh-token') ||
+      req.cookies.has('thinkmate_refresh_token')
+    ));
 
   // If no auth cookie is attached, CSRF is not applicable to unauthenticated or token-based requests
   if (!hasAuthCookie) {

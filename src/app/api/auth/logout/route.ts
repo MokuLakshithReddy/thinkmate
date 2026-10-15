@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/services/db/supabase-client';
-import { SECURE_COOKIE_OPTIONS, isSameOriginRequest } from '@/lib/server-auth';
+import { clearAuthCookies, isSameOriginRequest } from '@/lib/server-auth';
 
 export async function POST(req: NextRequest) {
   // CSRF validation on state-changing logout
@@ -32,15 +32,8 @@ export async function POST(req: NextRequest) {
     message: 'Signed out successfully',
   });
 
-  // Expire auth cookies immediately
-  response.cookies.set('thinkmate_auth_token', '', {
-    ...SECURE_COOKIE_OPTIONS,
-    maxAge: 0,
-  });
-  response.cookies.set('sb-access-token', '', {
-    ...SECURE_COOKIE_OPTIONS,
-    maxAge: 0,
-  });
+  // Expire all auth and refresh cookies immediately
+  clearAuthCookies(response);
 
   return response;
 }

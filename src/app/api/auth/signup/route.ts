@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { supabase } from '@/services/db/supabase-client';
-import { SECURE_COOKIE_OPTIONS } from '@/lib/server-auth';
+import { setAuthCookies } from '@/lib/server-auth';
 import { readBoundedJson } from '@/lib/request-utils';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limiter';
 
@@ -64,18 +64,25 @@ export async function POST(req: NextRequest) {
     const user = data?.user
       ? { id: data.user.id, email: data.user.email }
       : null;
+    const requiresEmailConfirmation = !session;
 
     const response = NextResponse.json({
       success: true,
+      authenticated: !requiresEmailConfirmation,
+      requiresEmailConfirmation,
       user,
+      session: session
+        ? {
+            expires_at: session.expires_at,
+          }
+        : null,
       message: session
         ? 'Account created and signed in successfully'
-        : 'Account created. Please check your email to confirm your account.',
+        : 'Account created. Please check your email to confirm your account before signing in.',
     });
 
-    if (session?.access_token) {
-      response.cookies.set('thinkmate_auth_token', session.access_token, SECURE_COOKIE_OPTIONS);
-      response.cookies.set('sb-access-token', session.access_token, SECURE_COOKIE_OPTIONS);
+    if (session) {
+      setAuthCookies(response, session);
     }
 
     return response;
