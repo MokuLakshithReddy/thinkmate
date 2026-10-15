@@ -4,8 +4,9 @@ import {
   refreshUserSession,
   setAuthCookies,
   clearAuthCookies,
+  getAuthenticatedUser,
 } from '@/lib/server-auth';
-import { checkRateLimit, getClientIp } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, getClientIp } from '@/lib/rate-limiter';
 import { readBoundedJson } from '@/lib/request-utils';
 
 export async function POST(req: NextRequest) {
@@ -17,9 +18,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Rate limiting to prevent token brute-forcing
+  // Rate limiting to prevent token brute-forcing (shared across instances via Upstash Redis)
   const clientIp = getClientIp(req);
-  const rateLimitResult = checkRateLimit(`auth:refresh:${clientIp}`, 20, 60000);
+  const rateLimitResult = await checkRateLimitAsync(`auth:refresh:${clientIp}`, 20, 60000);
   if (!rateLimitResult.allowed) {
     return NextResponse.json(
       { error: 'Too many token refresh requests. Please wait.' },
@@ -57,11 +58,23 @@ export async function POST(req: NextRequest) {
     const { data, error } = await refreshUserSession(refreshToken);
 
     if (error || !data?.session || !data?.user) {
+      // Cross-Instance Race Recovery:
+      // If refresh failed because the token was already rotated by another instance,
+      // verify if the caller already presents a valid access token before clearing cookies!
+      const currentUser = await getAuthenticatedUser(req);
+      if (currentUser) {
+        return NextResponse.json({
+          success: true,
+          user: currentUser,
+          message: 'Active session confirmed via concurrent rotation',
+        });
+      }
+
       const response = NextResponse.json(
         { error: error?.message || 'Session expired or refresh token revoked' },
         { status: 401 }
       );
-      // Revoke invalid/expired ambient cookies
+      // Revoke invalid/expired ambient cookies ONLY when access token is also invalid
       clearAuthCookies(response);
       return response;
     }

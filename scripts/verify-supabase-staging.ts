@@ -103,7 +103,20 @@ async function runStagingVerification() {
 
   console.log(`Target verified staging database: ${projectHost}`);
   console.log(`Disposable test session: ${testSessionId}`);
-  console.log(`Disposable test user: ${testUserId}\n`);
+  console.log(`Disposable test user: ${testUserId}`);
+  console.log(`Execution Timestamp: ${new Date().toISOString()}`);
+  console.log(`Node Runtime: ${process.version}\n`);
+
+  // Log schema migration status
+  const { data: migrationRows, error: migErr } = await serviceClient
+    .from('supabase_migrations')
+    .select('version')
+    .order('version', { ascending: true });
+  if (!migErr && migrationRows) {
+    console.log(`Applied Database Migrations (${migrationRows.length}):`);
+    migrationRows.forEach((m: { version: string }) => console.log(`  - ${m.version}`));
+    console.log('');
+  }
 
   try {
     // -------------------------------------------------------------------------
@@ -459,13 +472,37 @@ async function runStagingVerification() {
         status: 'active',
       })
       .select();
+
+    assert.strictEqual(forgedSess?.length || 0, 0, 'No rows should be inserted by attacker');
+    assert.ok(forgedSessErr, 'Expected specific RLS policy violation error on unauthorized session insert');
     assert.ok(
-      forgedSessErr || !forgedSess || forgedSess.length === 0,
-      'PostgreSQL RLS violation: Attacker was able to insert thinking_sessions row with victim user_id'
+      forgedSessErr.code === '42501' ||
+        forgedSessErr.message.includes('violates row-level security policy') ||
+        forgedSessErr.message.includes('permission denied'),
+      `Expected authorization violation (code 42501 or RLS policy), got: ${forgedSessErr.message} (${forgedSessErr.code})`
     );
+
+    // Verify victim session row remains completely intact and unchanged
+    const { data: verifiedVictimSess, error: verifySessErr } = await serviceClient
+      .from('thinking_sessions')
+      .select('*')
+      .eq('id', testSessionId)
+      .single();
+    if (verifySessErr) throw new Error(`Victim verification failed: ${verifySessErr.message}`);
+    assert.strictEqual(verifiedVictimSess.user_id, testUserId, 'Victim session user_id must remain unchanged');
+    assert.strictEqual(verifiedVictimSess.current_stage, sessionAfter.current_stage, 'Victim current_stage must remain unchanged');
+    assert.strictEqual(verifiedVictimSess.current_mode, sessionAfter.current_mode, 'Victim current_mode must remain unchanged');
     console.log('  ✔ Passed: thinking_sessions RLS strictly blocks unauthorized SELECT, UPDATE, DELETE, and INSERT.');
 
     // 6b. Table RLS: session_messages (SELECT, UPDATE, DELETE, INSERT)
+    // Capture baseline victim message count before attack attempts
+    const { count: baselineMsgCount, error: baselineMsgErr } = await serviceClient
+      .from('session_messages')
+      .select('*', { count: 'exact', head: true })
+      .eq('session_id', testSessionId);
+    if (baselineMsgErr) throw new Error(`Failed to query baseline message count: ${baselineMsgErr.message}`);
+    assert.ok((baselineMsgCount || 0) > 0, 'Baseline victim message count must be greater than 0');
+
     // 6b.1: Attacker attempts to read Victim's messages
     const { data: foreignMsgs, error: foreignMsgsErr } = await attackerScopedClient
       .from('session_messages')
@@ -489,9 +526,14 @@ async function runStagingVerification() {
         mode: 'understand',
       })
       .select();
+
+    assert.strictEqual(injectedMsg?.length || 0, 0, 'No message rows should be inserted by attacker');
+    assert.ok(injectedMsgErr, 'Expected specific RLS policy violation on message insert into victim session');
     assert.ok(
-      injectedMsgErr || !injectedMsg || injectedMsg.length === 0,
-      'PostgreSQL RLS violation: Attacker was able to insert message into victim session'
+      injectedMsgErr.code === '42501' ||
+        injectedMsgErr.message.includes('violates row-level security policy') ||
+        injectedMsgErr.message.includes('permission denied'),
+      `Expected authorization violation on message insert, got: ${injectedMsgErr.message} (${injectedMsgErr.code})`
     );
 
     // 6b.3: Attacker attempts to update messages in Victim's session
@@ -519,6 +561,14 @@ async function runStagingVerification() {
       0,
       'PostgreSQL RLS violation: Attacker was able to delete victim session_messages'
     );
+
+    // Verify victim session messages count remains strictly unaltered
+    const { count: victimMsgCount, error: countMsgErr } = await serviceClient
+      .from('session_messages')
+      .select('*', { count: 'exact', head: true })
+      .eq('session_id', testSessionId);
+    if (countMsgErr) throw new Error(`Failed to count victim messages: ${countMsgErr.message}`);
+    assert.strictEqual(victimMsgCount, baselineMsgCount, 'Victim session messages count must be strictly unmodified');
     console.log('  ✔ Passed: session_messages RLS strictly blocks unauthorized SELECT, INSERT, UPDATE, and DELETE.');
 
     // 6c. Table RLS: session_insights (SELECT, INSERT, UPDATE, DELETE)
@@ -558,9 +608,14 @@ async function runStagingVerification() {
         content: 'Fabricated decision record',
       })
       .select();
+
+    assert.strictEqual(injectedInsight?.length || 0, 0, 'No insight rows should be inserted by attacker');
+    assert.ok(injectedInsightErr, 'Expected specific RLS policy violation on insight insert into victim session');
     assert.ok(
-      injectedInsightErr || !injectedInsight || injectedInsight.length === 0,
-      'PostgreSQL RLS violation: Attacker was able to insert insight into victim session'
+      injectedInsightErr.code === '42501' ||
+        injectedInsightErr.message.includes('violates row-level security policy') ||
+        injectedInsightErr.message.includes('permission denied'),
+      `Expected authorization violation on insight insert, got: ${injectedInsightErr.message} (${injectedInsightErr.code})`
     );
 
     // 6c.3: Attacker attempts to update Victim's insight
@@ -588,6 +643,16 @@ async function runStagingVerification() {
       0,
       'PostgreSQL RLS violation: Attacker was able to delete victim session_insights'
     );
+
+    // Verify victim insight remains intact and unaltered
+    const { data: verifiedVictimInsight, error: verifyInsightErr } = await serviceClient
+      .from('session_insights')
+      .select('*')
+      .eq('id', testInsightId)
+      .single();
+    if (verifyInsightErr) throw new Error(`Failed to verify victim insight: ${verifyInsightErr.message}`);
+    assert.strictEqual(verifiedVictimInsight.status, 'accepted', 'Victim insight status must remain accepted');
+    assert.strictEqual(verifiedVictimInsight.content, 'Core architecture decision record', 'Victim insight content must remain unchanged');
     console.log('  ✔ Passed: session_insights RLS strictly blocks unauthorized SELECT, INSERT, UPDATE, and DELETE.');
 
     // 6d. Table RLS: workflow_transitions (SELECT, INSERT)
@@ -613,9 +678,14 @@ async function runStagingVerification() {
         reason: 'Malicious transition record',
       })
       .select();
+
+    assert.strictEqual(injectedTrans?.length || 0, 0, 'No transition rows should be inserted by attacker');
+    assert.ok(injectedTransErr, 'Expected specific RLS policy violation on transition insert for victim session');
     assert.ok(
-      injectedTransErr || !injectedTrans || injectedTrans.length === 0,
-      'PostgreSQL RLS violation: Attacker was able to insert workflow_transitions for victim session'
+      injectedTransErr.code === '42501' ||
+        injectedTransErr.message.includes('violates row-level security policy') ||
+        injectedTransErr.message.includes('permission denied'),
+      `Expected authorization violation on transition insert, got: ${injectedTransErr.message} (${injectedTransErr.code})`
     );
     console.log('  ✔ Passed: workflow_transitions RLS strictly blocks unauthorized SELECT and INSERT.');
 
@@ -649,9 +719,14 @@ async function runStagingVerification() {
         response_payload: { malicious: true },
       })
       .select();
+
+    assert.strictEqual(injectedKey?.length || 0, 0, 'No idempotency key rows should be inserted by attacker');
+    assert.ok(injectedKeyErr, 'Expected permission denied or RLS violation on idempotency key insert');
     assert.ok(
-      injectedKeyErr || !injectedKey || injectedKey.length === 0,
-      'PostgreSQL RLS violation: Attacker was able to insert directly into workflow_idempotency_keys'
+      injectedKeyErr.code === '42501' ||
+        injectedKeyErr.message.includes('permission denied') ||
+        injectedKeyErr.message.includes('violates row-level security policy'),
+      `Expected permission denied (42501) on idempotency key insert, got: ${injectedKeyErr.message} (${injectedKeyErr.code})`
     );
     console.log('  ✔ Passed: workflow_idempotency_keys strictly protected from direct unauthorized access.');
 

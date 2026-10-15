@@ -21,7 +21,7 @@ import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { proxy } from '@/proxy';
-import { SECURE_COOKIE_OPTIONS, RotationGraceCache, revokeUserSession } from '@/lib/server-auth';
+import { SECURE_COOKIE_OPTIONS, RotationGraceCache, revokeUserSession, hashTokenKey } from '@/lib/server-auth';
 
 describe('API Security Boundaries & Authentication Enforcement', () => {
   test('POST /api/cothink rejects unauthenticated callers with 401', async () => {
@@ -1639,7 +1639,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     }
   });
 
-  test('RotationGraceCache bounded size limits and active expiration eviction', () => {
+  test('RotationGraceCache bounded size limits, hash indexing, and active expiration eviction', () => {
     const cache = new RotationGraceCache(3);
 
     const now = Date.now();
@@ -1659,6 +1659,9 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       user: { id: 'u3' },
       expiresAt: now + 50000, // valid
     });
+
+    // Verify raw token is never stored as plaintext key in memory
+    assert.strictEqual(hashTokenKey('token-1').length, 64, 'Token key must be a 64-character SHA-256 hex string');
 
     // token-1 was expired, so accessing it should evict it and return undefined
     assert.strictEqual(cache.get('token-1'), undefined, 'Expired entry must be evicted');
@@ -1686,6 +1689,80 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     assert.strictEqual(result.success, true);
     assert.strictEqual(result.localCleared, true);
     assert.strictEqual(typeof result.upstreamRevoked, 'boolean');
+
+    // 2. Mock global.fetch to verify GoTrue /auth/v1/logout endpoint invocation
+    const originalFetch = global.fetch;
+    const origUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const origAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'http://localhost:54321';
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'test-anon-key';
+
+    try {
+      let logoutUrlCalled = '';
+      let authHeaderSent = '';
+      global.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+        logoutUrlCalled = String(url);
+        authHeaderSent = (init?.headers as Record<string, string>)?.['Authorization'] || '';
+        return {
+          ok: true,
+          status: 204,
+          text: async () => '',
+        } as unknown as Response;
+      }) as typeof global.fetch;
+
+      const res = await revokeUserSession('active-jwt-token-123');
+      assert.strictEqual(res.success, true);
+      assert.strictEqual(res.upstreamRevoked, true, 'Must report upstreamRevoked: true on 204 response from GoTrue');
+      assert.ok(logoutUrlCalled.includes('/auth/v1/logout'), 'Must target GoTrue /auth/v1/logout endpoint');
+      assert.strictEqual(authHeaderSent, 'Bearer active-jwt-token-123', 'Must pass bearer token in Authorization header');
+    } finally {
+      global.fetch = originalFetch;
+      process.env.NEXT_PUBLIC_SUPABASE_URL = origUrl;
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = origAnon;
+    }
+  });
+
+  test('POST /api/auth/refresh recovers gracefully when parallel instance already completed rotation', async () => {
+    const origRefresh = supabase.auth.refreshSession;
+    const origGetUser = supabase.auth.getUser;
+    try {
+      // Simulate race condition: another server instance already consumed the refresh token (error from GoTrue)
+      supabase.auth.refreshSession = (async () => ({
+        data: { session: null, user: null },
+        error: { message: 'Already Used: Token has been revoked or already rotated' },
+      })) as unknown as typeof supabase.auth.refreshSession;
+
+      // But the client already possesses a valid access token from the winning instance
+      supabase.auth.getUser = (async (token: string) => {
+        if (token === 'valid-access-from-parallel-win') {
+          return { data: { user: { id: 'usr-parallel-win', email: 'winner@thinkmate.ai' } }, error: null };
+        }
+        return { data: { user: null }, error: { message: 'Invalid JWT' } };
+      }) as unknown as typeof supabase.auth.getUser;
+
+      const parallelReq = new NextRequest('http://localhost:3000/api/auth/refresh', {
+        method: 'POST',
+        headers: {
+          Origin: 'http://localhost:3000',
+          Host: 'localhost:3000',
+          Cookie: 'thinkmate_refresh_token=already-rotated-token; thinkmate_auth_token=valid-access-from-parallel-win',
+        },
+      });
+
+      const res = await refreshPost(parallelReq);
+      assert.strictEqual(res.status, 200, 'Cross-instance race recovery must return 200 when active access token exists');
+      const json = await res.json();
+      assert.strictEqual(json.success, true);
+      assert.strictEqual(json.user.id, 'usr-parallel-win');
+      assert.ok(json.message.includes('Active session confirmed'));
+
+      // Crucial: Must NOT clear cookies when the user already has an active, valid session!
+      const setCookies = res.headers.get('set-cookie');
+      assert.ok(!setCookies?.includes('Max-Age=0'), 'Must not clear active cookies during parallel race recovery');
+    } finally {
+      supabase.auth.refreshSession = origRefresh;
+      supabase.auth.getUser = origGetUser;
+    }
   });
 
   test('Multi-instance workflow concurrency safety without shared in-memory state', async () => {

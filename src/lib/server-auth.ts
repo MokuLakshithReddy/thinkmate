@@ -60,6 +60,8 @@ export function clearAuthCookies(res: NextResponse) {
   res.cookies.set('sb-refresh-token', '', expired);
 }
 
+import crypto from 'node:crypto';
+
 export interface RevocationResult {
   success: boolean;
   upstreamRevoked: boolean;
@@ -68,9 +70,18 @@ export interface RevocationResult {
 }
 
 /**
+ * Derives a collision-resistant SHA-256 hash of a token string for safe memory indexing.
+ * Prevents raw authentication tokens from existing as plaintext keys in process heap memory.
+ */
+export function hashTokenKey(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+/**
  * Server-side session revocation.
  * Revokes the session in Supabase Auth via admin.signOut if privileged credentials exist,
- * or through an authenticated user-scoped client session termination.
+ * through user-scoped setSession + signOut if refresh token exists, or via direct authenticated
+ * HTTP logout against Supabase GoTrue /auth/v1/logout endpoint if only an access token is present.
  * Returns a typed RevocationResult distinguishing local cookie clearance from confirmed upstream revocation.
  */
 export async function revokeUserSession(
@@ -103,13 +114,13 @@ export async function revokeUserSession(
     }
   }
 
-  // 2. User-scoped client revocation if admin revocation did not succeed (e.g. invalid access token but valid refresh token)
+  // 2. User-scoped client revocation if admin revocation did not succeed
   if (!upstreamRevoked && supabaseUrl && supabaseAnonKey && (token || refreshToken)) {
     try {
-      const userScopedClient = createClient(supabaseUrl, supabaseAnonKey, {
-        auth: { persistSession: false },
-      });
       if (refreshToken) {
+        const userScopedClient = createClient(supabaseUrl, supabaseAnonKey, {
+          auth: { persistSession: false },
+        });
         const { error: sessionError } = await userScopedClient.auth.setSession({
           access_token: token || '',
           refresh_token: refreshToken,
@@ -126,12 +137,22 @@ export async function revokeUserSession(
           lastError = sessionError.message;
         }
       } else if (token) {
-        const { error: signOutError } = await userScopedClient.auth.signOut();
-        if (!signOutError) {
+        // Direct authenticated HTTP logout against Supabase GoTrue endpoint
+        const logoutUrl = `${supabaseUrl}/auth/v1/logout`;
+        const res = await fetch(logoutUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: supabaseAnonKey,
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        if (res.ok || res.status === 200 || res.status === 204) {
           upstreamRevoked = true;
           lastError = undefined;
         } else {
-          lastError = signOutError.message;
+          const body = await res.text().catch(() => '');
+          lastError = `GoTrue logout HTTP status ${res.status}: ${body}`;
         }
       }
     } catch (err: unknown) {
@@ -161,7 +182,8 @@ interface CachedRotation {
 }
 
 /**
- * Bounded, self-cleaning cache for token rotation grace periods.
+ * Bounded, self-cleaning, SHA-256 hash-keyed cache for token rotation grace periods.
+ * Uses hashed keys so raw authentication tokens are never retained as plaintext map keys.
  * Evicts expired entries on every access/mutation and limits total stored entries
  * to prevent memory leaks in long-running Node.js processes.
  */
@@ -184,10 +206,11 @@ export class RotationGraceCache {
 
   get(token: string): CachedRotation | undefined {
     this.evictExpired();
-    const entry = this.cache.get(token);
+    const key = hashTokenKey(token);
+    const entry = this.cache.get(key);
     if (!entry) return undefined;
     if (Date.now() >= entry.expiresAt) {
-      this.cache.delete(token);
+      this.cache.delete(key);
       return undefined;
     }
     return entry;
@@ -195,6 +218,7 @@ export class RotationGraceCache {
 
   set(token: string, entry: CachedRotation): void {
     this.evictExpired();
+    const key = hashTokenKey(token);
     while (this.cache.size >= this.maxSize) {
       const oldestKey = this.cache.keys().next().value;
       if (oldestKey !== undefined) {
@@ -203,11 +227,11 @@ export class RotationGraceCache {
         break;
       }
     }
-    this.cache.set(token, entry);
+    this.cache.set(key, entry);
   }
 
   delete(token: string): boolean {
-    return this.cache.delete(token);
+    return this.cache.delete(hashTokenKey(token));
   }
 
   clear(): void {
@@ -243,6 +267,8 @@ export async function refreshUserSession(refreshToken: string) {
     return { data: { session: null, user: null }, error: new Error('Missing refresh token') };
   }
 
+  const tokenKey = hashTokenKey(refreshToken);
+
   // 1. Check if this token was recently rotated within the 15-second grace window
   const cached = rotationGraceCache.get(refreshToken);
   if (cached && Date.now() < cached.expiresAt) {
@@ -256,7 +282,7 @@ export async function refreshUserSession(refreshToken: string) {
   }
 
   // 2. Return active in-flight refresh promise if one is already running for this token
-  const existingPromise = inFlightRefreshes.get(refreshToken);
+  const existingPromise = inFlightRefreshes.get(tokenKey);
   if (existingPromise) {
     return await existingPromise;
   }
@@ -281,11 +307,11 @@ export async function refreshUserSession(refreshToken: string) {
       }
       return result;
     } finally {
-      inFlightRefreshes.delete(refreshToken);
+      inFlightRefreshes.delete(tokenKey);
     }
   })();
 
-  inFlightRefreshes.set(refreshToken, refreshPromise);
+  inFlightRefreshes.set(tokenKey, refreshPromise);
   return await refreshPromise;
 }
 

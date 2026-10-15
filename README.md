@@ -40,12 +40,13 @@ Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforce
 ## 🛠️ Tech Stack
 
 - **Framework**: Next.js 16 (App Router with Turbopack)
-- **Language**: TypeScript (Strict type checking)
+- **Language**: TypeScript (Strict type checking, zero `any` policy)
 - **Styling**: Tailwind CSS v4 with dark workspace aesthetic (deep navy `#090D16`, subtle cyan accents, slate borders)
-- **AI SDK**: `@google/genai` (Official Google GenAI SDK)
-- **Database**: Supabase PostgreSQL with Row Level Security
-- **Validation**: Zod schema validation
-- **Testing**: Node.js Native Test Runner with `tsx` (11 unit & integration tests)
+- **AI SDK**: `@google/genai` (Official Google GenAI SDK, Gemini 2.5 Flash / Flash Lite)
+- **Database & Auth**: Supabase PostgreSQL with Row Level Security (RLS) & GoTrue Auth
+- **Rate Limiting**: Distributed sliding-window limiter via Upstash Redis with bounded in-memory fallback
+- **Validation**: Zod schema validation & strict JSON bounds (64KB payload limits)
+- **Testing**: Node.js Native Test Runner with `tsx` (84 unit tests & live staging database verification suite)
 
 ---
 
@@ -53,31 +54,66 @@ Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforce
 
 ```
 thinkmate/
+├── .github/
+│   └── workflows/
+│       ├── ci.yml                     # Automated Lint, Typecheck, Test & Build CI
+│       └── staging-verification.yml   # Live PostgreSQL concurrency & RLS verification
+├── scripts/
+│   └── verify-supabase-staging.ts     # Live staging verification suite (concurrency, rollback, RLS)
 ├── src/
 │   ├── app/
 │   │   ├── api/
-│   │   │   ├── think/stream/route.ts      # Server-Sent Events streaming endpoint
-│   │   │   ├── workflow/transition/route.ts # Server state machine validator
-│   │   │   ├── sessions/route.ts          # Session CRUD & ownership checks
-│   │   │   └── insights/route.ts          # Insight management
-│   │   ├── globals.css                    # Dark workspace theme tokens
-│   │   ├── layout.tsx                     # App shell layout
-│   │   └── page.tsx                       # Main workbench container
+│   │   │   ├── auth/
+│   │   │   │   ├── login/route.ts     # Secure credential authentication & HttpOnly cookie issuance
+│   │   │   │   ├── logout/route.ts    # Authoritative GoTrue server-side revocation & cookie purge
+│   │   │   │   ├── refresh/route.ts   # Distributed rate-limited token rotation & race recovery
+│   │   │   │   ├── session/route.ts   # Pure read-only session state inspection (GET)
+│   │   │   │   └── signup/route.ts    # Email confirmation verification
+│   │   │   ├── cothink/route.ts       # Authoritative server-side 8-step workflow engine
+│   │   │   ├── demo/cothink/route.ts  # Isolated reasoning simulator for guests
+│   │   │   ├── health/route.ts        # Dependency probing & readiness checks without secret leakage
+│   │   │   ├── insights/route.ts      # Decision, assumption, and tradeoff records
+│   │   │   ├── sessions/route.ts      # Cloud session CRUD with strict user ownership validation
+│   │   │   ├── think/stream/route.ts  # SSE streaming endpoint with mode & decision gates
+│   │   │   └── workflow/transition/route.ts # Mode transition state machine
+│   │   ├── globals.css                # Dark workspace theme tokens
+│   │   ├── layout.tsx                 # App shell layout
+│   │   └── page.tsx                   # Main workbench container with offline guest segregation
 │   ├── components/
-│   │   ├── layout/                        # AppHeader, SessionSidebar, InsightPanel
-│   │   ├── thinking/                      # ModeSelector, ThinkingWorkspace, OptionsMatrix, SuggestedQuestions
-│   │   ├── modals/                        # NewSessionModal, SettingsModal, DecisionSummaryModal, TransitionAlertModal
-│   │   ├── home/                          # HomeDashboard
-│   │   └── ui/                            # Button, Card, Badge, Modal
+│   │   ├── layout/                    # AppHeader, SessionSidebar, InsightPanel
+│   │   ├── thinking/                  # ModeSelector, ThinkingWorkspace, OptionsMatrix, SuggestedQuestions
+│   │   ├── modals/                    # NewSessionModal, SettingsModal, DecisionSummaryModal, AuthModal
+│   │   ├── home/                      # HomeDashboard
+│   │   └── ui/                        # Button, Card, Badge, Modal
 │   ├── services/
-│   │   ├── ai/                            # GeminiThinkingService, prompts, schemas, tests
-│   │   ├── db/                            # SupabaseThinkingRepository, client, tests
-│   │   └── workflow/                      # WorkflowStateMachine, guardrails, tests
-│   ├── lib/                               # Storage helpers, styling utils
-│   └── types/                             # Domain types and mode definitions
+│   │   ├── ai/                        # GeminiThinkingService, prompts, schemas
+│   │   ├── db/                        # SupabaseThinkingRepository, repository.ts, client
+│   │   └── workflow/                  # WorkflowStateMachine, stage derivation, guardrails
+│   ├── lib/                           # server-auth, rate-limiter, csrf, request-utils
+│   ├── config/                        # models.ts (supported Gemini models allowlist)
+│   ├── proxy.ts                       # CSRF defense middleware & Nonce-based CSP
+│   └── types/                         # Domain types, workflow stages, and mode definitions
 └── supabase/
-    └── migrations/                        # PostgreSQL migration with RLS policies
+    └── migrations/
+        ├── 20261012000000_thinkmate_schema.sql # Core schema, RLS policies, tables
+        └── 20261013000000_concurrency_and_idempotency_hardening.sql # OCC, FOR UPDATE RPCs
 ```
+
+---
+
+## 🔒 Security Architecture
+
+1. **Defense-in-Depth Authentication**:
+   - Authentication tokens are maintained strictly in `HttpOnly`, `Secure`, `SameSite=Lax` cookies.
+   - Session inspection (`GET /api/auth/session`) is purely read-only and never sets cookies or rotates tokens.
+   - Token rotation is executed exclusively via dedicated, CSRF-validated `POST /api/auth/refresh`.
+   - In-memory token rotation grace windows are indexed via SHA-256 hashes (`hashTokenKey`), preventing plaintext tokens from resting in process memory.
+   - Logout invokes authoritative server-side session termination against GoTrue via admin APIs or authenticated HTTP endpoints before clearing client cookies.
+
+2. **Database Concurrency & PostgreSQL RLS**:
+   - Optimistic concurrency control (OCC) is enforced inside PostgreSQL via `record_workflow_step_tx` and `transition_workflow_mode_tx` with row-level `FOR UPDATE` locking.
+   - Idempotency is enforced by persistent composite keys `(user_id, session_id, client_request_id)` with request-payload SHA-256 validation.
+   - Strict Row Level Security policies guarantee multi-tenant isolation across `thinking_sessions`, `session_messages`, `session_insights`, `workflow_transitions`, and `workflow_idempotency_keys`.
 
 ---
 
@@ -89,15 +125,17 @@ npm install
 ```
 
 ### 2. Configure Environment
-Copy `.env.example` to `.env.local` and add your Gemini API key:
+Copy `.env.example` to `.env.local`:
 ```bash
 cp .env.example .env.local
 ```
-Add your key:
+Add your credentials:
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
 ```
-*(Note: ThinkMate includes a resilient reasoning simulator, allowing you to run and test the application even before configuring an API key).*
 
 ### 3. Run Development Server
 ```bash
@@ -105,15 +143,22 @@ npm run dev
 ```
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-### 4. Run Automated Tests
+### 4. Run Automated Test Suites
 ```bash
+# Unit & integration test suite (84 tests)
 npm test
-```
-Runs the 11 unit & integration tests covering AI schemas, state machine transitions, and database ownership verification.
 
-### 5. Build for Production
-```bash
+# Linter verification (0 errors, 0 warnings)
+npm run lint
+
+# TypeScript verification
+npx tsc --noEmit
+
+# Production Turbopack build
 npm run build
+
+# Staging database verification suite
+npx tsx scripts/verify-supabase-staging.ts
 ```
 
 ---
