@@ -83,14 +83,17 @@ export default function Home() {
     setRefreshCloudTrigger((prev) => prev + 1);
   }, []);
 
-  // Synchronize authoritative cloud sessions from Supabase
+  // Synchronize authoritative cloud sessions via server-managed cookie credentials
   useEffect(() => {
     let ignore = false;
-    const token = typeof window !== 'undefined' ? localStorage.getItem('thinkmate_auth_token') : null;
-    if (!token) return;
+
+    // Purge legacy bearer token from browser localStorage if present
+    if (typeof window !== 'undefined' && localStorage.getItem('thinkmate_auth_token')) {
+      localStorage.removeItem('thinkmate_auth_token');
+    }
 
     fetch('/api/sessions', {
-      headers: { Authorization: `Bearer ${token}` },
+      credentials: 'same-origin',
     })
       .then((res) => {
         if (ignore) return;
@@ -184,11 +187,10 @@ export default function Home() {
   // Load session records by ID (supports cloud database and offline drafts)
   const loadSessionById = useCallback(
     async (targetSessionId: string) => {
-      const authToken = typeof window !== 'undefined' ? localStorage.getItem('thinkmate_auth_token') : null;
-      if (authToken && isCloudUuid(targetSessionId)) {
+      if (isCloudUuid(targetSessionId)) {
         try {
           const detailRes = await fetch(`/api/sessions?id=${targetSessionId}`, {
-            headers: { Authorization: `Bearer ${authToken}` },
+            credentials: 'same-origin',
           });
           if (detailRes.ok) {
             const detailData = await detailRes.json();
@@ -312,8 +314,6 @@ export default function Home() {
   };
 
   const handleSendMessage = async (text: string, selectedOptionId?: string) => {
-    const authToken = typeof window !== 'undefined' ? localStorage.getItem('thinkmate_auth_token') : null;
-
     // Record current state into undo stack
     setPastSnapshots((prev) => [...prev, takeSnapshot()]);
     setFutureSnapshots([]); // Clear redo stack on new action
@@ -340,7 +340,7 @@ export default function Home() {
         content: "What is the core dilemma or problem you are trying to understand and solve? Describe the situation, tension, or challenge you're facing.",
         step: 'describe_problem',
         timestamp: new Date().toISOString(),
-        executionMode: authToken ? 'gemini' : 'simulator',
+        executionMode: isAuthenticated ? 'gemini' : 'simulator',
       };
       setCurrentStep('describe_problem');
       setProgressPercent(20);
@@ -350,8 +350,8 @@ export default function Home() {
       return;
     }
 
-    // P0/P1: For authenticated users, create an authentic database session once problem description is provided
-    if (authToken && sessionKindRef.current !== 'cloud' && (currentStep === 'describe_problem' || (!currentSessionIdRef.current && text.trim().length > 0))) {
+    // For authenticated users, create an authentic database session once problem description is provided
+    if (isAuthenticated && sessionKindRef.current !== 'cloud' && (currentStep === 'describe_problem' || (!currentSessionIdRef.current && text.trim().length > 0))) {
       try {
         const activeProblem = text.trim();
         const title =
@@ -361,9 +361,9 @@ export default function Home() {
 
         const createRes = await fetch('/api/sessions', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
           },
           body: JSON.stringify({
             title,
@@ -383,7 +383,6 @@ export default function Home() {
           console.warn('Cloud session creation returned status', createRes.status);
           if (createRes.status === 401) {
             setIsAuthenticated(false);
-            localStorage.removeItem('thinkmate_auth_token');
           }
           updateSessionState(`local-${Date.now()}`, 'local');
         }
@@ -391,7 +390,7 @@ export default function Home() {
         console.warn('Failed to pre-create session in database:', err);
         updateSessionState(`local-${Date.now()}`, 'local');
       }
-    } else if (!authToken && !currentSessionIdRef.current) {
+    } else if (!isAuthenticated && !currentSessionIdRef.current) {
       updateSessionState(`demo-${Date.now()}`, 'local');
     }
 
@@ -413,18 +412,16 @@ export default function Home() {
     }
 
     try {
-      const isCloud = Boolean(authToken && sessionKindRef.current === 'cloud' && isCloudUuid(currentSessionIdRef.current));
+      const isCloud = Boolean(isAuthenticated && sessionKindRef.current === 'cloud' && isCloudUuid(currentSessionIdRef.current));
       const endpoint = isCloud ? '/api/cothink' : '/api/demo/cothink';
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (authToken) {
-        headers['Authorization'] = `Bearer ${authToken}`;
-      }
 
       const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
       const selectedModel = (typeof window !== 'undefined' ? localStorage.getItem('thinkmate_model') : null) || 'gemini-2.5-flash';
 
       let res = await fetch(endpoint, {
         method: 'POST',
+        credentials: 'same-origin',
         headers,
         body: JSON.stringify({
           sessionId: currentSessionIdRef.current,

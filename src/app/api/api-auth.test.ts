@@ -615,6 +615,41 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     }
   });
 
+  test('POST /api/cothink rejects retired Gemini models with 400 Bad Request', async () => {
+    const origGetUser = supabase.auth.getUser;
+    // @ts-expect-error test stub
+    supabase.auth.getUser = async (token: string) => {
+      if (token === 'mock-token-test') {
+        return { data: { user: { id: 'usr-model-test', email: 'test@example.com' } }, error: null };
+      }
+      return origGetUser.call(supabase.auth, token);
+    };
+
+    try {
+      // Rejects retired gemini-1.5-pro
+      const retiredReq = new NextRequest('http://localhost:3000/api/cothink', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer mock-token-test',
+        },
+        body: JSON.stringify({
+          sessionId: 'sess-model-test',
+          step: 'welcome',
+          userMessage: 'Test prompt',
+          model: 'gemini-1.5-pro',
+        }),
+      });
+
+      const res = await coThinkPost(retiredReq);
+      assert.strictEqual(res.status, 400, 'Retired gemini-1.5-pro must be rejected with 400');
+      const json = await res.json();
+      assert.ok(json.error.includes('Invalid co-thinker payload'));
+    } finally {
+      supabase.auth.getUser = origGetUser;
+    }
+  });
+
   test('POST /api/sessions rejects incompatible initial mode and stage with 400', async () => {
     const origGetUser = supabase.auth.getUser;
     // @ts-expect-error test stub

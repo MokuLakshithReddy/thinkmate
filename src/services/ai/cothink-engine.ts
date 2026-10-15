@@ -320,11 +320,9 @@ STRICT FLOWCHART PROTOCOL:
 7. Summarize insights and options.
 8. User chooses next action.
 
-CRITICAL INSTRUCTIONS:
-- Directly incorporate the user's specific dilemma and vocabulary.
-- Never output generic placeholder text.
-- Provide a concise, direct, intellectually honest response that fulfills the current stage.
-- Conclude with 2-3 selectable options formatted as:
+RESPONSE PROTOCOL:
+You must provide a structured response with your core reasoning message and 2-3 selectable next options.
+Format your output as:
 [MESSAGE_CONTENT]
 OPTIONS:
 - id: <short_id> | label: <option_label>
@@ -350,9 +348,14 @@ OPTIONS:
     });
 
     const text = response.text || '';
-    const fallback = this.runFlowchartStep(context.step, userMessage, selectedOptionId, context);
+    if (!text.trim()) {
+      throw new Error('AI provider returned empty response');
+    }
 
-    // Extract options if provided
+    // Determine flowchart progression based on deterministic state machine rules
+    const flowchartTarget = this.runFlowchartStep(context.step, userMessage, selectedOptionId, context);
+
+    // Extract options and message text from model output
     const options: ChoiceOption[] = [];
     const lines = text.split('\n');
     let messageText = '';
@@ -373,11 +376,16 @@ OPTIONS:
       }
     }
 
+    const trimmedMsg = messageText.trim();
+    if (!trimmedMsg) {
+      throw new Error('AI model failed to generate message content');
+    }
+
     return {
-      message: messageText.trim() || fallback.message,
-      nextStep: fallback.nextStep,
-      options: options.length > 0 ? options : fallback.options,
-      progressPercent: fallback.progressPercent,
+      message: trimmedMsg,
+      nextStep: flowchartTarget.nextStep,
+      options: options.length > 0 ? options : flowchartTarget.options,
+      progressPercent: flowchartTarget.progressPercent,
       executionMode: 'gemini',
       modelName: modelToUse,
     };

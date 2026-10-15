@@ -78,7 +78,8 @@ describe('Workflow State Machine & Guardrails', () => {
     assert.strictEqual(WorkflowStateMachine.validateStageTransition('break_subproblems', 'explore_perspectives').allowed, true);
     assert.strictEqual(WorkflowStateMachine.validateStageTransition('challenge_assumptions', 'check_satisfaction').allowed, true);
     assert.strictEqual(WorkflowStateMachine.validateStageTransition('check_satisfaction', 'summarize_insights').allowed, true);
-    assert.strictEqual(WorkflowStateMachine.validateStageTransition('summarize_insights', 'choose_action').allowed, true);
+    assert.strictEqual(WorkflowStateMachine.validateStageTransition('summarize_insights', 'choose_action', { hasAcceptedDecision: true }).allowed, true);
+    assert.strictEqual(WorkflowStateMachine.validateStageTransition('summarize_insights', 'choose_action', { hasAcceptedDecision: false }).allowed, false);
 
     // Illegal skip from welcome to choose_action
     const invalidSkip = WorkflowStateMachine.validateStageTransition('welcome', 'choose_action');

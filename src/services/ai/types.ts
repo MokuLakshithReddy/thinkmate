@@ -7,18 +7,14 @@ export const MessageSchema = z.object({
   mode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']).optional(),
 });
 
-export const SUPPORTED_GEMINI_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-1.5-flash',
-  'gemini-1.5-pro',
-] as const;
+import { SUPPORTED_GEMINI_MODELS, SupportedGeminiModel, DEFAULT_GEMINI_MODEL } from '@/config/models';
 
 export const ThinkStreamRequestSchema = z.object({
   sessionId: z.string().min(1).max(100),
   problemStatement: z.string().min(1).max(10000),
   currentMode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']),
   messages: z.array(MessageSchema).max(50),
-  model: z.enum(SUPPORTED_GEMINI_MODELS).default('gemini-2.5-flash'),
+  model: z.enum(SUPPORTED_GEMINI_MODELS).default(DEFAULT_GEMINI_MODEL),
 });
 
 export type ThinkStreamRequest = z.infer<typeof ThinkStreamRequestSchema>;

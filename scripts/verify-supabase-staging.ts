@@ -51,6 +51,18 @@ async function runStagingVerification() {
     process.exit(1);
   }
 
+  // Exact Staging Project Reference Allowlist:
+  // If EXPECTED_STAGING_PROJECT_REF is provided in environment, enforce an exact match.
+  const expectedProjectRef = process.env.EXPECTED_STAGING_PROJECT_REF || process.env.STAGING_PROJECT_REF;
+  if (expectedProjectRef) {
+    const expectedHost = `${expectedProjectRef.toLowerCase().trim()}.supabase.co`;
+    if (!projectHost.includes(expectedHost)) {
+      console.error(`\n[SECURITY FATAL] Staging host mismatch! Target host "${projectHost}" does not match required staging project "${expectedHost}".`);
+      process.exit(1);
+    }
+    console.log(`✔ Verified target staging project matches exact allowlist: ${expectedHost}`);
+  }
+
   // Deny-list: Known production project refs that must NEVER receive destructive/staging test executions
   const FORBIDDEN_PRODUCTION_REFS = ['gtkvujspajcelzufpggr', 'ujbpyqubhxycgtaadkce'];
   for (const prodRef of FORBIDDEN_PRODUCTION_REFS) {
@@ -79,7 +91,7 @@ async function runStagingVerification() {
     // -------------------------------------------------------------------------
     // TEST 1: RPC Permissions Check (Mandatory Anonymous Execution Denial)
     // -------------------------------------------------------------------------
-    console.log('[Test 1/5] Verifying RPC permissions: anon execution must be denied...');
+    console.log('[Test 1/6] Verifying RPC permissions: anon execution must be denied...');
     const { data: anonData, error: anonError } = await anonClient.rpc('record_workflow_step_tx', {
       p_session_id: testSessionId,
       p_user_id: testUserId,
@@ -127,7 +139,7 @@ async function runStagingVerification() {
     // -------------------------------------------------------------------------
     // TEST 2: Genuine Simultaneous Concurrency Test Under Row Lock
     // -------------------------------------------------------------------------
-    console.log('\n[Test 2/5] Verifying genuine simultaneous concurrency under row lock...');
+    console.log('\n[Test 2/6] Verifying genuine simultaneous concurrency under row lock...');
     const reqIdConc1 = `req-conc-1-${Date.now()}`;
     const reqIdConc2 = `req-conc-2-${Date.now()}`;
 
@@ -179,7 +191,7 @@ async function runStagingVerification() {
     // -------------------------------------------------------------------------
     // TEST 3: Duplicate Request ID with Different Payload / Hash
     // -------------------------------------------------------------------------
-    console.log('\n[Test 3/5] Verifying duplicate request ID with altered payload...');
+    console.log('\n[Test 3/6] Verifying duplicate request ID with altered payload...');
     const duplicateReqId = `req-dup-test-${Date.now()}`;
     const hashOriginal = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
     const hashTampered = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
@@ -224,7 +236,7 @@ async function runStagingVerification() {
     // -------------------------------------------------------------------------
     // TEST 4: Legacy Rows with Missing / Empty Hashes
     // -------------------------------------------------------------------------
-    console.log('\n[Test 4/5] Verifying legacy row with empty/missing request_hash...');
+    console.log('\n[Test 4/6] Verifying legacy row with empty/missing request_hash...');
     const legacyReqId = `req-legacy-${Date.now()}`;
     const { error: insertLegacyErr } = await serviceClient.from('workflow_idempotency_keys').insert({
       user_id: testUserId,
@@ -264,7 +276,7 @@ async function runStagingVerification() {
     // -------------------------------------------------------------------------
     // TEST 5: Atomic Rollback Behavior AFTER Partial Writes
     // -------------------------------------------------------------------------
-    console.log('\n[Test 5/5] Verifying atomic rollback behavior after partial writes...');
+    console.log('\n[Test 5/6] Verifying atomic rollback behavior after partial writes...');
     // Capture initial state before the test transaction
     const { count: initialMsgCount, error: countErr1 } = await serviceClient
       .from('session_messages')
@@ -341,8 +353,54 @@ async function runStagingVerification() {
     );
     console.log('  ✔ Passed: Partial writes (messages & session updates) atomically rolled back on failure.');
 
+    // -------------------------------------------------------------------------
+    // TEST 6: Multi-User Cross-Tenant Isolation
+    // -------------------------------------------------------------------------
+    console.log('\n[Test 6/6] Verifying multi-user cross-tenant isolation...');
+    const attackerUserId = crypto.randomUUID();
+
+    // Attacker attempts to modify victim's session via record_workflow_step_tx
+    const { data: crossUserData, error: crossUserErr } = await serviceClient.rpc('record_workflow_step_tx', {
+      p_session_id: testSessionId,
+      p_user_id: attackerUserId, // Unauthorized cross-user attempt
+      p_user_message: 'Cross-tenant injection probe',
+      p_assistant_message: 'Should be rejected',
+      p_next_stage: 'break_subproblems',
+      p_next_mode: 'explore',
+      p_expected_stage: sessionAfter.current_stage,
+      p_expected_mode: sessionAfter.current_mode,
+    });
+
+    assert.strictEqual(crossUserData, null, 'Cross-user RPC execution must return null');
+    assert.ok(crossUserErr, 'Cross-user RPC execution must fail');
+    assert.ok(
+      crossUserErr.message.includes('Unauthorized') ||
+        crossUserErr.message.includes('not found') ||
+        crossUserErr.message.includes('Forbidden'),
+      `Expected Unauthorized or session not found, received: ${crossUserErr.message}`
+    );
+
+    // Attacker attempts to transition victim's session mode via transition_workflow_mode_tx
+    const { data: crossModeData, error: crossModeErr } = await serviceClient.rpc('transition_workflow_mode_tx', {
+      p_session_id: testSessionId,
+      p_user_id: attackerUserId,
+      p_expected_mode: sessionAfter.current_mode,
+      p_to_mode: 'explore',
+      p_reason: 'Malicious mode shift',
+    });
+
+    assert.strictEqual(crossModeData, null, 'Cross-user mode transition must return null');
+    assert.ok(crossModeErr, 'Cross-user mode transition must fail');
+    assert.ok(
+      crossModeErr.message.includes('Unauthorized') ||
+        crossModeErr.message.includes('not found') ||
+        crossModeErr.message.includes('Forbidden'),
+      `Expected Unauthorized or session not found, received: ${crossModeErr.message}`
+    );
+    console.log('  ✔ Passed: Multi-user cross-tenant tampering strictly rejected under database locks.');
+
     console.log('\n' + '='.repeat(75));
-    console.log('ALL 5 STAGING DATABASE INTEGRATION TESTS PASSED CLEANLY.');
+    console.log('ALL 6 STAGING DATABASE INTEGRATION TESTS PASSED CLEANLY.');
     console.log('='.repeat(75));
   } finally {
     // Clean up disposable test data and verify all deletions succeed

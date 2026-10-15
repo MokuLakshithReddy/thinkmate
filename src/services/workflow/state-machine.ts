@@ -65,17 +65,29 @@ export class WorkflowStateMachine {
    */
   static validateStageTransition(
     fromStep: CoThinkerStep,
-    toStep: CoThinkerStep
+    toStep: CoThinkerStep,
+    context?: {
+      hasAcceptedDecision?: boolean;
+    }
   ): { allowed: boolean; reason?: string } {
     if (fromStep === toStep) return { allowed: true };
     const allowed = ALLOWED_STAGE_TRANSITIONS[fromStep] || [];
-    if (allowed.includes(toStep)) {
-      return { allowed: true };
+    if (!allowed.includes(toStep)) {
+      return {
+        allowed: false,
+        reason: `Illegal workflow stage jump from "${fromStep}" to "${toStep}". Stages must progress through the Co-Thinker reasoning pipeline.`,
+      };
     }
-    return {
-      allowed: false,
-      reason: `Illegal workflow stage jump from "${fromStep}" to "${toStep}". Stages must progress through the Co-Thinker reasoning pipeline.`,
-    };
+
+    // Server-enforced decision gate: Cannot enter choose_action without an accepted decision
+    if (toStep === 'choose_action' && !context?.hasAcceptedDecision) {
+      return {
+        allowed: false,
+        reason: 'Cannot transition to action execution ("choose_action") without at least one approved decision insight recorded in Decide mode.',
+      };
+    }
+
+    return { allowed: true };
   }
 
   /**
