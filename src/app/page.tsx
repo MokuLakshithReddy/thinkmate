@@ -6,6 +6,7 @@ import { TopNav } from '@/components/cothinker/TopNav';
 import { WorkflowCanvas } from '@/components/cothinker/WorkflowCanvas';
 import { PreviewPanel } from '@/components/cothinker/PreviewPanel';
 import { SettingsModal } from '@/components/modals/SettingsModal';
+import { AuthModal } from '@/components/modals/AuthModal';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import {
   getStoredSessions,
@@ -57,11 +58,13 @@ function getServerSessionsSnapshot(): string {
 export default function Home() {
   const [viewMode, setViewMode] = useState<'editor' | 'app'>('editor');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Cloud Sessions State (Authoritative source of truth for authenticated users)
+  // Cloud Sessions & Authentication State (Authoritative source of truth)
   const [cloudSessions, setCloudSessions] = useState<ThinkingSession[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [userEmail, setUserEmail] = useState<string | undefined>(undefined);
 
   // Read stored offline sessions via useSyncExternalStore
   const storedSessionsJson = useSyncExternalStore(
@@ -83,7 +86,7 @@ export default function Home() {
     setRefreshCloudTrigger((prev) => prev + 1);
   }, []);
 
-  // Synchronize authoritative cloud sessions via server-managed cookie credentials
+  // Synchronize authoritative cloud sessions and auth state via server-managed cookie credentials
   useEffect(() => {
     let ignore = false;
 
@@ -92,6 +95,26 @@ export default function Home() {
       localStorage.removeItem('thinkmate_auth_token');
     }
 
+    // Verify authentication status
+    fetch('/api/auth/session', {
+      credentials: 'same-origin',
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (ignore) return;
+        if (data.authenticated && data.user) {
+          setIsAuthenticated(true);
+          setUserEmail(data.user.email);
+        } else {
+          setIsAuthenticated(false);
+          setUserEmail(undefined);
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to verify session status:', err);
+      });
+
+    // Fetch cloud sessions
     fetch('/api/sessions', {
       credentials: 'same-origin',
     })
@@ -117,7 +140,7 @@ export default function Home() {
     return () => {
       ignore = true;
     };
-  }, [isSettingsOpen, refreshCloudTrigger]);
+  }, [isSettingsOpen, isAuthModalOpen, refreshCloudTrigger]);
 
   // Workflow State
   const [currentStep, setCurrentStep] = useState<CoThinkerStep>('welcome');
@@ -597,6 +620,47 @@ export default function Home() {
     }
   };
 
+  const handleSignOut = async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+    } catch (err) {
+      console.warn('Sign out request failed:', err);
+    }
+    setIsAuthenticated(false);
+    setUserEmail(undefined);
+    setCloudSessions([]);
+    handleRestart();
+  };
+
+  const handleRemix = () => {
+    if (!problemStatement.trim()) return;
+    const forkedProblem = `Fork: ${problemStatement}`;
+    updateSessionState('', null);
+    setCurrentStep('clarify_objective');
+    setProgressPercent(30);
+    setProblemStatement(forkedProblem);
+    setClarifiedObjective('');
+    const kickoffUser: ChatMessage = {
+      id: `msg-user-${Date.now()}`,
+      role: 'user',
+      content: forkedProblem,
+      step: 'describe_problem',
+      timestamp: new Date().toISOString(),
+    };
+    const kickoffAssistant: ChatMessage = {
+      id: `msg-ast-${Date.now()}`,
+      role: 'assistant',
+      content: `Created a new reasoning branch for this problem:\n\n**${forkedProblem}**\n\nLet's clarify your primary goal, target metrics, or key constraints.`,
+      step: 'clarify_objective',
+      timestamp: new Date().toISOString(),
+      executionMode: isAuthenticated ? 'gemini' : 'simulator',
+    };
+    setCustomMessages([kickoffUser, kickoffAssistant]);
+  };
+
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 font-sans antialiased">
       {/* Top Header */}
@@ -605,7 +669,13 @@ export default function Home() {
         onViewModeChange={setViewMode}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onShare={handleShare}
-        userName={isAuthenticated ? 'Cloud User' : 'Guest Thinker'}
+        userName={userEmail ? userEmail.split('@')[0] : (isAuthenticated ? 'Cloud User' : 'Guest Thinker')}
+        userEmail={userEmail}
+        isAuthenticated={isAuthenticated}
+        onOpenAuth={() => setIsAuthModalOpen(true)}
+        onSignOut={handleSignOut}
+        onBack={handleRestart}
+        onRemix={problemStatement ? handleRemix : undefined}
       />
 
       {/* Main Dual-Pane Workspace */}
@@ -663,6 +733,17 @@ export default function Home() {
             clearAllLocalData(false);
           }
           handleRestart();
+        }}
+      />
+
+      {/* Authentication Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onAuthSuccess={(user) => {
+          setIsAuthenticated(true);
+          setUserEmail(user.email);
+          refreshCloudSessions();
         }}
       />
     </div>

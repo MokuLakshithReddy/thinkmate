@@ -30,4 +30,5 @@ jobs:
           STAGING_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}
           STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
           STAGING_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
+          EXPECTED_STAGING_PROJECT_REF: ${{ vars.EXPECTED_STAGING_PROJECT_REF || secrets.EXPECTED_STAGING_PROJECT_REF }}
         run: npx tsx scripts/verify-supabase-staging.ts

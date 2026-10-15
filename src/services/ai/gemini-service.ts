@@ -6,6 +6,35 @@ import {
 } from './types';
 import { getSystemPrompt } from './prompts';
 import { ThinkingMode, Insight } from '@/types';
+import { z } from 'zod';
+
+const StreamMetadataSchema = z.object({
+  suggestedQuestions: z.array(z.string().min(1).max(300)).max(10).optional(),
+  insights: z
+    .array(
+      z.object({
+        category: z.enum([
+          'tension',
+          'tradeoff',
+          'assumption',
+          'decision',
+          'action',
+          'goal',
+          'uncertainty',
+          'option',
+          'risk',
+          'next_step',
+        ]),
+        title: z.string().min(1).max(200),
+        content: z.string().min(1).max(2000),
+        status: z.enum(['proposed', 'accepted', 'rejected']).optional(),
+        metadata: z.record(z.string(), z.unknown()).optional(),
+      })
+    )
+    .max(10)
+    .optional(),
+  suggestedMode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']).optional(),
+});
 
 export class GeminiThinkingService implements ThinkingAIService {
   private defaultApiKey: string | undefined;
@@ -193,6 +222,10 @@ export class GeminiThinkingService implements ThinkingAIService {
     currentMode: ThinkingMode,
     onEvent: (event: ThinkingStreamEvent) => void
   ) {
+    if (!text || !text.trim()) {
+      return;
+    }
+
     try {
       let jsonStr = text;
       const fenceMatch = text.match(/```json(?::thinkmate-meta)?\s*([\s\S]*?)\s*```/);
@@ -206,20 +239,29 @@ export class GeminiThinkingService implements ThinkingAIService {
       }
 
       const parsed = JSON.parse(jsonStr.trim());
-      if (Array.isArray(parsed.suggestedQuestions) && parsed.suggestedQuestions.length > 0) {
-        onEvent({ type: 'questions', questions: parsed.suggestedQuestions });
+      const validation = StreamMetadataSchema.safeParse(parsed);
+
+      if (!validation.success) {
+        console.warn(
+          '[GeminiThinkingService] Stream metadata rejected by schema validation:',
+          validation.error.issues
+        );
+        return;
       }
-      if (Array.isArray(parsed.insights) && parsed.insights.length > 0) {
-        onEvent({ type: 'insights', insights: parsed.insights });
+
+      const data = validation.data;
+      if (data.suggestedQuestions && data.suggestedQuestions.length > 0) {
+        onEvent({ type: 'questions', questions: data.suggestedQuestions });
       }
-      if (parsed.suggestedMode) {
-        onEvent({ type: 'suggestedMode', mode: parsed.suggestedMode });
+      if (data.insights && data.insights.length > 0) {
+        onEvent({ type: 'insights', insights: data.insights as Partial<Insight>[] });
       }
-    } catch {
-      onEvent({
-        type: 'questions',
-        questions: this.getDefaultQuestionsForMode(currentMode),
-      });
+      if (data.suggestedMode) {
+        onEvent({ type: 'suggestedMode', mode: data.suggestedMode });
+      }
+    } catch (err) {
+      console.warn('[GeminiThinkingService] Failed to parse stream metadata JSON:', err);
+      // Malformed metadata is not emitted as fake synthetic questions to maintain honesty
     }
   }
 

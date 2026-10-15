@@ -87,12 +87,15 @@ export function WorkflowCanvas({
           {/* Connector handle on top right */}
           <div aria-hidden="true" className="absolute -top-1.5 -right-1.5 h-3.5 w-3.5 rounded-full bg-slate-900 border-2 border-white" />
 
-          {/* Card Header: ✦ Co-think Assistant */}
+          {/* Card Header: ✦ Co-Thinker Assistant Node */}
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
               <span className="text-slate-900 font-semibold text-sm flex items-center gap-1.5">
                 <Sparkles className="h-4 w-4 text-purple-600 fill-purple-600" aria-hidden="true" />
-                Co-think Assistant
+                Co-Thinker Assistant Node
+              </span>
+              <span className="text-[10px] text-purple-700 bg-purple-100/90 px-2 py-0.5 rounded-md font-medium">
+                Stage {currentStageInfo.number} / 8
               </span>
             </div>
 

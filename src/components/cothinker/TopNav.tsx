@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { ArrowLeft, Cloud, Share2, Sparkles, Settings } from 'lucide-react';
+import { ArrowLeft, Cloud, Share2, Sparkles, Settings, LogIn, LogOut } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface TopNavProps {
@@ -10,6 +10,12 @@ interface TopNavProps {
   onOpenSettings: () => void;
   onShare: () => void;
   userName?: string;
+  userEmail?: string;
+  isAuthenticated?: boolean;
+  onOpenAuth?: () => void;
+  onSignOut?: () => void;
+  onBack?: () => void;
+  onRemix?: () => void;
 }
 
 export function TopNav({
@@ -18,24 +24,44 @@ export function TopNav({
   onOpenSettings,
   onShare,
   userName = 'Thinker',
+  userEmail,
+  isAuthenticated = false,
+  onOpenAuth,
+  onSignOut,
+  onBack,
+  onRemix,
 }: TopNavProps) {
   return (
     <header className="h-14 bg-white border-b border-slate-200 px-4 flex items-center justify-between sticky top-0 z-50 select-none shadow-xs">
-      {/* Left: Back Arrow + Co-Thinker Title + Published Badge */}
+      {/* Left: Back Arrow + Co-Thinker Title + Truthful Sync Status */}
       <div className="flex items-center gap-3">
         <button
+          onClick={onBack}
           className="p-1.5 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
-          title="Back to projects"
+          title="Back to welcome / new problem"
+          aria-label="Back to welcome"
         >
           <ArrowLeft className="h-4 w-4" />
         </button>
 
         <div className="flex items-center gap-2">
           <h1 className="font-semibold text-slate-900 text-sm tracking-tight">Co-Thinker</h1>
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-600 border border-slate-200">
-            <Cloud className="h-3 w-3 text-slate-500" />
-            Published
-          </span>
+          {isAuthenticated ? (
+            <span
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200"
+              title="Cloud persistence active with server-managed session cookies"
+            >
+              <Cloud className="h-3 w-3 text-emerald-600" />
+              Cloud Synced
+            </span>
+          ) : (
+            <span
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-700 border border-amber-200"
+              title="Working in local browser memory. Sign in to synchronize across devices."
+            >
+              Local Draft
+            </span>
+          )}
         </div>
       </div>
 
@@ -65,7 +91,7 @@ export function TopNav({
         </button>
       </div>
 
-      {/* Right: Share, Remix, Settings, Profile Avatar */}
+      {/* Right: Share, Remix/Fork, Settings, Authentication */}
       <div className="flex items-center gap-2">
         <button
           onClick={onShare}
@@ -75,29 +101,54 @@ export function TopNav({
           Share
         </button>
 
-        <button
-          onClick={() => alert('Remixed project successfully into your workspace!')}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-full transition-colors cursor-pointer shadow-xs"
-        >
-          <Sparkles className="h-3.5 w-3.5 text-purple-300" />
-          Remix
-        </button>
+        {onRemix && (
+          <button
+            onClick={onRemix}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-full transition-colors cursor-pointer shadow-xs"
+            title="Duplicate current problem statement into a new session branch"
+          >
+            <Sparkles className="h-3.5 w-3.5 text-purple-300" />
+            Duplicate
+          </button>
+        )}
 
         <button
           onClick={onOpenSettings}
           className="p-1.5 rounded-full text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
-          title="Settings"
+          title="Settings & Model Selection"
         >
           <Settings className="h-4 w-4" />
         </button>
 
-        {/* User Avatar */}
-        <div
-          className="h-7 w-7 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs font-semibold cursor-pointer ring-2 ring-purple-100"
-          title={userName}
-        >
-          {userName.charAt(0)}
-        </div>
+        {/* Authentication State Control */}
+        {isAuthenticated ? (
+          <div className="flex items-center gap-1.5 pl-1 border-l border-slate-200">
+            <div
+              className="h-7 w-7 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs font-semibold ring-2 ring-purple-100"
+              title={userEmail || userName}
+            >
+              {(userEmail || userName).charAt(0).toUpperCase()}
+            </div>
+            {onSignOut && (
+              <button
+                onClick={onSignOut}
+                className="p-1.5 rounded-lg text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                title="Sign out of ThinkMate"
+                aria-label="Sign out"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        ) : (
+          <button
+            onClick={onOpenAuth}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded-full transition-colors cursor-pointer shadow-2xs"
+          >
+            <LogIn className="h-3.5 w-3.5 text-sky-600" />
+            Sign In
+          </button>
+        )}
       </div>
     </header>
   );

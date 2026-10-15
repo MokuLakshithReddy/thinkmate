@@ -52,16 +52,20 @@ async function runStagingVerification() {
   }
 
   // Exact Staging Project Reference Allowlist:
-  // If EXPECTED_STAGING_PROJECT_REF is provided in environment, enforce an exact match.
-  const expectedProjectRef = process.env.EXPECTED_STAGING_PROJECT_REF || process.env.STAGING_PROJECT_REF;
-  if (expectedProjectRef) {
-    const expectedHost = `${expectedProjectRef.toLowerCase().trim()}.supabase.co`;
-    if (!projectHost.includes(expectedHost)) {
-      console.error(`\n[SECURITY FATAL] Staging host mismatch! Target host "${projectHost}" does not match required staging project "${expectedHost}".`);
-      process.exit(1);
-    }
-    console.log(`✔ Verified target staging project matches exact allowlist: ${expectedHost}`);
+  // EXPECTED_STAGING_PROJECT_REF is mandatory to fail closed against unverified environments
+  const expectedProjectRef = (process.env.EXPECTED_STAGING_PROJECT_REF || process.env.STAGING_PROJECT_REF || '').toLowerCase().trim();
+  if (!expectedProjectRef) {
+    console.error('\n[SECURITY FATAL] Missing required EXPECTED_STAGING_PROJECT_REF environment variable.');
+    console.error('To strictly prevent running verification against unverified projects, you must specify EXPECTED_STAGING_PROJECT_REF.');
+    process.exit(1);
   }
+
+  const expectedHost = `${expectedProjectRef}.supabase.co`;
+  if (projectHost !== expectedHost) {
+    console.error(`\n[SECURITY FATAL] Staging host mismatch! Target host "${projectHost}" does not exactly match required staging project "${expectedHost}".`);
+    process.exit(1);
+  }
+  console.log(`✔ Verified target staging project strictly matches required allowlist: ${expectedHost}`);
 
   // Deny-list: Known production project refs that must NEVER receive destructive/staging test executions
   const FORBIDDEN_PRODUCTION_REFS = ['gtkvujspajcelzufpggr', 'ujbpyqubhxycgtaadkce'];

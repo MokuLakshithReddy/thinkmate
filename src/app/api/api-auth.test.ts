@@ -10,6 +10,10 @@ import { POST as demoCoThinkPost } from './demo/cothink/route';
 import { POST as sessionsPost } from './sessions/route';
 import { POST as insightsPost } from './insights/route';
 import { GET as healthGet } from './health/route';
+import { POST as loginPost } from './auth/login/route';
+import { POST as logoutPost } from './auth/logout/route';
+import { GET as sessionGet } from './auth/session/route';
+import { GeminiThinkingService } from '@/services/ai/gemini-service';
 import { checkRateLimitAsync, MemoryRateLimitStore, UpstashRedisRateLimitStore, getActiveRateLimitStore } from '@/lib/rate-limiter';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
@@ -1158,5 +1162,178 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     // Ensure single authoritative CSP header is set
     const cspValue = pageProxyRes.headers.get('content-security-policy');
     assert.strictEqual(cspValue, cspHeader);
+  });
+
+  test('POST /api/auth/login validates input and issues secure HttpOnly cookies on verified credentials', async () => {
+    // 1. Rejects missing / invalid payload with 400
+    const invalidReq = new NextRequest('http://localhost:3000/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'not-an-email', password: '123' }),
+    });
+    const invalidRes = await loginPost(invalidReq);
+    assert.strictEqual(invalidRes.status, 400, 'Invalid email or short password must return 400');
+
+    // 2. Returns 401 on failed Supabase authentication
+    const origSignIn = supabase.auth.signInWithPassword;
+    try {
+      supabase.auth.signInWithPassword = async () => ({
+        data: { user: null, session: null },
+        error: { message: 'Invalid login credentials', name: 'AuthApiError', status: 400 } as any,
+      });
+
+      const failedReq = new NextRequest('http://localhost:3000/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'valid@thinkmate.ai', password: 'wrongpassword' }),
+      });
+      const failedRes = await loginPost(failedReq);
+      assert.strictEqual(failedRes.status, 401, 'Invalid credentials must return 401');
+
+      // 3. Returns 200 and sets HttpOnly cookies on successful login
+      supabase.auth.signInWithPassword = async () => ({
+        data: {
+          user: { id: 'usr-verified-123', email: 'verified@thinkmate.ai' } as any,
+          session: { access_token: 'mock-jwt-token-xyz', refresh_token: 'mock-refresh' } as any,
+        },
+        error: null,
+      });
+
+      const successReq = new NextRequest('http://localhost:3000/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'verified@thinkmate.ai', password: 'correctpassword123' }),
+      });
+      const successRes = await loginPost(successReq);
+      assert.strictEqual(successRes.status, 200);
+
+      const json = await successRes.json();
+      assert.strictEqual(json.success, true);
+      assert.strictEqual(json.user.id, 'usr-verified-123');
+      assert.strictEqual(json.user.email, 'verified@thinkmate.ai');
+
+      // Check cookie headers
+      const cookieHeader = successRes.headers.get('set-cookie');
+      assert.ok(cookieHeader, 'Response must set auth cookies');
+      assert.ok(cookieHeader.includes('thinkmate_auth_token='), 'Must set thinkmate_auth_token cookie');
+      assert.ok(cookieHeader.includes('HttpOnly'), 'Auth cookie must be HttpOnly');
+    } finally {
+      supabase.auth.signInWithPassword = origSignIn;
+    }
+  });
+
+  test('POST /api/auth/logout clears cookies and enforces CSRF verification', async () => {
+    // 1. Cross-origin logout with ambient cookie is blocked by CSRF
+    const csrfReq = new NextRequest('http://localhost:3000/api/auth/logout', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://attacker.evil.com',
+        Host: 'localhost:3000',
+        Cookie: 'thinkmate_auth_token=victim-cookie',
+      },
+    });
+    const csrfRes = await logoutPost(csrfReq);
+    assert.strictEqual(csrfRes.status, 403, 'Cross-origin logout with ambient cookie must return 403');
+
+    // 2. Same-origin logout clears cookies with maxAge: 0
+    const logoutReq = new NextRequest('http://localhost:3000/api/auth/logout', {
+      method: 'POST',
+      headers: {
+        Origin: 'http://localhost:3000',
+        Host: 'localhost:3000',
+        Cookie: 'thinkmate_auth_token=existing-token',
+      },
+    });
+    const logoutRes = await logoutPost(logoutReq);
+    assert.strictEqual(logoutRes.status, 200);
+    const json = await logoutRes.json();
+    assert.strictEqual(json.success, true);
+
+    const cookieHeader = logoutRes.headers.get('set-cookie');
+    assert.ok(cookieHeader, 'Logout must send set-cookie header');
+    assert.ok(cookieHeader.includes('Max-Age=0') || cookieHeader.includes('Expires='), 'Must expire auth cookies');
+  });
+
+  test('GET /api/auth/session reports verified identity from HttpOnly cookie', async () => {
+    // 1. Unauthenticated request returns authenticated: false
+    const unauthReq = new NextRequest('http://localhost:3000/api/auth/session', {
+      method: 'GET',
+    });
+    const unauthRes = await sessionGet(unauthReq);
+    assert.strictEqual(unauthRes.status, 200);
+    const unauthJson = await unauthRes.json();
+    assert.strictEqual(unauthJson.authenticated, false);
+    assert.strictEqual(unauthJson.user, null);
+
+    // 2. Verified cookie returns authenticated: true with user details
+    const origGetUser = supabase.auth.getUser;
+    try {
+      supabase.auth.getUser = async (token: string) => {
+        if (token === 'valid-user-cookie') {
+          return {
+            data: { user: { id: 'usr-cookie-456', email: 'cookie@thinkmate.ai' } as any },
+            error: null,
+          };
+        }
+        return { data: { user: null }, error: { message: 'Invalid token' } as any };
+      };
+
+      const authReq = new NextRequest('http://localhost:3000/api/auth/session', {
+        method: 'GET',
+        headers: {
+          Cookie: 'thinkmate_auth_token=valid-user-cookie',
+        },
+      });
+      const authRes = await sessionGet(authReq);
+      assert.strictEqual(authRes.status, 200);
+      const authJson = await authRes.json();
+      assert.strictEqual(authJson.authenticated, true);
+      assert.strictEqual(authJson.user.id, 'usr-cookie-456');
+      assert.strictEqual(authJson.user.email, 'cookie@thinkmate.ai');
+    } finally {
+      supabase.auth.getUser = origGetUser;
+    }
+  });
+
+  test('GeminiThinkingService validates structured metadata and refuses synthetic fallbacks', () => {
+    const service = new GeminiThinkingService('dummy-test-key');
+    const events: any[] = [];
+    const onEvent = (e: any) => events.push(e);
+
+    // 1. Valid metadata emits validated structured questions and insights
+    const validMeta = JSON.stringify({
+      suggestedQuestions: ['What is the latency budget?', 'Can we shard by tenant?'],
+      insights: [
+        {
+          category: 'tradeoff',
+          title: 'Latency vs Consistency',
+          content: 'Eventual consistency allows sub-10ms response times.',
+        },
+      ],
+      suggestedMode: 'explore',
+    });
+
+    service.parseAndEmitMetadata(validMeta, 'understand', onEvent);
+    assert.strictEqual(events.length, 3);
+    assert.strictEqual(events[0].type, 'questions');
+    assert.strictEqual(events[0].questions.length, 2);
+    assert.strictEqual(events[1].type, 'insights');
+    assert.strictEqual(events[2].type, 'suggestedMode');
+    assert.strictEqual(events[2].mode, 'explore');
+
+    // 2. Empty string does not emit anything
+    events.length = 0;
+    service.parseAndEmitMetadata('', 'understand', onEvent);
+    assert.strictEqual(events.length, 0, 'Empty metadata string must not emit events');
+
+    // 3. Malformed JSON does NOT emit synthetic default questions (truthful AI failure behavior)
+    events.length = 0;
+    service.parseAndEmitMetadata('{"unclosedJson: true', 'understand', onEvent);
+    assert.strictEqual(events.length, 0, 'Malformed JSON must not emit fake default questions');
+
+    // 4. Schema-violating types do NOT emit questions
+    events.length = 0;
+    service.parseAndEmitMetadata(JSON.stringify({ suggestedQuestions: 'not-an-array' }), 'understand', onEvent);
+    assert.strictEqual(events.length, 0, 'Schema-violating metadata must be rejected');
   });
 });
