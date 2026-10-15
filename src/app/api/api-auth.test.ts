@@ -7,7 +7,7 @@ import { POST as coThinkPost } from './cothink/route';
 import { POST as thinkStreamPost } from './think/stream/route';
 import { POST as workflowTransitionPost } from './workflow/transition/route';
 import { POST as demoCoThinkPost } from './demo/cothink/route';
-import { POST as sessionsPost } from './sessions/route';
+import { GET as sessionsGet, POST as sessionsPost, DELETE as sessionsDelete } from './sessions/route';
 import { POST as insightsPost } from './insights/route';
 import { GET as healthGet } from './health/route';
 import { POST as loginPost } from './auth/login/route';
@@ -1824,20 +1824,28 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       global.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
         const urlStr = String(url);
         if (urlStr.includes('mock-distributed-redis')) {
-          if (urlStr.includes('/set/')) {
-            const parts = urlStr.split('/set/')[1].split('?')[0].split('/');
-            const key = decodeURIComponent(parts[0]);
-            const val = decodeURIComponent(parts[1]);
-            distributedStore.set(key, val);
-            return { ok: true, json: async () => ({ result: 'OK' }) } as unknown as Response;
-          }
-          if (urlStr.includes('/get/')) {
-            const key = decodeURIComponent(urlStr.split('/get/')[1].split('?')[0]);
-            const val = distributedStore.get(key);
-            return {
-              ok: true,
-              json: async () => ({ result: val || null }),
-            } as unknown as Response;
+          assert.strictEqual(init?.method, 'POST', 'Upstash Redis commands must use POST to avoid leaking payloads in URLs');
+          assert.ok(
+            !urlStr.includes('r1-initial-token') && !urlStr.includes('a2-fresh-access-token'),
+            'Sensitive tokens must NEVER appear in request URLs'
+          );
+          const body = typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body;
+          if (Array.isArray(body)) {
+            const cmd = body[0];
+            if (cmd === 'SET') {
+              const key = body[1];
+              const val = body[2];
+              distributedStore.set(key, val);
+              return { ok: true, json: async () => ({ result: 'OK' }) } as unknown as Response;
+            }
+            if (cmd === 'GET') {
+              const key = body[1];
+              const val = distributedStore.get(key);
+              return {
+                ok: true,
+                json: async () => ({ result: val || null }),
+              } as unknown as Response;
+            }
           }
         }
         return origFetch(url, init);
@@ -1885,9 +1893,14 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       assert.strictEqual(resA.data.session?.refresh_token, 'r2-fresh-refresh-token');
       assert.strictEqual(instanceARefreshCalls, 1);
 
-      // Verify rotation was persisted to distributed Redis store
+      // Verify rotation was persisted to distributed Redis store and is encrypted
       const distributedKey = `auth:rotation:${hashTokenKey('r1-initial-token')}`;
       assert.ok(distributedStore.has(distributedKey), 'Rotated session must be persisted in distributed store');
+      const rawStoredVal = distributedStore.get(distributedKey)!;
+      assert.ok(
+        !rawStoredVal.includes('a2-fresh-access-token') && !rawStoredVal.includes('r2-fresh-refresh-token'),
+        'Stored value in Redis must be encrypted AES-256-GCM ciphertext, NOT plaintext tokens'
+      );
 
       // 2. Instance B receives concurrent request with old token r1-initial-token (separate in-memory cache)
       const instanceBCache = new RotationGraceCache(10); // separate instance cache
@@ -1954,6 +1967,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     const origUrl = process.env.UPSTASH_REDIS_REST_URL;
     const origToken = process.env.UPSTASH_REDIS_REST_TOKEN;
     const origFailClosed = process.env.RATE_LIMIT_FAIL_CLOSED;
+    const origAuthFailClosed = process.env.RATE_LIMIT_AUTH_FAIL_CLOSED;
 
     try {
       // 1. Missing credentials in production fails validation and alerts operators
@@ -1972,14 +1986,27 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       const failClosedCheck = await failClosedStore.checkAndRecord!('test-prod-key', 10, 60000);
       assert.strictEqual(failClosedCheck.allowed, false, 'Production without Redis must fail closed by default');
 
-      // 2. Emergency Operator Recovery Runbook: setting RATE_LIMIT_FAIL_CLOSED=false engages memory fallback
+      // 2. Emergency Operator Recovery Runbook: setting RATE_LIMIT_FAIL_CLOSED=false engages memory fallback for non-auth
+      // while auth endpoints REMAIN fail-closed!
       process.env.RATE_LIMIT_FAIL_CLOSED = 'false';
+      const recoveryConfig = verifyRateLimiterConfig();
+      assert.strictEqual(recoveryConfig.failClosedActive, false, 'General fail-closed should be inactive');
+      assert.strictEqual(recoveryConfig.authFailClosedActive, true, 'Auth fail-closed must REMAIN ACTIVE even under general override');
+
       const recoveryStore = getActiveRateLimitStore();
-      const recoveryCheck = await recoveryStore.checkAndRecord!('test-prod-key-recovery', 10, 60000);
+      const nonAuthCheck = await recoveryStore.checkAndRecord!('test-prod-general-key', 10, 60000);
       assert.strictEqual(
-        recoveryCheck.allowed,
+        nonAuthCheck.allowed,
         true,
-        'Operator recovery (RATE_LIMIT_FAIL_CLOSED=false) must engage degraded memory limiter'
+        'Operator recovery (RATE_LIMIT_FAIL_CLOSED=false) engages memory limiter for general routes'
+      );
+
+      // Verify that authentication routes DO NOT weaken and still fail closed under RATE_LIMIT_FAIL_CLOSED=false!
+      const authUnderEmergencyCheck = await recoveryStore.checkAndRecord!('auth:login:1.2.3.4', 5, 60000);
+      assert.strictEqual(
+        authUnderEmergencyCheck.allowed,
+        false,
+        'Auth routes MUST remain fail-closed under emergency RATE_LIMIT_FAIL_CLOSED=false to prevent brute-forcing'
       );
 
       // 3. Valid production configuration
@@ -2003,6 +2030,8 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       else delete process.env.UPSTASH_REDIS_REST_TOKEN;
       if (origFailClosed !== undefined) process.env.RATE_LIMIT_FAIL_CLOSED = origFailClosed;
       else delete process.env.RATE_LIMIT_FAIL_CLOSED;
+      if (origAuthFailClosed !== undefined) process.env.RATE_LIMIT_AUTH_FAIL_CLOSED = origAuthFailClosed;
+      else delete process.env.RATE_LIMIT_AUTH_FAIL_CLOSED;
     }
   });
 
@@ -2097,6 +2126,202 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     assert.strictEqual(replayCount, 1, 'The duplicate simultaneous request must receive idempotent replay');
     assert.strictEqual(committedStage, 'describe_problem', 'Final database stage must be committed cleanly');
     assert.strictEqual(callCount, 2, 'Both independent instances should invoke the database RPC');
+  });
+
+  test('Local and cloud session separation: unauthenticated isolation, sign-in, reload, import, account switching, and deletion', async () => {
+    // 1. Unauthenticated isolation: offline drafts cannot reach cloud API endpoints
+    const unauthGetReq = new NextRequest('http://localhost:3000/api/sessions', {
+      method: 'GET',
+    });
+    const unauthGetRes = await sessionsGet(unauthGetReq);
+    assert.strictEqual(unauthGetRes.status, 401, 'Unauthenticated session GET must return 401');
+
+    const unauthPostReq = new NextRequest('http://localhost:3000/api/sessions', {
+      method: 'POST',
+      headers: {
+        Origin: 'http://localhost:3000',
+        Host: 'localhost:3000',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        title: 'Draft Title',
+        problemStatement: 'Draft Problem',
+      }),
+    });
+    const unauthPostRes = await sessionsPost(unauthPostReq);
+    assert.strictEqual(unauthPostRes.status, 401, 'Unauthenticated session POST must return 401');
+
+    const unauthDelReq = new NextRequest('http://localhost:3000/api/sessions?id=sess-123', {
+      method: 'DELETE',
+      headers: {
+        Origin: 'http://localhost:3000',
+        Host: 'localhost:3000',
+      },
+    });
+    const unauthDelRes = await sessionsDelete(unauthDelReq);
+    assert.strictEqual(unauthDelRes.status, 401, 'Unauthenticated session DELETE must return 401');
+
+    // 2. Sign-in User Alpha & verify session reload
+    const origGetUser = supabase.auth.getUser;
+    const sessionStore = new Map<string, { id: string; user_id: string; title: string; problem_statement: string; current_mode: string; current_stage: string; status: string; created_at: string; updated_at: string }>();
+
+    try {
+      supabase.auth.getUser = (async (token?: string) => {
+        if (token === 'alpha-access-jwt') {
+          return { data: { user: { id: 'usr-alpha-123', email: 'alpha@thinkmate.ai' } }, error: null };
+        }
+        if (token === 'beta-access-jwt') {
+          return { data: { user: { id: 'usr-beta-456', email: 'beta@thinkmate.ai' } }, error: null };
+        }
+        return { data: { user: null }, error: { message: 'Invalid JWT' } };
+      }) as unknown as typeof supabase.auth.getUser;
+
+      // Reload: GET /api/auth/session
+      const reloadAlphaReq = new NextRequest('http://localhost:3000/api/auth/session', {
+        headers: { Cookie: 'thinkmate_auth_token=alpha-access-jwt' },
+      });
+      const reloadAlphaRes = await sessionGet(reloadAlphaReq);
+      const reloadAlphaJson = await reloadAlphaRes.json();
+      assert.strictEqual(reloadAlphaJson.authenticated, true);
+      assert.strictEqual(reloadAlphaJson.user.id, 'usr-alpha-123');
+
+      // 3. Import offline draft into cloud session for User Alpha
+      const origFrom = (supabase as unknown as { from: unknown }).from;
+      (supabase as unknown as { from: unknown }).from = (table: string) => {
+        if (table === 'thinking_sessions') {
+          return {
+            select: () => ({
+              eq: (col: string, val: string) => {
+                if (col === 'id') {
+                  const item = sessionStore.get(val);
+                  return {
+                    maybeSingle: async () => ({ data: item || null, error: null }),
+                  };
+                }
+                if (col === 'user_id') {
+                  const items = Array.from(sessionStore.values()).filter((s) => s.user_id === val);
+                  return {
+                    order: () => ({ data: items, error: null }),
+                  };
+                }
+                return { maybeSingle: async () => ({ data: null, error: null }) };
+              },
+            }),
+            insert: (payload: Record<string, unknown>) => {
+              const id = (payload.id as string) || crypto.randomUUID();
+              const rec = {
+                id,
+                user_id: payload.user_id as string,
+                title: payload.title as string,
+                problem_statement: payload.problem_statement as string,
+                current_mode: (payload.current_mode as string) || 'understand',
+                current_stage: (payload.current_stage as string) || 'welcome',
+                status: (payload.status as string) || 'active',
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              };
+              sessionStore.set(id, rec);
+              return {
+                select: () => ({
+                  single: async () => ({ data: rec, error: null }),
+                }),
+              };
+            },
+            delete: () => ({
+              eq: (_col1: string, val1: string) => ({
+                eq: async (_col2: string, val2: string) => {
+                  const existing = sessionStore.get(val1);
+                  if (existing && existing.user_id === val2) {
+                    sessionStore.delete(val1);
+                  }
+                  return { error: null };
+                },
+              }),
+            }),
+          };
+        }
+        return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }) };
+      };
+
+      try {
+        const importReq = new NextRequest('http://localhost:3000/api/sessions', {
+          method: 'POST',
+          headers: {
+            Origin: 'http://localhost:3000',
+            Host: 'localhost:3000',
+            'Content-Type': 'application/json',
+            Cookie: 'thinkmate_auth_token=alpha-access-jwt',
+          },
+          body: JSON.stringify({
+            title: 'Imported Offline Architecture Dilemma',
+            problemStatement: 'Local draft successfully transitioned to verified cloud session',
+            currentMode: 'understand',
+          }),
+        });
+
+        const importRes = await sessionsPost(importReq);
+        assert.strictEqual(importRes.status, 200);
+        const importJson = await importRes.json();
+        assert.ok(importJson.session?.id, 'Imported session must have assigned UUID');
+        const alphaSessionId = importJson.session.id;
+
+        // 4. Alpha lists sessions
+        const listAlphaReq = new NextRequest('http://localhost:3000/api/sessions', {
+          headers: { Cookie: 'thinkmate_auth_token=alpha-access-jwt' },
+        });
+        const listAlphaRes = await sessionsGet(listAlphaReq);
+        const listAlphaJson = await listAlphaRes.json();
+        assert.strictEqual(listAlphaJson.sessions.length, 1);
+        assert.strictEqual(listAlphaJson.sessions[0].id, alphaSessionId);
+
+        // 5. Account switching: User Beta logs in
+        // User Beta must NOT see Alpha's session in session list
+        const listBetaReq = new NextRequest('http://localhost:3000/api/sessions', {
+          headers: { Cookie: 'thinkmate_auth_token=beta-access-jwt' },
+        });
+        const listBetaRes = await sessionsGet(listBetaReq);
+        const listBetaJson = await listBetaRes.json();
+        assert.strictEqual(listBetaJson.sessions.length, 0, 'User Beta must NOT see User Alpha sessions');
+
+        // User Beta attempting to access Alpha's session by ID returns 404/unauthorized
+        const getBetaForeignReq = new NextRequest(`http://localhost:3000/api/sessions?id=${alphaSessionId}`, {
+          headers: { Cookie: 'thinkmate_auth_token=beta-access-jwt' },
+        });
+        const getBetaForeignRes = await sessionsGet(getBetaForeignReq);
+        assert.strictEqual(getBetaForeignRes.status, 404, 'Foreign session access must be rejected');
+
+        // User Beta attempting to delete Alpha's session is rejected
+        const delBetaForeignReq = new NextRequest(`http://localhost:3000/api/sessions?id=${alphaSessionId}`, {
+          method: 'DELETE',
+          headers: {
+            Origin: 'http://localhost:3000',
+            Host: 'localhost:3000',
+            Cookie: 'thinkmate_auth_token=beta-access-jwt',
+          },
+        });
+        const delBetaForeignRes = await sessionsDelete(delBetaForeignReq);
+        assert.strictEqual(delBetaForeignRes.status, 403, 'Unauthorized foreign deletion must return 403');
+        assert.ok(sessionStore.has(alphaSessionId), 'Alpha session must remain intact after unauthorized delete attempt');
+
+        // 6. User Alpha deletes own session
+        const delAlphaReq = new NextRequest(`http://localhost:3000/api/sessions?id=${alphaSessionId}`, {
+          method: 'DELETE',
+          headers: {
+            Origin: 'http://localhost:3000',
+            Host: 'localhost:3000',
+            Cookie: 'thinkmate_auth_token=alpha-access-jwt',
+          },
+        });
+        const delAlphaRes = await sessionsDelete(delAlphaReq);
+        assert.strictEqual(delAlphaRes.status, 200);
+        assert.strictEqual((await delAlphaRes.json()).success, true);
+        assert.strictEqual(sessionStore.has(alphaSessionId), false, 'Session must be deleted from store');
+      } finally {
+        (supabase as unknown as { from: unknown }).from = origFrom;
+      }
+    } finally {
+      supabase.auth.getUser = origGetUser;
+    }
   });
 
   test('GeminiThinkingService validates structured metadata and refuses synthetic fallbacks', () => {

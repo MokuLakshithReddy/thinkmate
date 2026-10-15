@@ -88,6 +88,13 @@ export async function GET(req: NextRequest) {
     const sessions = await getRepository().getSessions(authUser.id);
     return NextResponse.json({ sessions });
   } catch (err: unknown) {
+    const msg = (err as Error)?.message || '';
+    if (msg.includes('unauthorized') || msg.includes('ownership')) {
+      return NextResponse.json(
+        { error: 'Unauthorized or non-existent session' },
+        { status: 404 }
+      );
+    }
     console.error('Error fetching sessions:', err);
     return NextResponse.json(
       { error: 'Failed to retrieve sessions' },

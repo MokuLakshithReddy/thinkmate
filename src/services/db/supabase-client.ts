@@ -39,7 +39,7 @@ export function getServiceSupabaseClient(): SupabaseClient {
   if (!serviceKey || !supabaseUrl) {
     // If running in unit test environment or during Next.js static build phase
     if (process.env.NODE_ENV === 'test' || process.env.NEXT_PHASE === 'phase-production-build') {
-      return createClient('https://placeholder.supabase.co', 'placeholder-service-key');
+      return supabase;
     }
     throw new Error('SUPABASE_SERVICE_ROLE_KEY and NEXT_PUBLIC_SUPABASE_URL must be configured in environment variables.');
   }

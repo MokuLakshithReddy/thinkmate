@@ -333,9 +333,61 @@ export class RotationGraceCache {
 export const rotationGraceCache = new RotationGraceCache(100);
 
 /**
+ * Deterministically derives a 256-bit AES cluster encryption key shared across server instances.
+ * Allows multiple distinct server nodes/containers to encrypt and decrypt distributed rotation records
+ * in Upstash Redis without storing plaintext JWTs or refresh tokens in the Redis datastore.
+ */
+function getClusterEncryptionKey(): Buffer {
+  const customSecret = process.env.SESSION_ENCRYPTION_KEY || process.env.ROTATION_SECRET;
+  if (customSecret && customSecret.length >= 32) {
+    return Buffer.from(customSecret.slice(0, 32), 'utf8');
+  }
+  const clusterSeed =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    'thinkmate-cluster-rotation-default-seed';
+  return crypto.createHmac('sha256', 'thinkmate:rotation:cluster:v1').update(clusterSeed).digest();
+}
+
+function encryptDistributedPayload(payload: { session: unknown; user: unknown }): string {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', getClusterEncryptionKey(), iv);
+  const json = JSON.stringify(payload);
+  const encrypted = Buffer.concat([cipher.update(json, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString('base64')}.${tag.toString('base64')}.${encrypted.toString('base64')}`;
+}
+
+function decryptDistributedPayload(raw: string): {
+  session: { access_token: string; refresh_token?: string; expires_at?: number };
+  user: { id: string; email?: string };
+} | null {
+  try {
+    const parts = raw.split('.');
+    if (parts.length !== 3) return null;
+    const [ivB64, tagB64, cipherB64] = parts;
+    const iv = Buffer.from(ivB64, 'base64');
+    const tag = Buffer.from(tagB64, 'base64');
+    const ciphertext = Buffer.from(cipherB64, 'base64');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', getClusterEncryptionKey(), iv);
+    decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    return JSON.parse(decrypted.toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Saves rotated session credentials to distributed Redis (if configured)
  * with a strict 10-second TTL to allow parallel server instances to recover
  * from concurrent refresh races and issue updated cookies to the client.
+ *
+ * Security Enhancements:
+ * 1. Payload is authenticated and encrypted via AES-256-GCM with a shared cluster key.
+ * 2. Sent via POST body command array (["SET", key, encryptedPayload, "EX", 10]),
+ *    strictly eliminating sensitive tokens from HTTP request URLs.
  */
 export async function saveDistributedRotatedSession(
   oldRefreshToken: string,
@@ -347,12 +399,16 @@ export async function saveDistributedRotatedSession(
   if (!upstashUrl || !upstashToken) return;
 
   const key = `auth:rotation:${hashTokenKey(oldRefreshToken)}`;
-  const payload = JSON.stringify({ session, user });
+  const encryptedPayload = encryptDistributedPayload({ session, user });
   try {
     const url = upstashUrl.replace(/\/$/, '');
-    await fetch(`${url}/set/${encodeURIComponent(key)}/${encodeURIComponent(payload)}?EX=10`, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${upstashToken}` },
+    await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${upstashToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(['SET', key, encryptedPayload, 'EX', 10]),
     });
   } catch (err) {
     console.warn('[ServerAuth] Failed to persist distributed rotation record:', err);
@@ -362,6 +418,7 @@ export async function saveDistributedRotatedSession(
 /**
  * Retrieves rotated session credentials from distributed Redis (if configured).
  * Enables Instance B to recover the newly rotated session produced by Instance A.
+ * Decrypts the AES-256-GCM ciphertext retrieved via POST body request.
  */
 export async function getDistributedRotatedSession(
   oldRefreshToken: string
@@ -376,13 +433,18 @@ export async function getDistributedRotatedSession(
   const key = `auth:rotation:${hashTokenKey(oldRefreshToken)}`;
   try {
     const url = upstashUrl.replace(/\/$/, '');
-    const res = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
-      headers: { Authorization: `Bearer ${upstashToken}` },
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${upstashToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(['GET', key]),
     });
     if (!res.ok) return null;
     const json = await res.json();
     if (json.result && typeof json.result === 'string') {
-      return JSON.parse(json.result);
+      return decryptDistributedPayload(json.result);
     }
   } catch (err) {
     console.warn('[ServerAuth] Failed to query distributed rotation record:', err);
