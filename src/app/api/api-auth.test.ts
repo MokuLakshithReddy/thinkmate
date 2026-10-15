@@ -1391,8 +1391,160 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       const rotatedCookies = validRes.headers.get('set-cookie');
       assert.ok(rotatedCookies?.includes('thinkmate_auth_token='), 'Must set new access token cookie');
       assert.ok(rotatedCookies?.includes('thinkmate_refresh_token='), 'Must set new rotated refresh token cookie');
+
+      // 5. Concurrent refresh requests under rotation: 5 simultaneous requests with the same token
+      let callCount = 0;
+      supabase.auth.refreshSession = (async () => {
+        callCount++;
+        // Simulate real network delay during upstream rotation
+        await new Promise((r) => setTimeout(r, 10));
+        return {
+          data: {
+            user: { id: 'usr-concurrent-refresh', email: 'concurrent@thinkmate.ai' },
+            session: {
+              access_token: 'concurrent-access-token-jwt',
+              refresh_token: 'concurrent-refresh-token-jwt',
+            },
+          },
+          error: null,
+        };
+      }) as unknown as typeof supabase.auth.refreshSession;
+
+      const concurrentTokens = Array.from({ length: 5 }, () =>
+        new NextRequest('http://localhost:3000/api/auth/refresh', {
+          method: 'POST',
+          headers: {
+            Origin: 'http://localhost:3000',
+            Host: 'localhost:3000',
+            Cookie: 'thinkmate_refresh_token=concurrent-shared-token',
+          },
+        })
+      );
+
+      const concurrentResponses = await Promise.all(concurrentTokens.map((req) => refreshPost(req)));
+
+      assert.strictEqual(
+        callCount,
+        1,
+        `Expected exactly 1 upstream refreshSession call due to in-flight deduplication, got ${callCount}`
+      );
+
+      for (const res of concurrentResponses) {
+        assert.strictEqual(res.status, 200, 'All concurrent refresh requests must succeed');
+        const json = await res.json();
+        assert.strictEqual(json.success, true);
+        assert.strictEqual(json.user.id, 'usr-concurrent-refresh');
+        const cookies = res.headers.get('set-cookie');
+        assert.ok(cookies?.includes('thinkmate_auth_token='), 'Each request must receive valid cookie');
+      }
     } finally {
       supabase.auth.refreshSession = origRefresh;
+    }
+  });
+
+  test('POST /api/think/stream enforces session ownership, mode alignment, and decision gates', async () => {
+    const origGetUser = supabase.auth.getUser;
+    const origGetSession = SupabaseThinkingRepository.prototype.getSession;
+    const origGetInsights = SupabaseThinkingRepository.prototype.getInsights;
+
+    try {
+      supabase.auth.getUser = (async (token: string) => {
+        if (token === 'valid-auth-token') {
+          return { data: { user: { id: 'usr-stream-test', email: 'streamer@thinkmate.ai' } }, error: null };
+        }
+        return { data: { user: null }, error: { message: 'Invalid' } };
+      }) as unknown as typeof supabase.auth.getUser;
+
+      // 1. Rejects non-existent / unauthorized session with 404
+      SupabaseThinkingRepository.prototype.getSession = async () => null;
+
+      const nonExistentReq = new NextRequest('http://localhost:3000/api/think/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer valid-auth-token',
+        },
+        body: JSON.stringify({
+          sessionId: 'missing-session-uuid',
+          problemStatement: 'Some statement',
+          currentMode: 'understand',
+          messages: [{ role: 'user', content: 'hello' }],
+        }),
+      });
+
+      const nonExistentRes = await thinkStreamPost(nonExistentReq);
+      assert.strictEqual(nonExistentRes.status, 404, 'Must return 404 on non-existent session');
+
+      // 2. Rejects workflow mode mismatch (e.g. session is in explore, request claims understand) with 400
+      SupabaseThinkingRepository.prototype.getSession = async () => ({
+        id: 'sess-mode-test',
+        userId: 'usr-stream-test',
+        title: 'Session Test',
+        problemStatement: 'Some statement',
+        currentMode: 'explore',
+        currentStage: 'explore_perspectives',
+        status: 'active',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      const mismatchReq = new NextRequest('http://localhost:3000/api/think/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer valid-auth-token',
+        },
+        body: JSON.stringify({
+          sessionId: 'sess-mode-test',
+          problemStatement: 'Some statement',
+          currentMode: 'understand', // mismatch with session.currentMode ('explore')
+          messages: [{ role: 'user', content: 'hello' }],
+        }),
+      });
+
+      const mismatchRes = await thinkStreamPost(mismatchReq);
+      assert.strictEqual(mismatchRes.status, 400, 'Must reject mode mismatch with 400');
+      const mismatchJson = await mismatchRes.json();
+      assert.ok(mismatchJson.error.includes('Workflow execution mismatch'));
+
+      // 3. Rejects act mode when session lacks accepted decision insight with 400
+      SupabaseThinkingRepository.prototype.getSession = async () => ({
+        id: 'sess-act-gate',
+        userId: 'usr-stream-test',
+        title: 'Act Gate Session',
+        problemStatement: 'Ready to act',
+        currentMode: 'act',
+        currentStage: 'choose_action',
+        status: 'active',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      // No accepted decision insight
+      SupabaseThinkingRepository.prototype.getInsights = async () => [];
+
+      const actGateReq = new NextRequest('http://localhost:3000/api/think/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer valid-auth-token',
+        },
+        body: JSON.stringify({
+          sessionId: 'sess-act-gate',
+          problemStatement: 'Ready to act',
+          currentMode: 'act',
+          messages: [{ role: 'user', content: 'Action plan' }],
+        }),
+      });
+
+      const actGateRes = await thinkStreamPost(actGateReq);
+      assert.strictEqual(actGateRes.status, 400, 'Must deny act mode when no decision exists');
+      const actGateJson = await actGateRes.json();
+      assert.ok(actGateJson.error.includes('cannot execute in "act" mode without at least one accepted decision insight'));
+    } finally {
+      supabase.auth.getUser = origGetUser;
+      SupabaseThinkingRepository.prototype.getSession = origGetSession;
+      SupabaseThinkingRepository.prototype.getInsights = origGetInsights;
     }
   });
 

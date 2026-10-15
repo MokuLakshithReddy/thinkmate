@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/services/db/supabase-client';
-import { clearAuthCookies, isSameOriginRequest } from '@/lib/server-auth';
+import { clearAuthCookies, isSameOriginRequest, revokeUserSession } from '@/lib/server-auth';
 
 export async function POST(req: NextRequest) {
   // CSRF validation on state-changing logout
@@ -11,7 +10,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Extract token if present to sign out upstream
+  // Extract tokens if present to sign out upstream
   const token =
     req.cookies.get('thinkmate_auth_token')?.value ||
     req.cookies.get('sb-access-token')?.value ||
@@ -19,12 +18,12 @@ export async function POST(req: NextRequest) {
       ? req.headers.get('authorization')?.slice(7).trim()
       : undefined);
 
+  const refreshToken =
+    req.cookies.get('thinkmate_refresh_token')?.value ||
+    req.cookies.get('sb-refresh-token')?.value;
+
   if (token) {
-    try {
-      await supabase.auth.signOut();
-    } catch (err) {
-      console.warn('[Auth Logout] Supabase signOut warning:', err);
-    }
+    await revokeUserSession(token, refreshToken);
   }
 
   const response = NextResponse.json({

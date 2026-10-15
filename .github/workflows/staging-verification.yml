@@ -11,6 +11,9 @@ jobs:
     name: Verify Database Concurrency & Migrations
     runs-on: ubuntu-latest
     environment: staging # Protected environment with staging-only secrets
+    permissions:
+      contents: read
+      statuses: write
 
     steps:
       - name: Checkout repository
@@ -32,3 +35,17 @@ jobs:
           STAGING_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
           EXPECTED_STAGING_PROJECT_REF: ${{ vars.EXPECTED_STAGING_PROJECT_REF || secrets.EXPECTED_STAGING_PROJECT_REF }}
         run: npx tsx scripts/verify-supabase-staging.ts
+
+      - name: Publish Staging Commit Status
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          STATE="failure"
+          if [ "$STATUS" = "success" ]; then
+            STATE="success"
+          fi
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }} \
+            -d "{\"state\": \"$STATE\", \"context\": \"staging/database-verification\", \"description\": \"Staging Database Verification $STATE\"}"

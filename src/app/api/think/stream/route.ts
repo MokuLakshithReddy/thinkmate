@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
 
     const requestData = validation.data;
 
-    // Verify session ownership for persisted session
+    // Verify session ownership and enforce authoritative workflow state machine rules
     if (requestData.sessionId) {
       const session = await getRepository().getSession(requestData.sessionId, authUser.id);
       if (!session) {
@@ -76,6 +76,34 @@ export async function POST(req: NextRequest) {
           { error: 'Unauthorized or non-existent session' },
           { status: 404 }
         );
+      }
+
+      // Authoritative mode alignment: client cannot stream against an incompatible mode
+      if (requestData.currentMode !== session.currentMode) {
+        return NextResponse.json(
+          {
+            error: `Workflow execution mismatch: requested mode "${requestData.currentMode}" does not match active session mode "${session.currentMode}".`,
+            sessionMode: session.currentMode,
+            requestedMode: requestData.currentMode,
+          },
+          { status: 400 }
+        );
+      }
+
+      // Decision Gate check: acting mode requires at least one accepted decision insight
+      if (requestData.currentMode === 'act') {
+        const insights = await getRepository().getInsights(requestData.sessionId, authUser.id);
+        const hasAcceptedDecision = insights.some(
+          (i) => i.category === 'decision' && i.status === 'accepted'
+        );
+        if (!hasAcceptedDecision) {
+          return NextResponse.json(
+            {
+              error: 'Workflow transition denied: cannot execute in "act" mode without at least one accepted decision insight.',
+            },
+            { status: 400 }
+          );
+        }
       }
     }
 

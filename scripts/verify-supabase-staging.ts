@@ -372,13 +372,14 @@ async function runStagingVerification() {
     console.log('  ✔ Passed: Partial writes (messages & session updates) atomically rolled back on failure.');
 
     // -------------------------------------------------------------------------
-    // TEST 6: Multi-User Cross-Tenant Isolation
+    // TEST 6: Multi-User Cross-Tenant Isolation & PostgreSQL RLS Enforcement
     // -------------------------------------------------------------------------
-    console.log('\n[Test 6/6] Verifying multi-user cross-tenant isolation...');
+    console.log('\n[Test 6/6] Verifying multi-user cross-tenant isolation & PostgreSQL RLS...');
     const attackerEmail = `staging-attacker-${crypto.randomUUID()}@thinkmate.local`;
+    const attackerPassword = 'StagingAttackerPassword123!';
     const { data: attackerAuth, error: attackerAuthErr } = await serviceClient.auth.admin.createUser({
       email: attackerEmail,
-      password: 'StagingAttackerPassword123!',
+      password: attackerPassword,
       email_confirm: true,
     });
     if (attackerAuthErr || !attackerAuth?.user) {
@@ -386,7 +387,78 @@ async function runStagingVerification() {
     }
     attackerUserId = attackerAuth.user.id;
 
-    // Attacker attempts to modify victim's session via record_workflow_step_tx
+    // Authenticate as Attacker to obtain an authentic user JWT scoped to auth.uid() = attackerUserId
+    const { data: attackerSignIn, error: attackerSignInErr } = await anonClient.auth.signInWithPassword({
+      email: attackerEmail,
+      password: attackerPassword,
+    });
+    if (attackerSignInErr || !attackerSignIn?.session?.access_token) {
+      throw new Error(`Failed to sign in as attacker: ${attackerSignInErr?.message}`);
+    }
+    const attackerToken = attackerSignIn.session.access_token;
+
+    // Create client scoped to Attacker's authenticated JWT (enforcing PostgreSQL RLS)
+    const attackerScopedClient = createClient(SUPABASE_URL, ANON_KEY, {
+      auth: { persistSession: false },
+      global: {
+        headers: {
+          Authorization: `Bearer ${attackerToken}`,
+        },
+      },
+    });
+
+    // 6a. Direct Table RLS SELECT: Attacker attempts to read Victim's session
+    const { data: foreignSessions, error: foreignSessErr } = await attackerScopedClient
+      .from('thinking_sessions')
+      .select('*')
+      .eq('id', testSessionId);
+    if (foreignSessErr) throw new Error(`RLS query error: ${foreignSessErr.message}`);
+    assert.strictEqual(
+      foreignSessions?.length || 0,
+      0,
+      'PostgreSQL RLS violation: Attacker was able to read victim thinking_sessions row'
+    );
+
+    // 6b. Direct Table RLS SELECT: Attacker attempts to read Victim's messages
+    const { data: foreignMsgs, error: foreignMsgsErr } = await attackerScopedClient
+      .from('session_messages')
+      .select('*')
+      .eq('session_id', testSessionId);
+    if (foreignMsgsErr) throw new Error(`RLS query error: ${foreignMsgsErr.message}`);
+    assert.strictEqual(
+      foreignMsgs?.length || 0,
+      0,
+      'PostgreSQL RLS violation: Attacker was able to read victim session_messages'
+    );
+
+    // 6c. Direct Table RLS UPDATE: Attacker attempts to modify Victim's session
+    const { data: updatedRows, error: updateErr } = await attackerScopedClient
+      .from('thinking_sessions')
+      .update({ title: 'Cross-Tenant Malicious Tampering' })
+      .eq('id', testSessionId)
+      .select();
+    if (updateErr) throw new Error(`RLS update error: ${updateErr.message}`);
+    assert.strictEqual(
+      updatedRows?.length || 0,
+      0,
+      'PostgreSQL RLS violation: Attacker was able to update victim thinking_sessions row'
+    );
+
+    // 6d. Direct Table RLS DELETE: Attacker attempts to delete Victim's session
+    const { data: deletedRows, error: deleteErr } = await attackerScopedClient
+      .from('thinking_sessions')
+      .delete()
+      .eq('id', testSessionId)
+      .select();
+    if (deleteErr) throw new Error(`RLS delete error: ${deleteErr.message}`);
+    assert.strictEqual(
+      deletedRows?.length || 0,
+      0,
+      'PostgreSQL RLS violation: Attacker was able to delete victim thinking_sessions row'
+    );
+    console.log('  ✔ Passed: PostgreSQL RLS strictly blocks cross-user read, update, and delete.');
+
+    // 6e. RPC Authorization Check: Attacker attempts to tamper via transactional RPCs
     const { data: crossUserData, error: crossUserErr } = await serviceClient.rpc('record_workflow_step_tx', {
       p_session_id: testSessionId,
       p_user_id: attackerUserId, // Unauthorized cross-user attempt
@@ -407,7 +479,6 @@ async function runStagingVerification() {
       `Expected Unauthorized or session not found, received: ${crossUserErr.message}`
     );
 
-    // Attacker attempts to transition victim's session mode via transition_workflow_mode_tx
     const { data: crossModeData, error: crossModeErr } = await serviceClient.rpc('transition_workflow_mode_tx', {
       p_session_id: testSessionId,
       p_user_id: attackerUserId,
@@ -425,6 +496,16 @@ async function runStagingVerification() {
       `Expected Unauthorized or session not found, received: ${crossModeErr.message}`
     );
     console.log('  ✔ Passed: Multi-user cross-tenant tampering strictly rejected under database locks.');
+
+    // 6f. Server-Side Session Revocation Test: Revoke attacker session
+    const { error: revokeErr } = await serviceClient.auth.admin.signOut(attackerToken);
+    if (revokeErr) throw new Error(`Server-side signOut failed: ${revokeErr.message}`);
+    const { data: userAfterRevoke, error: postLogoutErr } = await serviceClient.auth.getUser(attackerToken);
+    assert.ok(
+      postLogoutErr || !userAfterRevoke?.user,
+      'After server-side session revocation, session must be invalidated and rejected by auth.getUser'
+    );
+    console.log('  ✔ Passed: Server-side session revocation successfully terminates active session.');
 
     console.log('\n' + '='.repeat(75));
     console.log('ALL 6 STAGING DATABASE INTEGRATION TESTS PASSED CLEANLY.');

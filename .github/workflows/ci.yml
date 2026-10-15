@@ -10,6 +10,9 @@ jobs:
   test-and-build:
     name: Lint, Typecheck, Test & Build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
 
     steps:
       - name: Checkout repository
@@ -35,3 +38,17 @@ jobs:
 
       - name: Production Build
         run: npm run build
+
+      - name: Publish Commit Status
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          STATE="failure"
+          if [ "$STATUS" = "success" ]; then
+            STATE="success"
+          fi
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }} \
+            -d "{\"state\": \"$STATE\", \"context\": \"ci/pipeline\", \"description\": \"Lint, Typecheck, Test & Build $STATE\"}"
