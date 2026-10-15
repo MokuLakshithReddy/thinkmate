@@ -85,8 +85,22 @@ async function runStagingVerification() {
     auth: { persistSession: false },
   });
 
-  const testUserId = crypto.randomUUID();
+  let testUserId = '';
+  let attackerUserId = '';
   const testSessionId = crypto.randomUUID();
+
+  // Create disposable test user via Supabase Auth Admin API so foreign key constraints are satisfied
+  const testEmail = `staging-user-${crypto.randomUUID()}@thinkmate.local`;
+  const { data: authUser, error: authErr } = await serviceClient.auth.admin.createUser({
+    email: testEmail,
+    password: 'StagingPassword123!',
+    email_confirm: true,
+  });
+  if (authErr || !authUser?.user) {
+    throw new Error(`Failed to create disposable test user: ${authErr?.message}`);
+  }
+  testUserId = authUser.user.id;
+
   console.log(`Target verified staging database: ${projectHost}`);
   console.log(`Disposable test session: ${testSessionId}`);
   console.log(`Disposable test user: ${testUserId}\n`);
@@ -361,7 +375,16 @@ async function runStagingVerification() {
     // TEST 6: Multi-User Cross-Tenant Isolation
     // -------------------------------------------------------------------------
     console.log('\n[Test 6/6] Verifying multi-user cross-tenant isolation...');
-    const attackerUserId = crypto.randomUUID();
+    const attackerEmail = `staging-attacker-${crypto.randomUUID()}@thinkmate.local`;
+    const { data: attackerAuth, error: attackerAuthErr } = await serviceClient.auth.admin.createUser({
+      email: attackerEmail,
+      password: 'StagingAttackerPassword123!',
+      email_confirm: true,
+    });
+    if (attackerAuthErr || !attackerAuth?.user) {
+      throw new Error(`Failed to create disposable attacker user: ${attackerAuthErr?.message}`);
+    }
+    attackerUserId = attackerAuth.user.id;
 
     // Attacker attempts to modify victim's session via record_workflow_step_tx
     const { data: crossUserData, error: crossUserErr } = await serviceClient.rpc('record_workflow_step_tx', {
@@ -428,6 +451,16 @@ async function runStagingVerification() {
       .delete()
       .eq('id', testSessionId);
     if (delSessErr) cleanupErrors.push(`thinking_sessions deletion failed: ${delSessErr.message}`);
+
+    if (testUserId) {
+      const { error: delUserErr } = await serviceClient.auth.admin.deleteUser(testUserId);
+      if (delUserErr) cleanupErrors.push(`disposable test user deletion failed: ${delUserErr.message}`);
+    }
+
+    if (attackerUserId) {
+      const { error: delAttackerErr } = await serviceClient.auth.admin.deleteUser(attackerUserId);
+      if (delAttackerErr) cleanupErrors.push(`disposable attacker user deletion failed: ${delAttackerErr.message}`);
+    }
 
     if (cleanupErrors.length > 0) {
       console.error('\n[FATAL] Cleanup failures detected:');
