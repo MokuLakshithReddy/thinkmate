@@ -5,7 +5,7 @@ import {
   ThinkingStreamEvent,
 } from './types';
 import { getSystemPrompt } from './prompts';
-import { ThinkingMode, Insight } from '@/types';
+import { ThinkingMode, Insight, normalizeInsightCategory, normalizeInsightStatus } from '@/types';
 import { z } from 'zod';
 
 const StreamMetadataSchema = z.object({
@@ -254,7 +254,12 @@ export class GeminiThinkingService implements ThinkingAIService {
         onEvent({ type: 'questions', questions: data.suggestedQuestions });
       }
       if (data.insights && data.insights.length > 0) {
-        onEvent({ type: 'insights', insights: data.insights as Partial<Insight>[] });
+        const normalizedInsights = data.insights.map((ins) => ({
+          ...ins,
+          category: normalizeInsightCategory(ins.category),
+          status: normalizeInsightStatus(ins.status),
+        }));
+        onEvent({ type: 'insights', insights: normalizedInsights as Partial<Insight>[] });
       }
       if (data.suggestedMode) {
         onEvent({ type: 'suggestedMode', mode: data.suggestedMode });

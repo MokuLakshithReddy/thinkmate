@@ -902,6 +902,90 @@ async function runStagingVerification() {
     );
     console.log('  ✔ Passed: Server-side session revocation successfully terminates active session.');
 
+    // -------------------------------------------------------------------------
+    // 6j. Accepted-Decision Workflow Gate Enforcement Verification
+    // Verifies that both transition_workflow_mode_tx AND record_workflow_step_tx
+    // strictly reject transitions to Act mode or choose_action when no accepted
+    // decision insight exists, preventing bypass of the accepted-decision gate.
+    // -------------------------------------------------------------------------
+    console.log('\nRunning Test 6j: Workflow Accepted-Decision Gate Enforcement across RPCs...');
+    const gateSessionId = crypto.randomUUID();
+    const { error: gateSeedErr } = await serviceClient.from('thinking_sessions').insert({
+      id: gateSessionId,
+      user_id: testUserId,
+      title: 'Gate Verification Session',
+      problem_statement: 'Testing decision gate invariants',
+      current_mode: 'decide',
+      current_stage: 'summarize_insights',
+      status: 'active',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    if (gateSeedErr) throw new Error(`Failed to seed gate test session: ${gateSeedErr.message}`);
+
+    try {
+      // 1. Attempt transition_workflow_mode_tx to 'act' mode without accepted decision insight (MUST FAIL)
+      const { data: noDecTransData, error: noDecTransErr } = await serviceClient.rpc('transition_workflow_mode_tx', {
+        p_session_id: gateSessionId,
+        p_user_id: testUserId,
+        p_expected_mode: 'decide',
+        p_to_mode: 'act',
+        p_reason: 'Bypass attempt without accepted decision',
+      });
+      assert.strictEqual(noDecTransData, null, 'transition_workflow_mode_tx must return null when no decision accepted');
+      assert.ok(noDecTransErr, 'transition_workflow_mode_tx must fail when no accepted decision exists');
+      assert.ok(
+        noDecTransErr.message.includes('accepted decision'),
+        `Expected accepted decision error, received: ${noDecTransErr.message}`
+      );
+
+      // 2. Attempt record_workflow_step_tx to 'choose_action' / 'act' without accepted decision insight (MUST FAIL)
+      const { data: noDecStepData, error: noDecStepErr } = await serviceClient.rpc('record_workflow_step_tx', {
+        p_session_id: gateSessionId,
+        p_user_id: testUserId,
+        p_user_message: 'Let us execute directly',
+        p_assistant_message: 'Executing plan',
+        p_next_stage: 'choose_action',
+        p_next_mode: 'act',
+        p_expected_stage: 'summarize_insights',
+        p_expected_mode: 'decide',
+      });
+      assert.strictEqual(noDecStepData, null, 'record_workflow_step_tx must return null when no decision accepted');
+      assert.ok(noDecStepErr, 'record_workflow_step_tx must fail when no accepted decision exists');
+      assert.ok(
+        noDecStepErr.message.includes('accepted decision'),
+        `Expected accepted decision error, received: ${noDecStepErr.message}`
+      );
+
+      // 3. Now insert an accepted decision insight into the session
+      const { error: accDecErr } = await serviceClient.from('session_insights').insert({
+        id: crypto.randomUUID(),
+        session_id: gateSessionId,
+        category: 'decision',
+        status: 'accepted',
+        title: 'Approved Action Architecture',
+        content: 'Decision has been reviewed and accepted by user.',
+      });
+      if (accDecErr) throw new Error(`Failed to insert accepted decision: ${accDecErr.message}`);
+
+      // 4. Verify transition now succeeds through both RPC paths
+      const { data: okTransData, error: okTransErr } = await serviceClient.rpc('transition_workflow_mode_tx', {
+        p_session_id: gateSessionId,
+        p_user_id: testUserId,
+        p_expected_mode: 'decide',
+        p_to_mode: 'act',
+        p_reason: 'Legitimate transition with accepted decision',
+      });
+      assert.strictEqual(okTransErr, null, 'transition_workflow_mode_tx must succeed with accepted decision');
+      assert.ok(okTransData, 'transition_workflow_mode_tx must return payload with accepted decision');
+
+      console.log('  ✔ Passed: Both transition_workflow_mode_tx and record_workflow_step_tx strictly enforce the accepted-decision gate.');
+    } finally {
+      await serviceClient.from('session_insights').delete().eq('session_id', gateSessionId);
+      await serviceClient.from('workflow_transitions').delete().eq('session_id', gateSessionId);
+      await serviceClient.from('thinking_sessions').delete().eq('id', gateSessionId);
+    }
+
     console.log('\n' + '='.repeat(75));
     console.log('ALL 6 STAGING DATABASE INTEGRATION TESTS PASSED CLEANLY.');
     console.log('='.repeat(75));

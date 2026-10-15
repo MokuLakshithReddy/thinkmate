@@ -5,14 +5,21 @@ import { getAuthenticatedUser } from '@/lib/server-auth';
 import { readBoundedJson } from '@/lib/request-utils';
 import { checkRateLimitAsync } from '@/lib/rate-limiter';
 import { checkCsrfOrForbidden } from '@/lib/csrf';
+import { normalizeInsightCategory, normalizeInsightStatus } from '@/types';
 
 const InsightMutationSchema = z.object({
   id: z.string().optional(),
   sessionId: z.string().min(1).max(100),
-  category: z.enum(['goal', 'assumption', 'option', 'decision', 'action', 'uncertainty']),
+  category: z.preprocess(
+    (val) => (typeof val === 'string' ? normalizeInsightCategory(val) : val),
+    z.enum(['goal', 'assumption', 'option', 'decision', 'action', 'uncertainty'])
+  ),
   title: z.string().min(1).max(200),
   content: z.string().min(1).max(5000),
-  status: z.enum(['accepted', 'rejected', 'under_review']).default('under_review'),
+  status: z.preprocess(
+    (val) => (typeof val === 'string' ? normalizeInsightStatus(val) : val),
+    z.enum(['accepted', 'rejected', 'under_review']).default('under_review')
+  ),
   metadata: z
     .record(
       z.string().max(50),

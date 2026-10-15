@@ -2,6 +2,7 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
+import type { Session, User, AuthError, SupabaseClient } from '@supabase/supabase-js';
 import { NextRequest } from 'next/server';
 import { POST as coThinkPost } from './cothink/route';
 import { POST as thinkStreamPost } from './think/stream/route';
@@ -16,12 +17,13 @@ import { GET as sessionGet } from './auth/session/route';
 import { POST as signupPost } from './auth/signup/route';
 import { POST as refreshPost } from './auth/refresh/route';
 import { GeminiThinkingService } from '@/services/ai/gemini-service';
-import { checkRateLimitAsync, MemoryRateLimitStore, UpstashRedisRateLimitStore, getActiveRateLimitStore, verifyRateLimiterConfig } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, checkRateLimit, getClientIp, MemoryRateLimitStore, UpstashRedisRateLimitStore, getActiveRateLimitStore, verifyRateLimiterConfig } from '@/lib/rate-limiter';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { proxy } from '@/proxy';
-import { SECURE_COOKIE_OPTIONS, RotationGraceCache, revokeUserSession, hashTokenKey } from '@/lib/server-auth';
+import { SECURE_COOKIE_OPTIONS, RotationGraceCache, rotationGraceCache, revokeUserSession, hashTokenKey, getClusterEncryptionKey, refreshUserSession } from '@/lib/server-auth';
+import { normalizeInsightCategory, normalizeInsightStatus } from '@/types';
 
 describe('API Security Boundaries & Authentication Enforcement', () => {
   test('POST /api/cothink rejects unauthenticated callers with 401', async () => {
@@ -2370,5 +2372,255 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     events.length = 0;
     service.parseAndEmitMetadata(JSON.stringify({ suggestedQuestions: 'not-an-array' }), 'understand', onEvent);
     assert.strictEqual(events.length, 0, 'Schema-violating metadata must be rejected');
+  });
+
+  test('Authentication rate limiting unconditionally fails closed in production regardless of overrides', async () => {
+    const origEnv = process.env.NODE_ENV;
+    const origFailClosed = process.env.RATE_LIMIT_FAIL_CLOSED;
+    const origAuthOverride = process.env.RATE_LIMIT_AUTH_FAIL_CLOSED;
+    const origUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const origToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+    try {
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+      process.env.RATE_LIMIT_FAIL_CLOSED = 'false'; // Attempt global override
+      process.env.RATE_LIMIT_AUTH_FAIL_CLOSED = 'false'; // Attempt auth override
+      delete process.env.UPSTASH_REDIS_REST_URL;
+      delete process.env.UPSTASH_REDIS_REST_TOKEN;
+
+      // 1. verifyRateLimiterConfig must report authFailClosedActive: true unconditionally in production
+      const config = verifyRateLimiterConfig();
+      assert.strictEqual(config.authFailClosedActive, true, 'authFailClosedActive must remain true unconditionally in production');
+
+      // 2. getActiveRateLimitStore with missing Redis must reject auth endpoints
+      const store = getActiveRateLimitStore();
+      const authResult = await store.checkAndRecord!('auth:login:192.168.1.1', 10, 60000);
+      assert.strictEqual(authResult.allowed, false, 'Auth endpoint must fail closed during production outage');
+      assert.strictEqual(authResult.remaining, 0);
+
+      // 3. checkRateLimit sync helper must also reject auth endpoints
+      const syncResult = checkRateLimit('auth:signup:192.168.1.1', 5, 60000, store);
+      assert.strictEqual(syncResult.allowed, false, 'checkRateLimit must reject auth endpoints unconditionally in production');
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = origEnv;
+      if (origFailClosed !== undefined) process.env.RATE_LIMIT_FAIL_CLOSED = origFailClosed;
+      else delete process.env.RATE_LIMIT_FAIL_CLOSED;
+      if (origAuthOverride !== undefined) process.env.RATE_LIMIT_AUTH_FAIL_CLOSED = origAuthOverride;
+      else delete process.env.RATE_LIMIT_AUTH_FAIL_CLOSED;
+      if (origUrl !== undefined) process.env.UPSTASH_REDIS_REST_URL = origUrl;
+      if (origToken !== undefined) process.env.UPSTASH_REDIS_REST_TOKEN = origToken;
+    }
+  });
+
+  test('Multi-instance refresh race recovers rotated session from distributed store when GoTrue reports error', async () => {
+    const origRefresh = supabase.auth.refreshSession;
+    const testOldToken = 'multi-instance-race-old-token-' + Date.now();
+    const testNewToken = 'multi-instance-race-new-token-' + Date.now();
+    const mockUser = { id: 'usr-race-test', email: 'race@example.com', app_metadata: {}, user_metadata: {}, aud: 'authenticated', created_at: '' };
+    const mockNewSession = { access_token: 'new-acc-tok', refresh_token: testNewToken, expires_in: 3600, token_type: 'bearer', user: mockUser };
+
+    try {
+      // Set up rotation grace cache with the distributed session directly to simulate Instance A's write
+      rotationGraceCache.set(testOldToken, {
+        session: mockNewSession as unknown as Session,
+        user: mockUser as unknown as User,
+        expiresAt: Date.now() + 8000,
+      });
+
+      // Now Instance B receives a request with the SAME old refresh token.
+      // GoTrue rejects it with an error ("Already used" or invalid grant) because Instance A used it first.
+      supabase.auth.refreshSession = async () => ({
+        data: { session: null, user: null },
+        error: { message: 'Refresh token already rotated / invalid grant' } as unknown as AuthError,
+      });
+
+      // Instance B calls refreshUserSession
+      const result = await refreshUserSession(testOldToken);
+
+      // Instance B recovers the session rotated by Instance A!
+      assert.strictEqual(result.error, null, 'Must successfully recover without error');
+      assert.strictEqual(result.data.session?.refresh_token, testNewToken, 'Must recover rotated refresh token from distributed cache');
+      assert.strictEqual(result.data.user?.id, mockUser.id, 'Must recover user profile');
+    } finally {
+      supabase.auth.refreshSession = origRefresh;
+    }
+  });
+
+  test('getClusterEncryptionKey enforces 32-byte entropy in production', () => {
+    const origEnv = process.env.NODE_ENV;
+    const origKey = process.env.SESSION_ENCRYPTION_KEY;
+    const origSecret = process.env.ROTATION_SECRET;
+    const origServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    try {
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+      delete process.env.SESSION_ENCRYPTION_KEY;
+      delete process.env.ROTATION_SECRET;
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+      // 1. Missing keys in production throws fatal error
+      assert.throws(() => getClusterEncryptionKey(), /SECURITY FATAL/);
+
+      // 2. Secret with < 32 characters in production throws fatal error
+      process.env.SESSION_ENCRYPTION_KEY = 'short-weak-key';
+      assert.throws(() => getClusterEncryptionKey(), /must be at least 32 characters/);
+
+      // 3. Valid 32-character key produces 32-byte Buffer
+      process.env.SESSION_ENCRYPTION_KEY = 'a-super-secret-high-entropy-key-32-chars-long!';
+      const keyBuffer = getClusterEncryptionKey();
+      assert.strictEqual(keyBuffer.length, 32);
+
+      // 4. In test/development, weak key derives 32-byte SHA-256 hash smoothly
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'test';
+      process.env.SESSION_ENCRYPTION_KEY = 'short';
+      const devBuffer = getClusterEncryptionKey();
+      assert.strictEqual(devBuffer.length, 32);
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = origEnv;
+      if (origKey !== undefined) process.env.SESSION_ENCRYPTION_KEY = origKey;
+      else delete process.env.SESSION_ENCRYPTION_KEY;
+      if (origSecret !== undefined) process.env.ROTATION_SECRET = origSecret;
+      else delete process.env.ROTATION_SECRET;
+      if (origServiceKey !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = origServiceKey;
+      else delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    }
+  });
+
+  test('getClientIp uses TRUSTED_PROXY_DEPTH to prevent leftmost IP header spoofing', () => {
+    const origDepth = process.env.TRUSTED_PROXY_DEPTH;
+    try {
+      // Depth 1: picks the rightmost valid proxy hop (closest to our server)
+      process.env.TRUSTED_PROXY_DEPTH = '1';
+      const spoofedReq1 = new Request('http://localhost:3000', {
+        headers: {
+          'x-forwarded-for': '203.0.113.195, 198.51.100.1', // Left is client-forged, Right is proxy
+        },
+      });
+      assert.strictEqual(getClientIp(spoofedReq1), '198.51.100.1');
+
+      // Depth 2: picks 2nd from right
+      process.env.TRUSTED_PROXY_DEPTH = '2';
+      const spoofedReq2 = new Request('http://localhost:3000', {
+        headers: {
+          'x-forwarded-for': '10.0.0.1, 203.0.113.50, 198.51.100.1',
+        },
+      });
+      assert.strictEqual(getClientIp(spoofedReq2), '203.0.113.50');
+    } finally {
+      if (origDepth !== undefined) process.env.TRUSTED_PROXY_DEPTH = origDepth;
+      else delete process.env.TRUSTED_PROXY_DEPTH;
+    }
+  });
+
+  test('AI insight category and status normalization maps broader tags to canonical schema', () => {
+    // Category mapping
+    assert.strictEqual(normalizeInsightCategory('tradeoff'), 'uncertainty');
+    assert.strictEqual(normalizeInsightCategory('trade-off'), 'uncertainty');
+    assert.strictEqual(normalizeInsightCategory('tension'), 'uncertainty');
+    assert.strictEqual(normalizeInsightCategory('risk'), 'uncertainty');
+    assert.strictEqual(normalizeInsightCategory('next_step'), 'action');
+    assert.strictEqual(normalizeInsightCategory('milestone'), 'action');
+    assert.strictEqual(normalizeInsightCategory('decision'), 'decision');
+    assert.strictEqual(normalizeInsightCategory('goal'), 'goal');
+    assert.strictEqual(normalizeInsightCategory('assumption'), 'assumption');
+    assert.strictEqual(normalizeInsightCategory('option'), 'option');
+
+    // Status mapping
+    assert.strictEqual(normalizeInsightStatus('proposed'), 'under_review');
+    assert.strictEqual(normalizeInsightStatus('pending'), 'under_review');
+    assert.strictEqual(normalizeInsightStatus('approved'), 'accepted');
+    assert.strictEqual(normalizeInsightStatus('accepted'), 'accepted');
+    assert.strictEqual(normalizeInsightStatus('rejected'), 'rejected');
+  });
+
+  test('recordWorkflowStep enforces accepted-decision prerequisite when moving to Act mode or choose_action', async () => {
+    const fakeSessionId = crypto.randomUUID();
+    const fakeUserId = crypto.randomUUID();
+
+    // 1. Transactional RPC path: Database RPC throws when moving to choose_action/act without accepted decision
+    const mockClient = {
+      rpc: async (fnName: string, params: Record<string, unknown>) => {
+        if (fnName === 'record_workflow_step_tx') {
+          if (params.p_next_mode === 'act' || params.p_next_stage === 'choose_action') {
+            return {
+              data: null,
+              error: {
+                message: 'Transition denied: Moving to Act mode or choose_action requires at least one accepted decision insight',
+              },
+            };
+          }
+        }
+        return { data: { sessionId: params.p_session_id }, error: null };
+      },
+    } as unknown as SupabaseClient;
+
+    const repoWithRpc = new SupabaseThinkingRepository(mockClient);
+
+    await assert.rejects(
+      async () => {
+        await repoWithRpc.recordWorkflowStep(
+          {
+            sessionId: fakeSessionId,
+            assistantMessage: 'Step message',
+            nextStage: 'choose_action',
+            nextMode: 'act',
+            expectedStage: 'summarize_insights',
+            expectedMode: 'decide',
+          },
+          fakeUserId
+        );
+      },
+      /Transition denied: Moving to Act mode or choose_action requires at least one accepted decision insight/
+    );
+
+    // 2. Fallback path (when RPC is not configured or in unit test mode without RPC client)
+    const mockClientFallback = {
+      from: () => ({
+        insert: () => ({ select: () => ({ single: async () => ({ data: { id: 'msg-fallback' }, error: null }) }) }),
+        update: () => ({ eq: () => ({ eq: async () => ({ error: null }) }) }),
+      }),
+    } as unknown as SupabaseClient;
+
+    const repoFallback = new SupabaseThinkingRepository(mockClientFallback);
+    repoFallback.getSession = async () => ({
+      id: fakeSessionId,
+      userId: fakeUserId,
+      title: 'Test Session',
+      problemStatement: 'Test Problem',
+      currentMode: 'decide',
+      currentStage: 'summarize_insights',
+      status: 'active',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    repoFallback.getInsights = async () => [
+      {
+        id: crypto.randomUUID(),
+        sessionId: fakeSessionId,
+        category: 'decision',
+        title: 'Proposed direction',
+        content: 'Details',
+        status: 'under_review', // NOT accepted!
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ];
+
+    await assert.rejects(
+      async () => {
+        await repoFallback.recordWorkflowStep(
+          {
+            sessionId: fakeSessionId,
+            assistantMessage: 'Step message',
+            nextStage: 'choose_action',
+            nextMode: 'act',
+            expectedStage: 'summarize_insights',
+            expectedMode: 'decide',
+          },
+          fakeUserId
+        );
+      },
+      /Transition denied: Moving to Act mode or choose_action requires at least one accepted decision insight/
+    );
   });
 });

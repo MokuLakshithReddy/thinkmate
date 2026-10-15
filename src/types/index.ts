@@ -219,6 +219,52 @@ export type InsightCategory =
 
 export type InsightStatus = 'accepted' | 'rejected' | 'under_review';
 
+export function normalizeInsightCategory(cat?: string | null): InsightCategory {
+  if (!cat) return 'uncertainty';
+  const c = cat.toLowerCase().trim();
+  switch (c) {
+    case 'goal':
+      return 'goal';
+    case 'assumption':
+      return 'assumption';
+    case 'option':
+      return 'option';
+    case 'decision':
+      return 'decision';
+    case 'action':
+    case 'next_step':
+    case 'nextstep':
+    case 'milestone':
+      return 'action';
+    case 'uncertainty':
+    case 'tension':
+    case 'tradeoff':
+    case 'trade-off':
+    case 'risk':
+      return 'uncertainty';
+    default:
+      return 'uncertainty';
+  }
+}
+
+export function normalizeInsightStatus(status?: string | null): InsightStatus {
+  if (!status) return 'under_review';
+  const s = status.toLowerCase().trim();
+  switch (s) {
+    case 'accepted':
+    case 'approved':
+      return 'accepted';
+    case 'rejected':
+    case 'discarded':
+      return 'rejected';
+    case 'under_review':
+    case 'proposed':
+    case 'pending':
+    default:
+      return 'under_review';
+  }
+}
+
 export interface Insight {
   id: string;
   sessionId: string;

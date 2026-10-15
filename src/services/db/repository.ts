@@ -1,6 +1,6 @@
 import { SupabaseClient } from '@supabase/supabase-js';
 import crypto from 'node:crypto';
-import { ThinkingSession, SessionMessage, Insight, ThinkingMode, CoThinkerStep, ChoiceOption, InsightCategory, InsightStatus } from '@/types';
+import { ThinkingSession, SessionMessage, Insight, ThinkingMode, CoThinkerStep, ChoiceOption, InsightCategory, InsightStatus, normalizeInsightCategory, normalizeInsightStatus } from '@/types';
 import { getServiceSupabaseClient } from './supabase-client';
 
 export interface RecordWorkflowStepParams {
@@ -579,6 +579,15 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       };
     }
 
+    // Accepted Decision Gate: Moving to Act mode or choose_action requires at least one accepted decision
+    if (params.nextMode === 'act' || params.nextStage === 'choose_action') {
+      const insights = await this.getInsights(params.sessionId, userId);
+      const hasAccepted = insights.some((i) => i.category === 'decision' && i.status === 'accepted');
+      if (!hasAccepted) {
+        throw new Error('Transition denied: Moving to Act mode or choose_action requires at least one accepted decision insight');
+      }
+    }
+
     const createdMessageIds: string[] = [];
 
     try {
@@ -1018,14 +1027,17 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
           throw new Error('Security violation: Cannot overwrite insight belonging to another user');
         }
 
+        const category = normalizeInsightCategory(insight.category);
+        const status = normalizeInsightStatus(insight.status);
+
         // Perform explicit safe update
         const { data, error } = await this.client
           .from('session_insights')
           .update({
-            category: insight.category,
+            category,
             title: insight.title,
             content: insight.content,
-            status: insight.status,
+            status,
             metadata: insight.metadata || {},
             updated_at: new Date().toISOString(),
           })
@@ -1040,19 +1052,24 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
 
         return {
           ...insight,
+          category,
+          status,
           id: data.id,
         };
       }
     }
 
+    const category = normalizeInsightCategory(insight.category);
+    const status = normalizeInsightStatus(insight.status);
+
     // 3. New insight insert
     const insertPayload = {
       id: (insight.id && insight.id.includes('-') && insight.id.length === 36) ? insight.id : undefined,
       session_id: insight.sessionId,
-      category: insight.category,
+      category,
       title: insight.title,
       content: insight.content,
-      status: insight.status,
+      status,
       metadata: insight.metadata || {},
       created_at: insight.createdAt || new Date().toISOString(),
       updated_at: new Date().toISOString(),

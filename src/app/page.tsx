@@ -678,6 +678,8 @@ export default function Home() {
     } catch (err) {
       console.warn('Sign out request failed:', err);
     }
+    // Clear all local browser storage on sign-out to prevent data leaks across shared devices
+    clearAllLocalData(true);
     setIsAuthenticated(false);
     setUserEmail(undefined);
     setCloudSessions([]);

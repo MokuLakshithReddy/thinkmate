@@ -204,10 +204,10 @@ export class UpstashRedisRateLimitStore implements RateLimitStore {
 
       let shouldFailClosed = false;
       if (isAuthEndpoint && isProduction) {
-        // Auth endpoints ALWAYS fail-closed in production to prevent brute force / credential stuffing,
-        // even if RATE_LIMIT_FAIL_CLOSED=false is set for emergency non-auth recovery.
-        const authOverride = process.env.RATE_LIMIT_AUTH_FAIL_CLOSED;
-        shouldFailClosed = authOverride !== 'false';
+        // Critical authentication endpoints UNCONDITIONALLY fail closed in production
+        // to prevent brute-force attacks and credential stuffing during Redis degradation.
+        // No emergency availability override is permitted to weaken authentication security.
+        shouldFailClosed = true;
       } else if (failClosedExplicit === 'true') {
         shouldFailClosed = true;
       } else if (failClosedExplicit === 'false') {
@@ -285,9 +285,8 @@ export function verifyRateLimiterConfig(): {
   const failClosedActive =
     process.env.RATE_LIMIT_FAIL_CLOSED === 'true' ||
     (isProduction && process.env.RATE_LIMIT_FAIL_CLOSED !== 'false');
-  const authFailClosedActive =
-    process.env.RATE_LIMIT_AUTH_FAIL_CLOSED === 'true' ||
-    (isProduction && process.env.RATE_LIMIT_AUTH_FAIL_CLOSED !== 'false');
+  // Authentication endpoints UNCONDITIONALLY fail closed in production. No override is permitted.
+  const authFailClosedActive = isProduction;
 
   if (isProduction && !hasUpstash) {
     const errorMsg =
@@ -332,18 +331,18 @@ export function getActiveRateLimitStore(): RateLimitStore {
   // to prevent per-instance quota bypasses in serverless / multi-instance environments.
   if (process.env.NODE_ENV === 'production') {
     const isGeneralRecovery = process.env.RATE_LIMIT_FAIL_CLOSED === 'false';
-    const authFailClosed = process.env.RATE_LIMIT_AUTH_FAIL_CLOSED !== 'false';
 
     return {
       get: () => new Array(10000).fill(Date.now()),
       set: () => {},
       checkAndRecord: (key: string, limit: number, windowMs: number) => {
         const isAuth = key.startsWith('auth:');
-        if (isAuth && authFailClosed) {
+        if (isAuth) {
+          // Authentication endpoints UNCONDITIONALLY fail closed in production
           emitOperatorAlert('CONFIG_MISSING', {
             action: 'AUTH_FAIL_CLOSED_REJECT',
             key,
-            error: 'Authentication endpoints remain strictly fail-closed during production Redis outage.',
+            error: 'Authentication endpoints unconditionally fail closed in production during Redis outage.',
           });
           return {
             allowed: false,
@@ -503,14 +502,20 @@ export function getClientIp(req: Request): string {
     }
   }
 
-  // 3. X-Forwarded-For: find first valid syntactic IP
+  // 3. X-Forwarded-For:
+  // When behind reverse proxies (Vercel, Cloudflare, AWS ALB), each trusted proxy appends
+  // the client IP to the end of the header list. The leftmost IPs can be spoofed by clients.
+  // We inspect from the right based on TRUSTED_PROXY_DEPTH (default: 1) to select the true hop.
   const forwardedFor = req.headers.get('x-forwarded-for');
   if (forwardedFor) {
-    const parts = forwardedFor.split(',').map((p) => p.trim().replace(/:\d+$/, ''));
-    for (const part of parts) {
-      if (isValidIp(part)) {
-        return part;
-      }
+    const validIps = forwardedFor
+      .split(',')
+      .map((p) => p.trim().replace(/:\d+$/, ''))
+      .filter(isValidIp);
+    if (validIps.length > 0) {
+      const depth = Math.max(1, parseInt(process.env.TRUSTED_PROXY_DEPTH || '1', 10));
+      const targetIndex = Math.max(0, validIps.length - depth);
+      return validIps[targetIndex] || validIps[validIps.length - 1];
     }
   }
 

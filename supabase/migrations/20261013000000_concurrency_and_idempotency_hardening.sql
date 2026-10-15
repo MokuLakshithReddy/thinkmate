@@ -62,6 +62,7 @@ DECLARE
   v_result JSONB;
   v_existing_payload JSONB;
   v_existing_hash TEXT;
+  v_has_accepted_decision BOOLEAN := FALSE;
 BEGIN
   -- Caller verification
   IF auth.uid() IS NOT NULL AND auth.uid() != p_user_id THEN
@@ -120,6 +121,20 @@ BEGIN
     (p_next_stage = 'choose_action' AND p_next_mode = 'act')
   ) THEN
     RAISE EXCEPTION 'Invalid workflow stage/mode combination: stage "%" does not match mode "%"', p_next_stage, p_next_mode;
+  END IF;
+
+  -- 4b. Accepted Decision Gate: Moving to Act mode or choose_action requires at least one accepted decision
+  IF p_next_mode = 'act' OR p_next_stage = 'choose_action' THEN
+    SELECT EXISTS (
+      SELECT 1 FROM public.session_insights i
+      WHERE i.session_id = p_session_id
+        AND i.category = 'decision'
+        AND i.status = 'accepted'
+    ) INTO v_has_accepted_decision;
+
+    IF NOT v_has_accepted_decision THEN
+      RAISE EXCEPTION 'Transition denied: Moving to Act mode or choose_action requires at least one accepted decision insight';
+    END IF;
   END IF;
 
   -- 5. Insert user message if provided

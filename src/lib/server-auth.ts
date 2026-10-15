@@ -333,15 +333,33 @@ export class RotationGraceCache {
 export const rotationGraceCache = new RotationGraceCache(100);
 
 /**
- * Deterministically derives a 256-bit AES cluster encryption key shared across server instances.
+ * Resolves a 256-bit AES cluster encryption key shared across server instances.
+ * In production, strictly requires a dedicated SESSION_ENCRYPTION_KEY or ROTATION_SECRET (>= 32 chars).
  * Allows multiple distinct server nodes/containers to encrypt and decrypt distributed rotation records
  * in Upstash Redis without storing plaintext JWTs or refresh tokens in the Redis datastore.
  */
-function getClusterEncryptionKey(): Buffer {
+export function getClusterEncryptionKey(): Buffer {
   const customSecret = process.env.SESSION_ENCRYPTION_KEY || process.env.ROTATION_SECRET;
-  if (customSecret && customSecret.length >= 32) {
+  if (customSecret) {
+    if (customSecret.length < 32) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('SECURITY FATAL: SESSION_ENCRYPTION_KEY must be at least 32 characters (256-bit entropy) in production.');
+      }
+      return crypto.createHash('sha256').update(customSecret).digest();
+    }
     return Buffer.from(customSecret.slice(0, 32), 'utf8');
   }
+
+  if (process.env.NODE_ENV === 'production') {
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (serviceKey && serviceKey.length >= 32) {
+      return crypto.createHmac('sha256', 'thinkmate:rotation:cluster:v1').update(serviceKey).digest();
+    }
+    throw new Error(
+      'SECURITY FATAL: SESSION_ENCRYPTION_KEY (>= 32 characters) must be configured in production for distributed token encryption.'
+    );
+  }
+
   const clusterSeed =
     process.env.SUPABASE_SERVICE_ROLE_KEY ||
     process.env.UPSTASH_REDIS_REST_TOKEN ||
@@ -511,7 +529,7 @@ export async function refreshUserSession(refreshToken: string) {
     return await existingPromise;
   }
 
-  // 4. Launch single authoritative refresh request with cleanup and caching
+  // 4. Launch authoritative refresh request with cleanup, caching, and cross-instance race recovery
   const refreshPromise = (async () => {
     try {
       const result = await supabase.auth.refreshSession({ refresh_token: refreshToken });
@@ -532,7 +550,34 @@ export async function refreshUserSession(refreshToken: string) {
           result.data.session,
           rotationEntry.user
         );
+        return result;
       }
+
+      // 5. Cross-Instance Rotation Race Recovery:
+      // If GoTrue returned an error (e.g. token was rotated by a parallel server node milliseconds earlier),
+      // poll the distributed store with brief retry backoff to check if another instance
+      // successfully rotated and persisted the new credentials.
+      if (result.error) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 60 * (attempt + 1)));
+          const lateRecovered = await getDistributedRotatedSession(refreshToken);
+          if (lateRecovered?.session && lateRecovered?.user) {
+            rotationGraceCache.set(refreshToken, {
+              session: lateRecovered.session,
+              user: lateRecovered.user,
+              expiresAt: Date.now() + 8000,
+            });
+            return {
+              data: {
+                session: lateRecovered.session,
+                user: lateRecovered.user,
+              },
+              error: null,
+            };
+          }
+        }
+      }
+
       return result;
     } finally {
       inFlightRefreshes.delete(tokenKey);
