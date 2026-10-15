@@ -713,7 +713,7 @@ export default function Home() {
   };
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 font-sans antialiased">
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-50 text-slate-900 font-sans antialiased selection:bg-purple-100 selection:text-purple-900">
       {/* Top Header */}
       <TopNav
         viewMode={viewMode}
@@ -730,13 +730,13 @@ export default function Home() {
       />
 
       {/* Main Dual-Pane Workspace */}
-      <main className="flex-1 flex overflow-hidden">
+      <main className="flex-1 flex overflow-hidden bg-slate-50">
         {/* Left Pane: Flowchart Canvas */}
         <section
           className={
             viewMode === 'editor'
-              ? 'flex-1 lg:flex-[1.1] border-r border-slate-800 flex flex-col h-full bg-[#0d1321] transition-all'
-              : 'hidden lg:flex lg:flex-[1.1] border-r border-slate-800 flex-col h-full bg-[#0d1321]'
+              ? 'flex-1 lg:flex-[1.05] border-r border-slate-200/90 flex flex-col h-full bg-slate-50/50 transition-all'
+              : 'hidden lg:flex lg:flex-[1.05] border-r border-slate-200/90 flex-col h-full bg-slate-50/50'
           }
         >
           <WorkflowCanvas
@@ -753,8 +753,8 @@ export default function Home() {
         <section
           className={
             viewMode === 'app'
-              ? 'flex-1 flex flex-col h-full bg-[#0b0f19] transition-all'
-              : 'hidden lg:flex flex-1 flex-col h-full bg-[#0b0f19]'
+              ? 'flex-1 flex flex-col h-full bg-white transition-all overflow-hidden'
+              : 'hidden lg:flex flex-1 lg:flex-[1.15] flex-col h-full bg-white overflow-hidden'
           }
         >
           <PreviewPanel
