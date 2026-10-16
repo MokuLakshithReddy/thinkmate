@@ -117,6 +117,25 @@ export class UpstashRedisRateLimitStore implements RateLimitStore {
     }
   }
 
+  async ping(timeoutMs = 2000): Promise<boolean> {
+    try {
+      const res = await fetch(this.url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(['PING']),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) return false;
+      const json = await res.json();
+      return json.result === 'PONG';
+    } catch {
+      return false;
+    }
+  }
+
   async set(key: string, timestamps: number[]): Promise<void> {
     try {
       await fetch(this.url, {
@@ -273,7 +292,7 @@ export function emitOperatorAlert(
  * Verifies production environment variables for rate limiting.
  * Returns health and configuration diagnostics for deployment readiness probes.
  */
-export function verifyRateLimiterConfig(): {
+export function verifyRateLimiterConfig(options: { emitAlerts?: boolean } = {}): {
   valid: boolean;
   isProduction: boolean;
   hasUpstash: boolean;
@@ -281,6 +300,7 @@ export function verifyRateLimiterConfig(): {
   authFailClosedActive: boolean;
   error?: string;
 } {
+  const emitAlerts = options.emitAlerts !== false;
   const isProduction = process.env.NODE_ENV === 'production';
   const upstashUrl = process.env.UPSTASH_REDIS_REST_URL;
   const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -294,11 +314,13 @@ export function verifyRateLimiterConfig(): {
   if (isProduction && !hasUpstash) {
     const errorMsg =
       'UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN must be configured in production to enforce distributed rate limits.';
-    emitOperatorAlert('CONFIG_MISSING', {
-      error: errorMsg,
-      recovery:
-        'Provision Upstash Redis credentials or set RATE_LIMIT_FAIL_CLOSED=false for emergency degraded per-node memory limiting.',
-    });
+    if (emitAlerts) {
+      emitOperatorAlert('CONFIG_MISSING', {
+        error: errorMsg,
+        recovery:
+          'Provision Upstash Redis credentials or set RATE_LIMIT_FAIL_CLOSED=false for emergency degraded per-node memory limiting.',
+      });
+    }
     return { valid: false, isProduction, hasUpstash, failClosedActive, authFailClosedActive, error: errorMsg };
   }
 
@@ -310,7 +332,7 @@ export function verifyRateLimiterConfig(): {
       }
     } catch (urlErr) {
       const errorMsg = `UPSTASH_REDIS_REST_URL is invalid: ${upstashUrl} (${urlErr instanceof Error ? urlErr.message : String(urlErr)})`;
-      emitOperatorAlert('CONFIG_INVALID', { error: errorMsg });
+      if (emitAlerts) emitOperatorAlert('CONFIG_INVALID', { error: errorMsg });
       return { valid: false, isProduction, hasUpstash, failClosedActive, authFailClosedActive, error: errorMsg };
     }
   }

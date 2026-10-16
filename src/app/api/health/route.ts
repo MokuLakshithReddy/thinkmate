@@ -1,5 +1,49 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServiceSupabaseClient } from '@/services/db/supabase-client';
+import { UpstashRedisRateLimitStore, verifyRateLimiterConfig } from '@/lib/rate-limiter';
+import { getSessionEncryptionKeyStatus } from '@/lib/production-config';
+
+type RateLimiterStatus = 'ready' | 'memory_fallback' | 'unconfigured' | 'invalid' | 'unreachable';
+
+/**
+ * Auth endpoints fail closed in production without a reachable distributed limiter and a dedicated
+ * token-rotation key, so both are readiness requirements there. Only statuses are reported, never values.
+ */
+async function checkAuthInfrastructure() {
+  const isProduction = process.env.NODE_ENV === 'production';
+  const limiterConfig = verifyRateLimiterConfig({ emitAlerts: false });
+
+  let rateLimiterStatus: RateLimiterStatus;
+  if (!limiterConfig.valid) {
+    rateLimiterStatus = limiterConfig.hasUpstash ? 'invalid' : 'unconfigured';
+  } else if (!limiterConfig.hasUpstash) {
+    rateLimiterStatus = 'memory_fallback';
+  } else {
+    const store = new UpstashRedisRateLimitStore(
+      process.env.UPSTASH_REDIS_REST_URL as string,
+      process.env.UPSTASH_REDIS_REST_TOKEN as string
+    );
+    rateLimiterStatus = (await store.ping()) ? 'ready' : 'unreachable';
+  }
+
+  const sessionEncryptionStatus = getSessionEncryptionKeyStatus();
+
+  const ready = isProduction
+    ? rateLimiterStatus === 'ready' && sessionEncryptionStatus === 'ready'
+    : rateLimiterStatus === 'ready' || rateLimiterStatus === 'memory_fallback';
+
+  return {
+    status: (ready ? 'ready' : 'unavailable') as 'ready' | 'unavailable',
+    rateLimiter: {
+      provider: 'Upstash Redis',
+      status: rateLimiterStatus,
+      distributed: rateLimiterStatus === 'ready',
+    },
+    sessionEncryption: {
+      status: sessionEncryptionStatus,
+    },
+  };
+}
 
 /**
  * Health & Readiness Probe.
@@ -34,12 +78,13 @@ export async function GET(req: NextRequest) {
   const hasGeminiKey = !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
   const aiStatus: 'ready' | 'unconfigured' = hasGeminiKey ? 'ready' : 'unconfigured';
 
+  const authInfrastructure = await checkAuthInfrastructure();
+
+  const readyCount = [dbStatus === 'ready', aiStatus === 'ready', authInfrastructure.status === 'ready'].filter(
+    Boolean
+  ).length;
   const overallReadiness: 'ready' | 'degraded' | 'unavailable' =
-    dbStatus === 'ready' && aiStatus === 'ready'
-      ? 'ready'
-      : dbStatus === 'ready' || aiStatus === 'ready'
-      ? 'degraded'
-      : 'unavailable';
+    readyCount === 3 ? 'ready' : readyCount > 0 ? 'degraded' : 'unavailable';
 
   const status = {
     liveness: 'up',
@@ -58,12 +103,13 @@ export async function GET(req: NextRequest) {
         status: aiStatus,
         model: 'gemini-2.5-flash',
       },
+      authInfrastructure,
     },
     version: '0.1.0',
   };
 
   // Production Readiness Rule:
-  // When readiness is probed, ALL required dependencies (database and AI provider) must be fully ready.
+  // When readiness is probed, ALL required dependencies (database, AI provider, auth infrastructure) must be ready.
   // Any degraded or unavailable state returns HTTP 503 Service Unavailable.
   // Standard liveness probe (without ?readiness=true) returns HTTP 200 to indicate process health.
   const isHealthyReadiness = overallReadiness === 'ready';
