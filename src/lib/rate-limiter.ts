@@ -1,3 +1,5 @@
+import { reportOperationalAlert } from '@/lib/monitoring';
+
 export interface RateLimitEntry {
   timestamps: number[];
 }
@@ -272,20 +274,13 @@ const memoryStore = new MemoryRateLimitStore();
 
 /**
  * Emits a structured, high-visibility operator alert to console.error
- * for logging aggregators (Datadog, CloudWatch, GCP Cloud Logging).
+ * and outbound webhooks for logging aggregators (Datadog, CloudWatch, Slack, PagerDuty).
  */
 export function emitOperatorAlert(
   alertType: 'CONFIG_MISSING' | 'REDIS_OUTAGE' | 'CONFIG_INVALID',
   details: Record<string, unknown>
 ): void {
-  const alertPayload = {
-    tag: 'THINKMATE_OPERATOR_ALERT',
-    type: alertType,
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    ...details,
-  };
-  console.error(`\n[OPERATOR ALERT] ${alertType}:`, JSON.stringify(alertPayload, null, 2), '\n');
+  reportOperationalAlert(alertType, details);
 }
 
 /**

@@ -6,6 +6,7 @@ import {
 } from './types';
 import { getSystemPrompt } from './prompts';
 import { ThinkingMode, Insight, normalizeInsightCategory, normalizeInsightStatus } from '@/types';
+import { reportOperationalAlert } from '@/lib/monitoring';
 import { z } from 'zod';
 
 const StreamMetadataSchema = z.object({
@@ -157,6 +158,11 @@ export class GeminiThinkingService implements ThinkingAIService {
       if (abortSignal?.aborted) return;
       const errMsg = (err as Error)?.message || String(err);
       console.warn('Gemini API call encountered error:', errMsg);
+      reportOperationalAlert('AI_PROVIDER_FAILURE', {
+        error: errMsg,
+        mode: request.currentMode,
+        runbook: 'Check Google Gemini API quota, rate limits, and key validity in AI Studio console.',
+      });
       if (process.env.NODE_ENV === 'production') {
         onEvent({
           type: 'error',

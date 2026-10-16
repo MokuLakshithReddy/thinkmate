@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServiceSupabaseClient } from '@/services/db/supabase-client';
 import { UpstashRedisRateLimitStore, verifyRateLimiterConfig } from '@/lib/rate-limiter';
 import { getSessionEncryptionKeyStatus } from '@/lib/production-config';
+import { reportOperationalAlert } from '@/lib/monitoring';
 
 type RateLimiterStatus = 'ready' | 'memory_fallback' | 'unconfigured' | 'invalid' | 'unreachable';
 
@@ -114,6 +115,16 @@ export async function GET(req: NextRequest) {
   // Standard liveness probe (without ?readiness=true) returns HTTP 200 to indicate process health.
   const isHealthyReadiness = overallReadiness === 'ready';
   const httpStatus = isReadiness ? (isHealthyReadiness ? 200 : 503) : 200;
+
+  if (isReadiness && !isHealthyReadiness) {
+    reportOperationalAlert('READINESS_FAILURE', {
+      overallReadiness,
+      dbStatus,
+      aiStatus,
+      authInfrastructureStatus: authInfrastructure.status,
+      runbook: 'Check health endpoint dependencies. Verify Supabase, Gemini API, and Upstash Redis credentials.',
+    });
+  }
 
   return NextResponse.json(status, { status: httpStatus });
 }
