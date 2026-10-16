@@ -101,7 +101,16 @@ export function validateCsrf(req: Request | NextRequest): CsrfValidationResult {
     };
   }
 
-  // 2. Validate request Host header
+  return validateRequestOrigin(req);
+}
+
+/**
+ * Verifies that the request Host is present and that Origin (or, if absent, Referer)
+ * matches the request Host or a configured application origin.
+ * Missing Origin AND Referer is rejected.
+ */
+export function validateRequestOrigin(req: Request | NextRequest): CsrfValidationResult {
+  // Validate request Host header
   const host = req.headers.get('host');
   if (!host) {
     return { allowed: false, reason: 'CSRF violation: missing Host header' };
@@ -186,6 +195,59 @@ export function validateCsrf(req: Request | NextRequest): CsrfValidationResult {
     allowed: false,
     reason: 'CSRF violation: state-changing mutation with cookies requires Origin or Referer header',
   };
+}
+
+
+/**
+ * Strict CSRF policy for unauthenticated credential-entry endpoints (login, signup).
+ *
+ * These routes establish a session rather than consume one, so the ambient-cookie
+ * exemption in validateCsrf does not apply: a forged cross-site login would silently
+ * sign the victim into an attacker-controlled account (login CSRF).
+ *
+ * Rules (applied regardless of cookies or Authorization headers):
+ * 1. Method must be POST.
+ * 2. Content-Type must be application/json. HTML forms cannot send this type, and
+ *    cross-origin fetch with it triggers a CORS preflight that this app never approves.
+ * 3. Sec-Fetch-Site, when present, must not be cross-site.
+ * 4. Origin (or Referer fallback) must match the request Host or a configured app origin.
+ */
+export function validateAuthEntryRequest(req: Request | NextRequest): CsrfValidationResult & { status?: number } {
+  if (req.method.toUpperCase() !== 'POST') {
+    return { allowed: false, reason: `CSRF violation: method ${req.method} not allowed`, status: 405 };
+  }
+
+  const contentType = (req.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (contentType !== 'application/json') {
+    return {
+      allowed: false,
+      reason: 'CSRF violation: credential endpoints require Content-Type application/json',
+      status: 415,
+    };
+  }
+
+  const secFetchSite = req.headers.get('sec-fetch-site');
+  if (secFetchSite && secFetchSite.toLowerCase() === 'cross-site') {
+    return { allowed: false, reason: 'CSRF violation: Sec-Fetch-Site is cross-site for credential endpoint', status: 403 };
+  }
+
+  const originResult = validateRequestOrigin(req);
+  return originResult.allowed ? originResult : { ...originResult, status: 403 };
+}
+
+/**
+ * Enforces validateAuthEntryRequest in route handlers. Returns an error response, or null if allowed.
+ */
+export function checkAuthEntryCsrfOrForbidden(req: Request | NextRequest): NextResponse | null {
+  const result = validateAuthEntryRequest(req);
+  if (!result.allowed) {
+    console.warn(`[CSRF] Blocked credential request: ${result.reason}`);
+    return NextResponse.json(
+      { error: 'Forbidden: CSRF protection validation failed', details: result.reason },
+      { status: result.status || 403 }
+    );
+  }
+  return null;
 }
 
 /**

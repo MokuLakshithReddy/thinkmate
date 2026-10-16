@@ -6,6 +6,8 @@ export interface RateLimitResult {
   allowed: boolean;
   remaining: number;
   resetMs: number;
+  /** True when the request was rejected because the distributed limiter is unavailable or unconfigured (fail-closed). */
+  unavailable?: boolean;
 }
 
 export interface RateLimitStore {
@@ -231,6 +233,7 @@ export class UpstashRedisRateLimitStore implements RateLimitStore {
           allowed: false,
           remaining: 0,
           resetMs: windowMs,
+          unavailable: true,
         };
       }
 
@@ -348,6 +351,7 @@ export function getActiveRateLimitStore(): RateLimitStore {
             allowed: false,
             remaining: 0,
             resetMs: windowMs || 60000,
+            unavailable: true,
           };
         }
 
@@ -365,6 +369,7 @@ export function getActiveRateLimitStore(): RateLimitStore {
           allowed: false,
           remaining: 0,
           resetMs: windowMs || 60000,
+          unavailable: true,
         };
       },
     };
@@ -414,6 +419,8 @@ export async function checkRateLimitAsync(
 
 /**
  * Synchronous sliding window rate limiter per key.
+ * Per-process only: never use for authentication endpoints, which must call checkRateLimitAsync
+ * so limits are shared across instances and survive restarts.
  */
 export function checkRateLimit(
   key: string,
@@ -421,6 +428,15 @@ export function checkRateLimit(
   windowMs: number = 60000,
   store: RateLimitStore = memoryStore
 ): RateLimitResult {
+  if (key.startsWith('auth:') && store === memoryStore && process.env.NODE_ENV === 'production') {
+    emitOperatorAlert('CONFIG_INVALID', {
+      action: 'AUTH_FAIL_CLOSED_REJECT',
+      key,
+      error: 'Synchronous per-process checkRateLimit() called for an auth endpoint; use checkRateLimitAsync().',
+    });
+    return { allowed: false, remaining: 0, resetMs: windowMs, unavailable: true };
+  }
+
   if (store.checkAndRecord) {
     const res = store.checkAndRecord(key, limit, windowMs);
     if ('then' in res) {

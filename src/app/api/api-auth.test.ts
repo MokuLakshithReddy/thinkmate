@@ -1179,7 +1179,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
     // 1. Rejects missing / invalid payload with 400
     const invalidReq = new NextRequest('http://localhost:3000/api/auth/login', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:3000', Host: 'localhost:3000' },
       body: JSON.stringify({ email: 'not-an-email', password: '123' }),
     });
     const invalidRes = await loginPost(invalidReq);
@@ -1195,7 +1195,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
 
       const failedReq = new NextRequest('http://localhost:3000/api/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:3000', Host: 'localhost:3000' },
         body: JSON.stringify({ email: 'valid@thinkmate.ai', password: 'wrongpassword' }),
       });
       const failedRes = await loginPost(failedReq);
@@ -1212,7 +1212,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
 
       const successReq = new NextRequest('http://localhost:3000/api/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:3000', Host: 'localhost:3000' },
         body: JSON.stringify({ email: 'verified@thinkmate.ai', password: 'correctpassword123' }),
       });
       const successRes = await loginPost(successReq);
@@ -1310,7 +1310,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
 
       const unconfirmedReq = new NextRequest('http://localhost:3000/api/auth/signup', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:3000', Host: 'localhost:3000' },
         body: JSON.stringify({ email: 'unconfirmed@thinkmate.ai', password: 'securepassword123' }),
       });
       const unconfirmedRes = await signupPost(unconfirmedReq);
@@ -1335,7 +1335,7 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
 
       const confirmedReq = new NextRequest('http://localhost:3000/api/auth/signup', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:3000', Host: 'localhost:3000' },
         body: JSON.stringify({ email: 'confirmed@thinkmate.ai', password: 'securepassword123' }),
       });
       const confirmedRes = await signupPost(confirmedReq);
