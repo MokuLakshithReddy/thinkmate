@@ -109,8 +109,14 @@ thinkmate/
    - Token rotation is executed exclusively via dedicated, CSRF-validated `POST /api/auth/refresh`.
    - In-memory token rotation grace windows are indexed via SHA-256 hashes (`hashTokenKey`), preventing plaintext tokens from resting in process memory.
    - Logout invokes authoritative server-side session termination against GoTrue via admin APIs or authenticated HTTP endpoints before clearing client cookies.
+   - Refresh race recovery only reports success when it can issue the rotated cookies (recovered from the shared Redis rotation record). Otherwise it returns `401` (`REFRESH_ROTATION_UNRECOVERABLE` when the access token is still valid, without clearing cookies a concurrent response may have just rotated).
+   - Login, signup, and refresh rate limits use the distributed Upstash limiter (`checkRateLimitAsync`). In production, missing Redis configuration or a Redis outage rejects these requests with `503`; there is no per-instance fallback for auth.
 
-2. **Database Concurrency & PostgreSQL RLS**:
+2. **CSRF Policy**:
+   - Cookie-authenticated mutations (`/api/*` POST/PUT/PATCH/DELETE) require `Sec-Fetch-Site` not `cross-site` and an `Origin` (or `Referer`) matching the request host or a configured origin (`APP_URL`, `NEXT_PUBLIC_APP_URL`, `TRUSTED_ORIGINS`, Vercel URLs). Enforced by `src/proxy.ts` and each mutating route.
+   - Credential-entry routes (`POST /api/auth/login`, `POST /api/auth/signup`) enforce the same origin check **even without cookies** (login CSRF), and require `Content-Type: application/json` (`415` otherwise), which HTML forms and no-preflight cross-origin fetches cannot send.
+
+3. **Database Concurrency & PostgreSQL RLS**:
    - Optimistic concurrency control (OCC) is enforced inside PostgreSQL via `record_workflow_step_tx` and `transition_workflow_mode_tx` with row-level `FOR UPDATE` locking.
    - Idempotency is enforced by persistent composite keys `(user_id, session_id, client_request_id)` with request-payload SHA-256 validation.
    - Strict Row Level Security policies guarantee multi-tenant isolation across `thinking_sessions`, `session_messages`, `session_insights`, `workflow_transitions`, and `workflow_idempotency_keys`.
@@ -145,7 +151,7 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ### 4. Run Automated Test Suites
 ```bash
-# Unit & integration test suite (84 tests)
+# Unit & integration test suite
 npm test
 
 # Linter verification (0 errors, 0 warnings)
@@ -169,6 +175,7 @@ npx tsx scripts/verify-supabase-staging.ts
 - **Row Level Security**: Database rows are protected with PostgreSQL RLS policies in `supabase/migrations/20261012000000_thinkmate_schema.sql`.
 - **Ownership Verification**: Endpoints enforce user ownership to block insecure direct-object references (IDOR).
 - **Data Erasure**: Built-in "Wipe All Data" action in Settings allows users to clear all sessions and insights immediately.
+- **Dependency Audit**: CI runs `npm audit --omit=dev --audit-level=high`, so any high-severity advisory in a production dependency fails the build. Known dev-only finding: `braces@3.0.3` ([GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)), pulled in via `eslint-config-next` → `@next/eslint-plugin-next` → `fast-glob` → `micromatch`. No patched `braces` release exists, and npm's suggested fix (downgrading `eslint-config-next` to 14.x) is incompatible with Next.js 16. It only runs inside ESLint on repository-controlled glob patterns and is not part of the production bundle; revisit when upstream ships a fix.
 
 ---
 

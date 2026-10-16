@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { supabase } from '@/services/db/supabase-client';
 import { setAuthCookies } from '@/lib/server-auth';
 import { readBoundedJson } from '@/lib/request-utils';
-import { checkRateLimit, getClientIp } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, getClientIp } from '@/lib/rate-limiter';
+import { checkAuthEntryCsrfOrForbidden } from '@/lib/csrf';
 
 const LoginSchema = z.object({
   email: z.string().email('Please provide a valid email address').max(100),
@@ -11,9 +12,27 @@ const LoginSchema = z.object({
 });
 
 export async function POST(req: NextRequest) {
+  // Login CSRF defense: credential endpoints require same-origin JSON requests even without cookies
+  const csrfError = checkAuthEntryCsrfOrForbidden(req);
+  if (csrfError) {
+    return csrfError;
+  }
+
   // Rate limiting to prevent credential brute-forcing
   const clientIp = getClientIp(req);
-  const rateLimitResult = checkRateLimit(`auth:login:${clientIp}`, 10, 60000);
+  const rateLimitResult = await checkRateLimitAsync(`auth:login:${clientIp}`, 10, 60000);
+
+  if (rateLimitResult.unavailable) {
+    return NextResponse.json(
+      { error: 'Authentication is temporarily unavailable. Please try again shortly.' },
+      {
+        status: 503,
+        headers: {
+          'Retry-After': String(Math.ceil(rateLimitResult.resetMs / 1000)),
+        },
+      }
+    );
+  }
 
   if (!rateLimitResult.allowed) {
     return NextResponse.json(

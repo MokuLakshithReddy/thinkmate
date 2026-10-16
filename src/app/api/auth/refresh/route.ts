@@ -5,6 +5,7 @@ import {
   setAuthCookies,
   clearAuthCookies,
   getAuthenticatedUser,
+  getDistributedRotatedSession,
 } from '@/lib/server-auth';
 import { checkRateLimitAsync, getClientIp } from '@/lib/rate-limiter';
 import { readBoundedJson } from '@/lib/request-utils';
@@ -21,6 +22,17 @@ export async function POST(req: NextRequest) {
   // Rate limiting to prevent token brute-forcing (shared across instances via Upstash Redis)
   const clientIp = getClientIp(req);
   const rateLimitResult = await checkRateLimitAsync(`auth:refresh:${clientIp}`, 20, 60000);
+  if (rateLimitResult.unavailable) {
+    return NextResponse.json(
+      { error: 'Authentication is temporarily unavailable. Please try again shortly.' },
+      {
+        status: 503,
+        headers: {
+          'Retry-After': String(Math.ceil(rateLimitResult.resetMs / 1000)),
+        },
+      }
+    );
+  }
   if (!rateLimitResult.allowed) {
     return NextResponse.json(
       { error: 'Too many token refresh requests. Please wait.' },
@@ -58,23 +70,37 @@ export async function POST(req: NextRequest) {
     const { data, error } = await refreshUserSession(refreshToken);
 
     if (error || !data?.session || !data?.user) {
-      // Cross-Instance Race Recovery:
-      // If refresh failed because the token was already rotated by another instance,
-      // verify if the caller already presents a valid access token before clearing cookies!
+      // Cross-instance race recovery: another instance may have rotated this refresh token.
+      // Only report success when we can hand the browser the rotated credentials.
+      const recovered = await getDistributedRotatedSession(refreshToken);
+      if (recovered?.session && recovered?.user) {
+        const response = NextResponse.json({
+          success: true,
+          user: { id: recovered.user.id, email: recovered.user.email },
+          message: 'Token refreshed via concurrent rotation recovery',
+        });
+        setAuthCookies(response, recovered.session);
+        return response;
+      }
+
+      // Recovery impossible. If the access token is still valid, a concurrent response may already
+      // have delivered fresh cookies, so do not clear them; but do not claim refresh succeeded either.
       const currentUser = await getAuthenticatedUser(req);
       if (currentUser) {
-        return NextResponse.json({
-          success: true,
-          user: currentUser,
-          message: 'Active session confirmed via concurrent rotation',
-        });
+        return NextResponse.json(
+          {
+            error: 'Refresh token was already rotated and the new session could not be recovered',
+            code: 'REFRESH_ROTATION_UNRECOVERABLE',
+            sessionActive: true,
+          },
+          { status: 401 }
+        );
       }
 
       const response = NextResponse.json(
         { error: error?.message || 'Session expired or refresh token revoked' },
         { status: 401 }
       );
-      // Revoke invalid/expired ambient cookies ONLY when access token is also invalid
       clearAuthCookies(response);
       return response;
     }
