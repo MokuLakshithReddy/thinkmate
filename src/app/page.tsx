@@ -304,14 +304,18 @@ export default function Home() {
     [localDraftSessions]
   );
 
-  // Resume session from URL search query parameter ?session=UUID
+  // Resume session from URL search query parameter ?session=UUID. Stop after the first
+  // successful load: loadSessionById changes whenever local drafts are saved.
+  const urlSessionResumedRef = useRef(false);
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || urlSessionResumedRef.current) return;
     const params = new URLSearchParams(window.location.search);
     const sessionParam = params.get('session');
     if (sessionParam) {
-      const timer = setTimeout(() => {
-        loadSessionById(sessionParam);
+      const timer = setTimeout(async () => {
+        if (await loadSessionById(sessionParam)) {
+          urlSessionResumedRef.current = true;
+        }
       }, 0);
       return () => clearTimeout(timer);
     }
@@ -421,6 +425,11 @@ export default function Home() {
       if (selectedOptionId === 'switch_local_draft') {
         explicitLocalDraftRef.current = true;
         updateSessionState(`draft-${Date.now()}`, 'local');
+        if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('session')) {
+          const url = new URL(window.location.href);
+          url.searchParams.delete('session');
+          window.history.replaceState(window.history.state, '', url.toString());
+        }
       }
       pendingRetryRef.current = null;
       baseMessages = messages.filter((m) => m.id !== pending.userMsgId && !m.id.startsWith('msg-auth-'));
@@ -481,6 +490,7 @@ export default function Home() {
       if (kind === 'auth') {
         setIsAuthenticated(false);
       }
+      setCustomOptions(undefined);
       setCustomMessages([...nextHistory, buildPersistenceFailureMessage(kind, detail)]);
     };
 
@@ -860,6 +870,7 @@ export default function Home() {
                 { id: 'switch_local_draft', label: 'Continue as local draft (not synced)' },
               ],
             };
+            setCustomOptions(undefined);
             setCustomMessages((prev) => [...(prev || []).filter((m) => !m.id.startsWith('msg-auth-')), resumeNotice]);
           }
         }}
