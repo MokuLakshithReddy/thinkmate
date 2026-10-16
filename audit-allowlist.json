@@ -1,0 +1,12 @@
+{
+  "advisories": [
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "path": "eslint-config-next > @next/eslint-plugin-next > fast-glob > micromatch > braces",
+      "reason": "Dev-only: reached only through ESLint's Next.js plugin. No patched braces release exists (3.0.3 is the latest), and npm's suggested fix downgrades eslint-config-next to 14.x, which is incompatible with Next.js 16.",
+      "mitigation": "Not shipped in the production bundle (npm audit --omit=dev is clean). braces only expands glob patterns from repository-controlled ESLint configuration, never user input.",
+      "reviewBy": "2027-01-16"
+    }
+  ]
+}
