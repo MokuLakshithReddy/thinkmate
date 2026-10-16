@@ -2,7 +2,7 @@
  * Full-tree dependency audit gate (dev + prod).
  * Fails on any high/critical advisory unless it is listed in audit-allowlist.json with an unexpired reviewBy date.
  */
-import { execFileSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -38,10 +38,17 @@ const root = path.resolve(__dirname, '..');
 function runAudit(): { vulnerabilities?: Record<string, { via: (string | AuditVia)[] }>; error?: unknown } {
   let raw: string;
   try {
-    raw = execFileSync('npm', ['audit', '--json'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    raw = execSync('npm audit --json', {
+      cwd: root,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
   } catch (err) {
     // npm audit exits non-zero when it finds vulnerabilities; the JSON report is still on stdout.
     raw = (err as { stdout?: string }).stdout || '';
+  }
+  if (!raw.trim()) {
+    throw new Error('npm audit returned empty output');
   }
   return JSON.parse(raw);
 }

@@ -5,6 +5,7 @@ import { setAuthCookies } from '@/lib/server-auth';
 import { readBoundedJson } from '@/lib/request-utils';
 import { checkRateLimitAsync, getClientIp } from '@/lib/rate-limiter';
 import { checkAuthEntryCsrfOrForbidden } from '@/lib/csrf';
+import { recordAuthFailure } from '@/lib/monitoring';
 
 const LoginSchema = z.object({
   email: z.string().email('Please provide a valid email address').max(100),
@@ -74,6 +75,7 @@ export async function POST(req: NextRequest) {
     });
 
     if (error || !data?.session) {
+      recordAuthFailure(clientIp, '/api/auth/login');
       return NextResponse.json(
         { error: error?.message || 'Invalid credentials' },
         { status: 401 }
