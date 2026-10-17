@@ -378,4 +378,83 @@ describe('Operational Monitoring & Alerting System', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it('regression: Redis errors (HTTP or error payload) are not confused with alert-exists and preserve alerts via in-memory fallback', async () => {
+    process.env.UPSTASH_REDIS_REST_URL = 'https://broken-redis.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'broken-token';
+
+    const originalFetch = globalThis.fetch;
+
+    try {
+      // Test 1: Redis returns a command error payload in HTTP 200 (e.g. NOPERM or OOM)
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({ error: 'NOPERM this user has no permissions to run the SET command' }));
+      }) as typeof fetch;
+
+      _resetMonitoringState();
+      const alertWithErrorPayload = await reportOperationalAlertAsync('REDIS_OUTAGE', {
+        error: 'Permission denied',
+        key: 'auth:login:10.0.0.1',
+      });
+
+      assert.ok(alertWithErrorPayload, 'Must NOT confuse Redis JSON error with legitimate "alert already exists" (result: null)');
+      assert.strictEqual(alertWithErrorPayload?.type, 'REDIS_OUTAGE');
+
+      // Test 2: Redis returns HTTP 500/503 service unavailable
+      globalThis.fetch = (async () => {
+        return new Response('Internal Server Error', { status: 500 });
+      }) as typeof fetch;
+
+      _resetMonitoringState();
+      const alertWithHttp500 = await reportOperationalAlertAsync('REDIS_OUTAGE', {
+        error: 'Upstash outage',
+        key: 'auth:login:10.0.0.2',
+      });
+
+      assert.ok(alertWithHttp500, 'Must preserve alert via in-memory fallback when Redis returns HTTP 500');
+      assert.strictEqual(alertWithHttp500?.type, 'REDIS_OUTAGE');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('regression: multiple instances reporting the same failure simultaneously against shared Redis emit exactly one alert', async () => {
+    process.env.UPSTASH_REDIS_REST_URL = 'https://cluster-redis.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'cluster-token';
+
+    const sharedRedisStore = new Map<string, unknown>();
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const parsedBody = JSON.parse(String(init?.body || '[]'));
+      const command = parsedBody[0];
+
+      if (command === 'SET') {
+        const key = String(parsedBody[1]);
+        const isNx = parsedBody.includes('NX');
+        if (isNx && sharedRedisStore.has(key)) {
+          return new Response(JSON.stringify({ result: null }));
+        }
+        sharedRedisStore.set(key, parsedBody[2]);
+        return new Response(JSON.stringify({ result: 'OK' }));
+      }
+
+      return new Response(JSON.stringify({ result: null }));
+    }) as typeof fetch;
+
+    try {
+      _resetMonitoringState();
+
+      // Simulate Instance 1 and Instance 2 executing reportOperationalAlertAsync concurrently
+      const [instance1Result, instance2Result] = await Promise.all([
+        reportOperationalAlertAsync('AI_PROVIDER_FAILURE', { error: 'Gemini rate limit', key: 'global-provider' }),
+        reportOperationalAlertAsync('AI_PROVIDER_FAILURE', { error: 'Gemini rate limit', key: 'global-provider' }),
+      ]);
+
+      const emittedCount = (instance1Result ? 1 : 0) + (instance2Result ? 1 : 0);
+      assert.strictEqual(emittedCount, 1, 'Simultaneous multi-instance contention must yield exactly 1 emitted alert');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

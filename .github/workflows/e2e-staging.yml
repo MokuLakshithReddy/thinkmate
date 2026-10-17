@@ -16,11 +16,12 @@ jobs:
   staging-e2e:
     name: Browser E2E (deployed staging)
     runs-on: ubuntu-latest
+    environment: staging
     permissions:
       contents: read
     env:
-      E2E_BASE_URL: ${{ github.event.inputs.base_url || secrets.E2E_BASE_URL }}
-      E2E_TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
+      E2E_BASE_URL: ${{ github.event.inputs.base_url || vars.E2E_BASE_URL || secrets.E2E_BASE_URL }}
+      E2E_TEST_EMAIL: ${{ vars.E2E_TEST_EMAIL || secrets.E2E_TEST_EMAIL }}
       E2E_TEST_PASSWORD: ${{ secrets.E2E_TEST_PASSWORD }}
     steps:
       - name: Require a staging URL
