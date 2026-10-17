@@ -328,4 +328,54 @@ describe('Operational Monitoring & Alerting System', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it('regression: readiness-failure alerts route through reportOperationalAlertAsync and deduplicate across separate instances', async () => {
+    process.env.UPSTASH_REDIS_REST_URL = 'https://cluster-redis.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'cluster-token';
+
+    const sharedRedisStore = new Map<string, unknown>();
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const parsedBody = JSON.parse(String(init?.body || '[]'));
+      const command = parsedBody[0];
+
+      if (command === 'SET') {
+        const key = String(parsedBody[1]);
+        const isNx = parsedBody.includes('NX');
+        if (isNx && sharedRedisStore.has(key)) {
+          return new Response(JSON.stringify({ result: null }));
+        }
+        sharedRedisStore.set(key, parsedBody[2]);
+        return new Response(JSON.stringify({ result: 'OK' }));
+      }
+
+      return new Response(JSON.stringify({ result: null }));
+    }) as typeof fetch;
+
+    try {
+      // Instance 1 reports readiness failure for route /api/health
+      _resetMonitoringState();
+      const alert1 = await reportOperationalAlertAsync('READINESS_FAILURE', {
+        route: '/api/health',
+        overallReadiness: 'unavailable',
+        dbStatus: 'unavailable',
+      });
+      assert.ok(alert1, 'Instance 1 should emit readiness failure alert');
+      assert.strictEqual(alert1?.type, 'READINESS_FAILURE');
+
+      // Instance 2 (completely clean memory, separate container) probes the same degraded health route
+      _resetMonitoringState();
+      const alert2 = await reportOperationalAlertAsync('READINESS_FAILURE', {
+        route: '/api/health',
+        overallReadiness: 'unavailable',
+        dbStatus: 'unavailable',
+      });
+
+      // Instance 2 must be suppressed because Redis already acquired the lock
+      assert.strictEqual(alert2, null, 'Instance 2 must suppress duplicate readiness alert across instances');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

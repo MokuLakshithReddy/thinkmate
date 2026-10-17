@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServiceSupabaseClient } from '@/services/db/supabase-client';
 import { UpstashRedisRateLimitStore, verifyRateLimiterConfig } from '@/lib/rate-limiter';
 import { getSessionEncryptionKeyStatus } from '@/lib/production-config';
-import { reportOperationalAlert } from '@/lib/monitoring';
+import { reportOperationalAlertAsync } from '@/lib/monitoring';
 
 type RateLimiterStatus = 'ready' | 'memory_fallback' | 'unconfigured' | 'invalid' | 'unreachable';
 
@@ -117,7 +117,7 @@ export async function GET(req: NextRequest) {
   const httpStatus = isReadiness ? (isHealthyReadiness ? 200 : 503) : 200;
 
   if (isReadiness && !isHealthyReadiness) {
-    reportOperationalAlert('READINESS_FAILURE', {
+    await reportOperationalAlertAsync('READINESS_FAILURE', {
       overallReadiness,
       dbStatus,
       aiStatus,
