@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { reportOperationalAlert, reportOperationalAlertAsync } from '@/lib/monitoring';
 import { NextResponse } from 'next/server';
 
@@ -556,12 +557,56 @@ export function checkRateLimit(
 }
 
 /**
- * Validates whether a candidate string is a syntactic IPv4 or IPv6 address.
+ * Standards-compliant IPv4 and IPv6 parser and validator.
+ * Correctly handles:
+ * - Bracketed IPv6: [2001:db8::1], [2001:db8::1]:8080
+ * - Compressed IPv6: 2001:db8::1, fe80::1, ::1, ::
+ * - Full IPv6: 2001:0db8:85a3:0000:0000:8a2e:0370:7334
+ * - IPv4-mapped IPv6: ::ffff:192.0.2.1
+ * - IPv4 with or without port: 192.0.2.1:8080, 192.0.2.1
+ * Rejects invalid IPs, malformed brackets, out-of-range ports, and garbage strings.
  */
-function isValidIp(ip: string): boolean {
-  const ipv4Regex = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
-  const ipv6Regex = /^([0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}$|^::1$|^::$/;
-  return ipv4Regex.test(ip) || ipv6Regex.test(ip);
+export function parseAndValidateIp(raw: unknown): string | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  // 1. Bracketed IPv6: [2001:db8::1] or [2001:db8::1]:8080
+  const bracketMatch = trimmed.match(/^\[([0-9a-fA-F:.]+)\](?::(\d+))?$/);
+  if (bracketMatch) {
+    const ip = bracketMatch[1];
+    const port = bracketMatch[2];
+    if (port !== undefined) {
+      const p = parseInt(port, 10);
+      if (p < 1 || p > 65535) return null;
+    }
+    return isIP(ip) === 6 ? ip : null;
+  }
+
+  // 2. IPv4 with optional port: 192.0.2.1:8080
+  const ipv4WithPortMatch = trimmed.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)$/);
+  if (ipv4WithPortMatch) {
+    const ip = ipv4WithPortMatch[1];
+    const port = parseInt(ipv4WithPortMatch[2], 10);
+    if (port < 1 || port > 65535) return null;
+    return isIP(ip) === 4 ? ip : null;
+  }
+
+  // 3. Plain IPv4 or unbracketed IPv6
+  const type = isIP(trimmed);
+  if (type === 4 || type === 6) {
+    return trimmed;
+  }
+
+  return null;
+}
+
+/**
+ * Validates whether a candidate string is a syntactic IPv4 or IPv6 address.
+ * Standards-compliant: supports compressed IPv6, bracketed formats, and ports.
+ */
+export function isValidIp(ip: string): boolean {
+  return parseAndValidateIp(ip) !== null;
 }
 
 /**
@@ -576,7 +621,10 @@ export function getClientIp(req: Request): string {
   if (trustedHeader) {
     const val = req.headers.get(trustedHeader)?.trim();
     if (val) {
-      const parts = val.split(',').map((p) => p.trim().replace(/:\d+$/, '')).filter(isValidIp);
+      const parts = val
+        .split(',')
+        .map((p) => parseAndValidateIp(p.trim()))
+        .filter((ip): ip is string => ip !== null);
       if (parts.length > 0) {
         const depth = Math.max(1, parseInt(process.env.TRUSTED_PROXY_DEPTH || '1', 10));
         const targetIndex = Math.max(0, parts.length - depth);
@@ -597,9 +645,10 @@ export function getClientIp(req: Request): string {
   if (proxyProvider === 'vercel' || Boolean(process.env.VERCEL)) {
     const vercelIp = req.headers.get('x-vercel-forwarded-for')?.trim();
     if (vercelIp) {
-      const cleanVercel = vercelIp.split(',')[0].trim().replace(/:\d+$/, '');
-      if (isValidIp(cleanVercel)) {
-        return cleanVercel;
+      const firstCandidate = vercelIp.split(',')[0].trim();
+      const parsed = parseAndValidateIp(firstCandidate);
+      if (parsed) {
+        return parsed;
       }
     }
   }
@@ -607,8 +656,11 @@ export function getClientIp(req: Request): string {
   // 2. Cloudflare edge verified client IP: ONLY trust when explicitly configured or designated
   if (proxyProvider === 'cloudflare') {
     const cfConnectingIp = req.headers.get('cf-connecting-ip')?.trim();
-    if (cfConnectingIp && isValidIp(cfConnectingIp)) {
-      return cfConnectingIp;
+    if (cfConnectingIp) {
+      const parsed = parseAndValidateIp(cfConnectingIp);
+      if (parsed) {
+        return parsed;
+      }
     }
   }
 
@@ -616,14 +668,14 @@ export function getClientIp(req: Request): string {
   if (proxyProvider === 'nginx' || proxyProvider === 'custom') {
     const realIp = req.headers.get('x-real-ip')?.trim();
     if (realIp) {
-      const cleanReal = realIp.replace(/:\d+$/, '');
-      if (isValidIp(cleanReal)) {
-        return cleanReal;
+      const parsed = parseAndValidateIp(realIp);
+      if (parsed) {
+        return parsed;
       }
     }
   }
 
-  // 3. X-Forwarded-For:
+  // 4. X-Forwarded-For:
   // When behind reverse proxies (Vercel, AWS ALB, Node cluster), each trusted proxy appends
   // the client IP to the end of the header list. The leftmost IPs can be spoofed by clients.
   // We inspect from the right based on TRUSTED_PROXY_DEPTH (default: 1) to select the true hop.
@@ -632,8 +684,8 @@ export function getClientIp(req: Request): string {
   if (forwardedFor) {
     const validIps = forwardedFor
       .split(',')
-      .map((p) => p.trim().replace(/:\d+$/, ''))
-      .filter(isValidIp);
+      .map((p) => parseAndValidateIp(p.trim()))
+      .filter((ip): ip is string => ip !== null);
     if (validIps.length > 0) {
       const depth = Math.max(1, parseInt(process.env.TRUSTED_PROXY_DEPTH || '1', 10));
       const targetIndex = Math.max(0, validIps.length - depth);
@@ -641,11 +693,14 @@ export function getClientIp(req: Request): string {
     }
   }
 
-  // 4. In test/development only, allow x-real-ip or cf-connecting-ip as ergonomic fallback
+  // 5. In test/development only, allow x-real-ip or cf-connecting-ip as ergonomic fallback
   if (process.env.NODE_ENV !== 'production') {
-    const fallbackReal = req.headers.get('x-real-ip')?.trim().replace(/:\d+$/, '') || req.headers.get('cf-connecting-ip')?.trim();
-    if (fallbackReal && isValidIp(fallbackReal)) {
-      return fallbackReal;
+    const fallbackVal = req.headers.get('x-real-ip')?.trim() || req.headers.get('cf-connecting-ip')?.trim();
+    if (fallbackVal) {
+      const parsed = parseAndValidateIp(fallbackVal);
+      if (parsed) {
+        return parsed;
+      }
     }
   }
 
