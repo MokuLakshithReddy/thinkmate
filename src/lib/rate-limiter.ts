@@ -282,7 +282,9 @@ export function emitOperatorAlert(
   alertType: 'CONFIG_MISSING' | 'REDIS_OUTAGE' | 'CONFIG_INVALID',
   details: Record<string, unknown>
 ): void {
-  reportOperationalAlert(alertType, details);
+  void reportOperationalAlertAsync(alertType, details).catch(() => {
+    reportOperationalAlert(alertType, details);
+  });
 }
 
 /**

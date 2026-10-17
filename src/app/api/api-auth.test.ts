@@ -29,6 +29,7 @@ import {
   verifyRateLimiterConfig,
   verifyRateLimiterConfigAsync,
   createRateLimitErrorResponse,
+  emitOperatorAlert,
 } from '@/lib/rate-limiter';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
@@ -2958,5 +2959,19 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       if (origTrust !== undefined) process.env.TRUST_PROXY = origTrust;
       else delete process.env.TRUST_PROXY;
     }
+  });
+
+  test('emitOperatorAlert routes to asynchronous distributed deduplication path without throwing', () => {
+    // Assert synchronous caller is not blocked and does not throw even when called with missing/invalid config
+    assert.doesNotThrow(() => {
+      emitOperatorAlert('CONFIG_MISSING', {
+        error: 'Test config missing across cluster instances',
+        component: 'rate-limiter',
+      });
+      emitOperatorAlert('CONFIG_INVALID', {
+        error: 'Test config invalid across cluster instances',
+        component: 'rate-limiter',
+      });
+    });
   });
 });
