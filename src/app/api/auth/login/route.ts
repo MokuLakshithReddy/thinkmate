@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { supabase } from '@/services/db/supabase-client';
 import { setAuthCookies } from '@/lib/server-auth';
 import { readBoundedJson } from '@/lib/request-utils';
-import { checkRateLimitAsync, getClientIp } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, getClientIp, createRateLimitErrorResponse } from '@/lib/rate-limiter';
 import { checkAuthEntryCsrfOrForbidden } from '@/lib/csrf';
 import { recordAuthFailure } from '@/lib/monitoring';
 
@@ -23,27 +23,10 @@ export async function POST(req: NextRequest) {
   const clientIp = getClientIp(req);
   const rateLimitResult = await checkRateLimitAsync(`auth:login:${clientIp}`, 10, 60000);
 
-  if (rateLimitResult.unavailable) {
-    return NextResponse.json(
-      { error: 'Authentication is temporarily unavailable. Please try again shortly.' },
-      {
-        status: 503,
-        headers: {
-          'Retry-After': String(Math.ceil(rateLimitResult.resetMs / 1000)),
-        },
-      }
-    );
-  }
-
   if (!rateLimitResult.allowed) {
-    return NextResponse.json(
-      { error: 'Too many login attempts. Please wait before trying again.' },
-      {
-        status: 429,
-        headers: {
-          'Retry-After': String(Math.ceil(rateLimitResult.resetMs / 1000)),
-        },
-      }
+    return createRateLimitErrorResponse(
+      rateLimitResult,
+      'Too many login attempts. Please wait before trying again.'
     );
   }
 

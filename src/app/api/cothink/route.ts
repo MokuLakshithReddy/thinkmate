@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { CoThinkEngine, CoThinkStepResponse } from '@/services/ai/cothink-engine';
 import { CoThinkerStep } from '@/types';
 import { getAuthenticatedUser } from '@/lib/server-auth';
-import { checkRateLimitAsync } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, createRateLimitErrorResponse } from '@/lib/rate-limiter';
 import { SupabaseThinkingRepository, computeRequestHash } from '@/services/db/repository';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { readBoundedJson } from '@/lib/request-utils';
@@ -75,13 +75,7 @@ export async function POST(req: NextRequest) {
     // Rate Limiting: 60 req/min for authenticated user with distributed support
     const rateCheck = await checkRateLimitAsync(`usr:${authUser.id}`, 60, 60000);
     if (!rateCheck.allowed) {
-      return NextResponse.json(
-        { error: 'Rate limit exceeded. Please wait a moment before sending more messages.' },
-        {
-          status: 429,
-          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
-        }
-      );
+      return createRateLimitErrorResponse(rateCheck, 'Rate limit exceeded. Please wait a moment before sending more messages.');
     }
 
     // 0. Enforce real streaming byte limits and catch malformed JSON

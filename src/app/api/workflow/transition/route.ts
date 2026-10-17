@@ -3,7 +3,7 @@ import { ModeTransitionRequestSchema, WorkflowStateMachine } from '@/services/wo
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { getAuthenticatedUser } from '@/lib/server-auth';
 import { readBoundedJson } from '@/lib/request-utils';
-import { checkRateLimitAsync } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, createRateLimitErrorResponse } from '@/lib/rate-limiter';
 import { checkCsrfOrForbidden } from '@/lib/csrf';
 
 let repositoryInstance: SupabaseThinkingRepository | null = null;
@@ -30,13 +30,7 @@ export async function POST(req: NextRequest) {
     // Rate Limiting: 30 req/min for authenticated workflow mode transitions
     const rateCheck = await checkRateLimitAsync(`mutation:workflow_transition:${authUser.id}`, 30, 60000);
     if (!rateCheck.allowed) {
-      return NextResponse.json(
-        { error: 'Rate limit exceeded: too many workflow transition requests. Please wait before retrying.' },
-        {
-          status: 429,
-          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
-        }
-      );
+      return createRateLimitErrorResponse(rateCheck, 'Rate limit exceeded: too many workflow transition requests. Please wait before retrying.');
     }
 
     // 0. Enforce real streaming byte limits and catch malformed JSON

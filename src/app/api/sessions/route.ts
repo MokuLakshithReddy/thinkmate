@@ -4,7 +4,7 @@ import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { getAuthenticatedUser } from '@/lib/server-auth';
 import { STAGE_TO_MODE, MODE_TO_DEFAULT_STAGE } from '@/services/workflow/state-machine';
 import { readBoundedJson } from '@/lib/request-utils';
-import { checkRateLimitAsync } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, createRateLimitErrorResponse } from '@/lib/rate-limiter';
 import { checkCsrfOrForbidden } from '@/lib/csrf';
 
 const CreateSessionSchema = z
@@ -56,13 +56,7 @@ export async function GET(req: NextRequest) {
     // Rate Limiting: 120 req/min for authenticated session reads
     const rateCheck = await checkRateLimitAsync(`read:sessions:${authUser.id}`, 120, 60000);
     if (!rateCheck.allowed) {
-      return NextResponse.json(
-        { error: 'Rate limit exceeded: too many session read requests. Please wait before retrying.' },
-        {
-          status: 429,
-          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
-        }
-      );
+      return createRateLimitErrorResponse(rateCheck, 'Rate limit exceeded: too many session read requests. Please wait before retrying.');
     }
 
     const id = req.nextUrl.searchParams.get('id');
@@ -119,13 +113,7 @@ export async function POST(req: NextRequest) {
     // Rate Limiting: 30 req/min for authenticated session mutations (create)
     const rateCheck = await checkRateLimitAsync(`mutation:sessions:${authUser.id}`, 30, 60000);
     if (!rateCheck.allowed) {
-      return NextResponse.json(
-        { error: 'Rate limit exceeded: too many session creation requests. Please wait before retrying.' },
-        {
-          status: 429,
-          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
-        }
-      );
+      return createRateLimitErrorResponse(rateCheck, 'Rate limit exceeded: too many session creation requests. Please wait before retrying.');
     }
 
     const bodyResult = await readBoundedJson(req, 65536);
@@ -189,13 +177,7 @@ export async function DELETE(req: NextRequest) {
     // Rate Limiting: 30 req/min for authenticated session mutations (delete)
     const rateCheck = await checkRateLimitAsync(`mutation:sessions:${authUser.id}`, 30, 60000);
     if (!rateCheck.allowed) {
-      return NextResponse.json(
-        { error: 'Rate limit exceeded: too many session deletion requests. Please wait before retrying.' },
-        {
-          status: 429,
-          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
-        }
-      );
+      return createRateLimitErrorResponse(rateCheck, 'Rate limit exceeded: too many session deletion requests. Please wait before retrying.');
     }
 
     const all = req.nextUrl.searchParams.get('all') === 'true';

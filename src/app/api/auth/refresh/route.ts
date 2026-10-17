@@ -7,7 +7,7 @@ import {
   getAuthenticatedUser,
   getDistributedRotatedSession,
 } from '@/lib/server-auth';
-import { checkRateLimitAsync, getClientIp } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, getClientIp, createRateLimitErrorResponse } from '@/lib/rate-limiter';
 import { readBoundedJson } from '@/lib/request-utils';
 
 export async function POST(req: NextRequest) {
@@ -22,26 +22,10 @@ export async function POST(req: NextRequest) {
   // Rate limiting to prevent token brute-forcing (shared across instances via Upstash Redis)
   const clientIp = getClientIp(req);
   const rateLimitResult = await checkRateLimitAsync(`auth:refresh:${clientIp}`, 20, 60000);
-  if (rateLimitResult.unavailable) {
-    return NextResponse.json(
-      { error: 'Authentication is temporarily unavailable. Please try again shortly.' },
-      {
-        status: 503,
-        headers: {
-          'Retry-After': String(Math.ceil(rateLimitResult.resetMs / 1000)),
-        },
-      }
-    );
-  }
   if (!rateLimitResult.allowed) {
-    return NextResponse.json(
-      { error: 'Too many token refresh requests. Please wait.' },
-      {
-        status: 429,
-        headers: {
-          'Retry-After': String(Math.ceil(rateLimitResult.resetMs / 1000)),
-        },
-      }
+    return createRateLimitErrorResponse(
+      rateLimitResult,
+      'Too many token refresh requests. Please wait.'
     );
   }
 
