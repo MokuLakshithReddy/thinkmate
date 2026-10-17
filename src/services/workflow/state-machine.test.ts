@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { WorkflowStateMachine } from './state-machine';
+import { WorkflowStateMachine, STAGE_TO_MODE } from './state-machine';
 
 describe('Workflow State Machine & Guardrails', () => {
   test('Permits standard forward transition from Understand to Explore', () => {
@@ -97,6 +97,10 @@ describe('Workflow State Machine & Guardrails', () => {
     assert.strictEqual(WorkflowStateMachine.getModeForStage('check_satisfaction'), 'challenge');
     assert.strictEqual(WorkflowStateMachine.getModeForStage('summarize_insights'), 'decide');
     assert.strictEqual(WorkflowStateMachine.getModeForStage('choose_action'), 'act');
+
+    // Authoritative STAGE_TO_MODE dictionary alignment
+    assert.strictEqual(STAGE_TO_MODE.break_subproblems, 'explore');
+    assert.strictEqual(STAGE_TO_MODE.check_satisfaction, 'challenge');
   });
 
   test('deriveCurrentStage honors authoritative persistedStage across retries/loopbacks', () => {

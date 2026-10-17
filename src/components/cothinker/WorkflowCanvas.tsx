@@ -17,6 +17,8 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
+import { STAGE_TO_MODE } from '@/services/workflow/state-machine';
+
 interface WorkflowCanvasProps {
   currentStep: CoThinkerStep;
   isLoading?: boolean;
@@ -25,6 +27,39 @@ interface WorkflowCanvasProps {
   canUndo?: boolean;
   canRedo?: boolean;
 }
+
+const MODE_VISUALS: Record<ThinkingMode, { label: string; color: string; badgeBg: string; border: string }> = {
+  understand: {
+    label: 'Understand',
+    color: 'text-indigo-600',
+    badgeBg: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+    border: 'border-indigo-400/50',
+  },
+  explore: {
+    label: 'Explore',
+    color: 'text-sky-600',
+    badgeBg: 'bg-sky-50 text-sky-700 border-sky-200',
+    border: 'border-sky-400/50',
+  },
+  challenge: {
+    label: 'Challenge',
+    color: 'text-amber-600',
+    badgeBg: 'bg-amber-50 text-amber-800 border-amber-200',
+    border: 'border-amber-400/50',
+  },
+  decide: {
+    label: 'Decide',
+    color: 'text-purple-600',
+    badgeBg: 'bg-purple-50 text-purple-700 border-purple-200',
+    border: 'border-purple-400/50',
+  },
+  act: {
+    label: 'Act',
+    color: 'text-emerald-600',
+    badgeBg: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    border: 'border-emerald-400/50',
+  },
+};
 
 export function WorkflowCanvas({
   currentStep,
@@ -51,52 +86,11 @@ export function WorkflowCanvas({
 
   // Map step to authoritative thinking mode for dynamic styling
   const getStepMode = (step: CoThinkerStep): { mode: ThinkingMode; label: string; color: string; badgeBg: string; border: string } => {
-    switch (step) {
-      case 'welcome':
-      case 'describe_problem':
-      case 'clarify_objective':
-      case 'break_subproblems':
-        return {
-          mode: 'understand',
-          label: 'Understand',
-          color: 'text-indigo-600',
-          badgeBg: 'bg-indigo-50 text-indigo-700 border-indigo-200',
-          border: 'border-indigo-400/50',
-        };
-      case 'explore_perspectives':
-        return {
-          mode: 'explore',
-          label: 'Explore',
-          color: 'text-sky-600',
-          badgeBg: 'bg-sky-50 text-sky-700 border-sky-200',
-          border: 'border-sky-400/50',
-        };
-      case 'challenge_assumptions':
-        return {
-          mode: 'challenge',
-          label: 'Challenge',
-          color: 'text-amber-600',
-          badgeBg: 'bg-amber-50 text-amber-800 border-amber-200',
-          border: 'border-amber-400/50',
-        };
-      case 'check_satisfaction':
-      case 'summarize_insights':
-        return {
-          mode: 'decide',
-          label: 'Decide',
-          color: 'text-purple-600',
-          badgeBg: 'bg-purple-50 text-purple-700 border-purple-200',
-          border: 'border-purple-400/50',
-        };
-      case 'choose_action':
-        return {
-          mode: 'act',
-          label: 'Act',
-          color: 'text-emerald-600',
-          badgeBg: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-          border: 'border-emerald-400/50',
-        };
-    }
+    const mode = STAGE_TO_MODE[step] || 'understand';
+    return {
+      mode,
+      ...MODE_VISUALS[mode],
+    };
   };
 
   const modeInfo = getStepMode(currentStep);
