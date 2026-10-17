@@ -27,7 +27,13 @@ test('login rejects cross-origin requests', async ({ request }) => {
 });
 
 test.describe('real account', () => {
-  test.skip(!email || !password, 'E2E_TEST_EMAIL and E2E_TEST_PASSWORD are required');
+  test.beforeAll(() => {
+    if (!email || !password) {
+      throw new Error(
+        'E2E_TEST_EMAIL and E2E_TEST_PASSWORD environment variables are required. Staging suite must not skip the real-service user journey.'
+      );
+    }
+  });
 
   test('login, cloud session with a live AI reply, history reload, session restore and logout', async ({ page }) => {
     test.setTimeout(120_000);

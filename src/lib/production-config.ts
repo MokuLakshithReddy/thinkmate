@@ -12,7 +12,7 @@ export interface ProductionConfigReport {
 }
 
 export const MIN_SESSION_KEY_BYTES = 32;
-const PROXY_PROVIDERS = ['cloudflare', 'nginx', 'custom'];
+const PROXY_PROVIDERS = ['vercel', 'cloudflare', 'nginx', 'custom'];
 
 function parseUrl(value: string): URL | null {
   try {

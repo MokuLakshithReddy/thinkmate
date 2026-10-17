@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { CoThinkEngine } from '@/services/ai/cothink-engine';
 import { CoThinkerStep } from '@/types';
-import { checkRateLimitAsync, getClientIp } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, getClientIp, createRateLimitErrorResponse } from '@/lib/rate-limiter';
 import { readBoundedJson } from '@/lib/request-utils';
 
 /**
@@ -48,12 +48,9 @@ export async function POST(req: NextRequest) {
     const rateCheck = await checkRateLimitAsync(`demo:ip:${clientIp}`, 20, 60000);
 
     if (!rateCheck.allowed) {
-      return NextResponse.json(
-        { error: 'Demo rate limit exceeded. Please wait a moment before trying again.' },
-        {
-          status: 429,
-          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
-        }
+      return createRateLimitErrorResponse(
+        rateCheck,
+        'Demo rate limit exceeded. Please wait a moment before trying again.'
       );
     }
 

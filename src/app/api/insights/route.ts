@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 import { getAuthenticatedUser } from '@/lib/server-auth';
 import { readBoundedJson } from '@/lib/request-utils';
-import { checkRateLimitAsync } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, createRateLimitErrorResponse } from '@/lib/rate-limiter';
 import { checkCsrfOrForbidden } from '@/lib/csrf';
 import { normalizeInsightCategory, normalizeInsightStatus } from '@/types';
 
@@ -52,12 +52,9 @@ export async function POST(req: NextRequest) {
     // Rate Limiting: 60 req/min for authenticated insight mutations (create/update)
     const rateCheck = await checkRateLimitAsync(`mutation:insights:${authUser.id}`, 60, 60000);
     if (!rateCheck.allowed) {
-      return NextResponse.json(
-        { error: 'Rate limit exceeded: too many insight mutations. Please wait before retrying.' },
-        {
-          status: 429,
-          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
-        }
+      return createRateLimitErrorResponse(
+        rateCheck,
+        'Rate limit exceeded: too many insight mutations. Please wait before retrying.'
       );
     }
 
@@ -121,12 +118,9 @@ export async function DELETE(req: NextRequest) {
     // Rate Limiting: 60 req/min for authenticated insight mutations (delete)
     const rateCheck = await checkRateLimitAsync(`mutation:insights:${authUser.id}`, 60, 60000);
     if (!rateCheck.allowed) {
-      return NextResponse.json(
-        { error: 'Rate limit exceeded: too many insight deletion requests. Please wait before retrying.' },
-        {
-          status: 429,
-          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
-        }
+      return createRateLimitErrorResponse(
+        rateCheck,
+        'Rate limit exceeded: too many insight deletion requests. Please wait before retrying.'
       );
     }
 

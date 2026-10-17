@@ -17,7 +17,17 @@ import { GET as sessionGet } from './auth/session/route';
 import { POST as signupPost } from './auth/signup/route';
 import { POST as refreshPost } from './auth/refresh/route';
 import { GeminiThinkingService } from '@/services/ai/gemini-service';
-import { checkRateLimitAsync, checkRateLimit, getClientIp, MemoryRateLimitStore, UpstashRedisRateLimitStore, getActiveRateLimitStore, verifyRateLimiterConfig } from '@/lib/rate-limiter';
+import {
+  checkRateLimitAsync,
+  checkRateLimit,
+  getClientIp,
+  MemoryRateLimitStore,
+  UpstashRedisRateLimitStore,
+  getActiveRateLimitStore,
+  verifyRateLimiterConfig,
+  verifyRateLimiterConfigAsync,
+  createRateLimitErrorResponse,
+} from '@/lib/rate-limiter';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
 import { supabase } from '@/services/db/supabase-client';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
@@ -2031,6 +2041,19 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       const invalidUrlConfig = verifyRateLimiterConfig();
       assert.strictEqual(invalidUrlConfig.valid, false);
       assert.ok(invalidUrlConfig.error?.includes('UPSTASH_REDIS_REST_URL is invalid'));
+
+      // 5. Deliberately malformed URL containing dummy secret: assert secret never appears in error output
+      process.env.UPSTASH_REDIS_REST_URL = 'https://admin:super_secret_dummy_password_98765@invalid domain name with spaces';
+      const secretUrlConfig = verifyRateLimiterConfig();
+      assert.strictEqual(secretUrlConfig.valid, false);
+      assert.ok(secretUrlConfig.error?.includes('UPSTASH_REDIS_REST_URL is invalid'));
+      assert.strictEqual(secretUrlConfig.error?.includes('super_secret_dummy_password_98765'), false, 'Sensitive URL credentials must never be echoed');
+
+      // 6. Insecure HTTP protocol rejected in production
+      process.env.UPSTASH_REDIS_REST_URL = 'http://unencrypted-redis.upstash.io';
+      const insecureHttpConfig = verifyRateLimiterConfig();
+      assert.strictEqual(insecureHttpConfig.valid, false);
+      assert.ok(insecureHttpConfig.error?.includes('Protocol must be https:'));
     } finally {
       (process.env as Record<string, string | undefined>).NODE_ENV = origEnv;
       if (origUrl !== undefined) process.env.UPSTASH_REDIS_REST_URL = origUrl;
@@ -2584,6 +2607,27 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
         },
       });
       assert.strictEqual(getClientIp(cfReq), '198.51.100.99', 'Must honor cf-connecting-ip when Cloudflare provider is designated');
+
+      // 4. Designated Vercel provider: honors x-vercel-forwarded-for
+      process.env.TRUSTED_PROXY_PROVIDER = 'vercel';
+      const vercelReq = new Request('http://localhost:3000', {
+        headers: {
+          'x-vercel-forwarded-for': '198.51.100.77',
+          'x-forwarded-for': '203.0.113.195, 198.51.100.1',
+        },
+      });
+      assert.strictEqual(getClientIp(vercelReq), '198.51.100.77', 'Must honor x-vercel-forwarded-for when Vercel is designated provider');
+
+      // 5. Spoofed x-vercel-forwarded-for is ignored when provider is not Vercel
+      process.env.TRUSTED_PROXY_DEPTH = '1';
+      process.env.TRUSTED_PROXY_PROVIDER = 'nginx';
+      const spoofedVercelReq = new Request('http://localhost:3000', {
+        headers: {
+          'x-vercel-forwarded-for': '198.51.100.77',
+          'x-forwarded-for': '203.0.113.195, 198.51.100.2',
+        },
+      });
+      assert.strictEqual(getClientIp(spoofedVercelReq), '198.51.100.2', 'Must ignore spoofed x-vercel-forwarded-for under non-Vercel provider');
     } finally {
       if (origDepth !== undefined) process.env.TRUSTED_PROXY_DEPTH = origDepth;
       else delete process.env.TRUSTED_PROXY_DEPTH;
@@ -2704,5 +2748,96 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       },
       /Transition denied: Moving to Act mode or choose_action requires at least one accepted decision insight/
     );
+  });
+
+  test('createRateLimitErrorResponse standardizes 503 for infrastructure outages vs 429 for quota throttling', () => {
+    // 1. Infrastructure outage / dependency failure (fail-closed)
+    const outageResult = {
+      allowed: false,
+      remaining: 0,
+      resetMs: 45000,
+      unavailable: true,
+    };
+    const outageResponse = createRateLimitErrorResponse(outageResult, 'Custom message should be overridden or standardized');
+    assert.strictEqual(outageResponse.status, 503, 'Infrastructure outage must return HTTP 503');
+    assert.strictEqual(outageResponse.headers.get('Retry-After'), '45');
+
+    // 2. Normal quota throttling (quota exceeded)
+    const quotaResult = {
+      allowed: false,
+      remaining: 0,
+      resetMs: 12000,
+      unavailable: false,
+    };
+    const quotaResponse = createRateLimitErrorResponse(quotaResult, 'Too many requests on this endpoint.');
+    assert.strictEqual(quotaResponse.status, 429, 'Normal throttling must return HTTP 429');
+    assert.strictEqual(quotaResponse.headers.get('Retry-After'), '12');
+
+    // 3. Normal quota throttling with default message
+    const defaultQuotaResponse = createRateLimitErrorResponse(quotaResult);
+    assert.strictEqual(defaultQuotaResponse.status, 429);
+    assert.strictEqual(defaultQuotaResponse.headers.get('Retry-After'), '12');
+  });
+
+  test('verifyRateLimiterConfigAsync verifies configuration and emits distributed async alerts', async () => {
+    const origEnv = process.env.NODE_ENV;
+    const origUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const origToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+    try {
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+      delete process.env.UPSTASH_REDIS_REST_URL;
+      delete process.env.UPSTASH_REDIS_REST_TOKEN;
+
+      // Unconfigured production Redis triggers async CONFIG_MISSING
+      const res = await verifyRateLimiterConfigAsync();
+      assert.strictEqual(res.valid, false);
+      assert.strictEqual(res.hasUpstash, false);
+      assert.ok(res.error?.includes('must be configured in production'));
+
+      // Configured production Redis validates successfully
+      process.env.UPSTASH_REDIS_REST_URL = 'https://prod-redis.upstash.io';
+      process.env.UPSTASH_REDIS_REST_TOKEN = 'prod-token';
+      const validRes = await verifyRateLimiterConfigAsync();
+      assert.strictEqual(validRes.valid, true);
+      assert.strictEqual(validRes.hasUpstash, true);
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = origEnv;
+      if (origUrl !== undefined) process.env.UPSTASH_REDIS_REST_URL = origUrl;
+      else delete process.env.UPSTASH_REDIS_REST_URL;
+      if (origToken !== undefined) process.env.UPSTASH_REDIS_REST_TOKEN = origToken;
+      else delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    }
+  });
+
+  test('getActiveRateLimitStore in production routes missing-Redis alerts through async distributed path', async () => {
+    const origEnv = process.env.NODE_ENV;
+    const origUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const origToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+    try {
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+      delete process.env.UPSTASH_REDIS_REST_URL;
+      delete process.env.UPSTASH_REDIS_REST_TOKEN;
+
+      const store = getActiveRateLimitStore();
+      assert.ok(store.checkAndRecord, 'Production missing-redis store must provide checkAndRecord');
+
+      // Auth endpoint fails closed with 503 unavailable
+      const authRes = await store.checkAndRecord('auth:login:192.0.2.1', 5, 60000);
+      assert.strictEqual(authRes.allowed, false);
+      assert.strictEqual(authRes.unavailable, true);
+
+      // Non-auth endpoint also fails closed by default in production
+      const apiRes = await store.checkAndRecord('mutation:sessions:usr-1', 10, 60000);
+      assert.strictEqual(apiRes.allowed, false);
+      assert.strictEqual(apiRes.unavailable, true);
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = origEnv;
+      if (origUrl !== undefined) process.env.UPSTASH_REDIS_REST_URL = origUrl;
+      else delete process.env.UPSTASH_REDIS_REST_URL;
+      if (origToken !== undefined) process.env.UPSTASH_REDIS_REST_TOKEN = origToken;
+      else delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    }
   });
 });

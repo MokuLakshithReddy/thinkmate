@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { ThinkStreamRequestSchema } from '@/services/ai/types';
 import { GeminiThinkingService } from '@/services/ai/gemini-service';
 import { getAuthenticatedUser } from '@/lib/server-auth';
-import { checkRateLimitAsync } from '@/lib/rate-limiter';
+import { checkRateLimitAsync, createRateLimitErrorResponse } from '@/lib/rate-limiter';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
 
 /**
@@ -35,13 +35,7 @@ export async function POST(req: NextRequest) {
     // Rate Limiting: 40 req/min for authenticated user with distributed support
     const rateCheck = await checkRateLimitAsync(`stream:usr:${authUser.id}`, 40, 60000);
     if (!rateCheck.allowed) {
-      return NextResponse.json(
-        { error: 'Rate limit exceeded for streaming requests. Please wait a moment.' },
-        {
-          status: 429,
-          headers: { 'Retry-After': String(Math.ceil(rateCheck.resetMs / 1000)) },
-        }
-      );
+      return createRateLimitErrorResponse(rateCheck, 'Rate limit exceeded for streaming requests. Please wait a moment.');
     }
 
     // 0. Enforce real streaming byte limits and catch malformed JSON

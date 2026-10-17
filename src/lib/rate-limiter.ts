@@ -1,4 +1,5 @@
 import { reportOperationalAlert, reportOperationalAlertAsync } from '@/lib/monitoring';
+import { NextResponse } from 'next/server';
 
 export interface RateLimitEntry {
   timestamps: number[];
@@ -295,8 +296,40 @@ export async function emitOperatorAlertAsync(
 }
 
 /**
+ * Standardized error response for rate limiting across all API routes.
+ * Differentiates HTTP 503 (infrastructure unavailable / fail-closed) from HTTP 429 (quota exceeded).
+ */
+export function createRateLimitErrorResponse(
+  rateCheck: RateLimitResult,
+  customQuotaMessage?: string
+): NextResponse {
+  const retryAfterSec = String(Math.max(1, Math.ceil((rateCheck.resetMs || 60000) / 1000)));
+  if (rateCheck.unavailable) {
+    return NextResponse.json(
+      { error: 'Rate limit service unavailable. Please retry shortly.' },
+      {
+        status: 503,
+        headers: {
+          'Retry-After': retryAfterSec,
+        },
+      }
+    );
+  }
+  return NextResponse.json(
+    { error: customQuotaMessage || 'Rate limit exceeded. Please wait before making more requests.' },
+    {
+      status: 429,
+      headers: {
+        'Retry-After': retryAfterSec,
+      },
+    }
+  );
+}
+
+/**
  * Verifies production environment variables for rate limiting.
  * Returns health and configuration diagnostics for deployment readiness probes.
+ * Never echoes secret or sensitive URL values in diagnostics.
  */
 export function verifyRateLimiterConfig(options: { emitAlerts?: boolean } = {}): {
   valid: boolean;
@@ -333,17 +366,39 @@ export function verifyRateLimiterConfig(options: { emitAlerts?: boolean } = {}):
   if (upstashUrl) {
     try {
       const parsed = new URL(upstashUrl);
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        throw new Error('Protocol must be http: or https:');
+      const allowedProtocols = isProduction ? ['https:'] : ['http:', 'https:'];
+      if (!allowedProtocols.includes(parsed.protocol)) {
+        throw new Error(isProduction ? 'Protocol must be https:' : 'Protocol must be http: or https:');
       }
     } catch (urlErr) {
-      const errorMsg = `UPSTASH_REDIS_REST_URL is invalid: ${upstashUrl} (${urlErr instanceof Error ? urlErr.message : String(urlErr)})`;
+      const reason = urlErr instanceof Error ? urlErr.message : 'Invalid URL structure';
+      const errorMsg = `UPSTASH_REDIS_REST_URL is invalid (${reason})`;
       if (emitAlerts) emitOperatorAlert('CONFIG_INVALID', { error: errorMsg });
       return { valid: false, isProduction, hasUpstash, failClosedActive, authFailClosedActive, error: errorMsg };
     }
   }
 
   return { valid: true, isProduction, hasUpstash, failClosedActive, authFailClosedActive };
+}
+
+/**
+ * Asynchronously verifies rate limiter configuration using distributed deduplication for alerts.
+ * Useful for multi-instance startup checks when distributed alert deduplication is desired.
+ */
+export async function verifyRateLimiterConfigAsync(options: { emitAlerts?: boolean } = {}): Promise<ReturnType<typeof verifyRateLimiterConfig>> {
+  const result = verifyRateLimiterConfig({ emitAlerts: false });
+  if (!result.valid && options.emitAlerts !== false) {
+    if (result.error?.includes('must be configured')) {
+      await emitOperatorAlertAsync('CONFIG_MISSING', {
+        error: result.error,
+        recovery:
+          'Provision Upstash Redis credentials or set RATE_LIMIT_FAIL_CLOSED=false for emergency degraded per-node memory limiting.',
+      });
+    } else {
+      await emitOperatorAlertAsync('CONFIG_INVALID', { error: result.error || 'Configuration invalid' });
+    }
+  }
+  return result;
 }
 
 /**
@@ -366,11 +421,11 @@ export function getActiveRateLimitStore(): RateLimitStore {
     return {
       get: () => new Array(10000).fill(Date.now()),
       set: () => {},
-      checkAndRecord: (key: string, limit: number, windowMs: number) => {
+      checkAndRecord: async (key: string, limit: number, windowMs: number) => {
         const isAuth = key.startsWith('auth:');
         if (isAuth) {
           // Authentication endpoints UNCONDITIONALLY fail closed in production
-          emitOperatorAlert('CONFIG_MISSING', {
+          await emitOperatorAlertAsync('CONFIG_MISSING', {
             action: 'AUTH_FAIL_CLOSED_REJECT',
             key,
             error: 'Authentication endpoints unconditionally fail closed in production during Redis outage.',
@@ -387,7 +442,7 @@ export function getActiveRateLimitStore(): RateLimitStore {
           return memoryStore.checkAndRecord(key, limit, windowMs);
         }
 
-        emitOperatorAlert('CONFIG_MISSING', {
+        await emitOperatorAlertAsync('CONFIG_MISSING', {
           action: 'FAIL_CLOSED_REJECT',
           key,
           error: 'UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN missing in production.',
@@ -456,7 +511,7 @@ export function checkRateLimit(
   windowMs: number = 60000,
   store: RateLimitStore = memoryStore
 ): RateLimitResult {
-  if (key.startsWith('auth:') && store === memoryStore && process.env.NODE_ENV === 'production') {
+  if (key.startsWith('auth:') && process.env.NODE_ENV === 'production') {
     emitOperatorAlert('CONFIG_INVALID', {
       action: 'AUTH_FAIL_CLOSED_REJECT',
       key,
@@ -538,7 +593,18 @@ export function getClientIp(req: Request): string {
 
   const proxyProvider = (process.env.TRUSTED_PROXY_PROVIDER || '').toLowerCase().trim();
 
-  // 1. Cloudflare edge verified client IP: ONLY trust when explicitly configured or designated
+  // 1. Vercel edge verified client IP: trusted when running on Vercel or proxyProvider is vercel
+  if (proxyProvider === 'vercel' || Boolean(process.env.VERCEL)) {
+    const vercelIp = req.headers.get('x-vercel-forwarded-for')?.trim();
+    if (vercelIp) {
+      const cleanVercel = vercelIp.split(',')[0].trim().replace(/:\d+$/, '');
+      if (isValidIp(cleanVercel)) {
+        return cleanVercel;
+      }
+    }
+  }
+
+  // 2. Cloudflare edge verified client IP: ONLY trust when explicitly configured or designated
   if (proxyProvider === 'cloudflare') {
     const cfConnectingIp = req.headers.get('cf-connecting-ip')?.trim();
     if (cfConnectingIp && isValidIp(cfConnectingIp)) {
@@ -546,7 +612,7 @@ export function getClientIp(req: Request): string {
     }
   }
 
-  // 2. Reverse proxy verified single IP: ONLY trust when explicitly configured for Nginx / custom proxy
+  // 3. Reverse proxy verified single IP: ONLY trust when explicitly configured for Nginx / custom proxy
   if (proxyProvider === 'nginx' || proxyProvider === 'custom') {
     const realIp = req.headers.get('x-real-ip')?.trim();
     if (realIp) {
