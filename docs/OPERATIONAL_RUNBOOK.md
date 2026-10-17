@@ -127,20 +127,70 @@ The `SESSION_ENCRYPTION_KEY` encrypts rotated session credentials in the distrib
 
 ---
 
-## 4. Pre-Launch Verification Checklist
+## 4. Tested Backup & Point-In-Time Restore (PITR) Verification Drill
 
-Before opening the application to public production traffic:
+To ensure business continuity without data loss, operational teams must regularly exercise the tested database restore drill:
 
-- [ ] **Production Configuration Checked**:
+### Step 1: Pre-Restore Snapshot & Assessment
+1. Confirm the incident boundary time (UTC) before data corruption or schema error occurred.
+2. Verify read-only status in Supabase Dashboard -> **Database** -> **Backups**.
+
+### Step 2: In-Dashboard PITR Execution
+1. Navigate to **Project Settings** -> **Database** -> **Backups** -> **Point in Time Restore**.
+2. Select target recovery timestamp (e.g., `10 minutes prior to incident`).
+3. Restore to a dedicated recovery clone (recommended for zero user interruption during verification) or perform in-place restoration.
+
+### Step 3: Post-Restore Verification Suite
+1. Run the staging & database schema verification suite against the restored database:
+   ```bash
+   STAGING_SUPABASE_URL="https://restored-project.supabase.co" \
+   STAGING_SUPABASE_SERVICE_ROLE_KEY="<service-key>" \
+   npx tsx scripts/verify-supabase-staging.ts
+   ```
+2. Confirm row-level security (RLS), transactional RPCs (`record_workflow_step_tx`), and table constraints pass.
+3. Switch production connection strings (`NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`) to the restored database.
+
+---
+
+## 5. Dependency Audit & Review Procedure
+
+ThinkMate strictly enforces a full-tree dependency security gate in CI (`npm run audit:ci` -> `scripts/audit-gate.ts`).
+
+### Managing the `braces` Exception (GHSA-vfj7-8cjw-p6xm)
+* **Scope**: Reached only through developer tooling (`eslint-config-next > @next/eslint-plugin-next > fast-glob > micromatch > braces`).
+* **Production Status**: `npm audit --omit=dev --audit-level=high` reports **0 vulnerabilities** because `braces` is never shipped in client or server production bundles.
+* **Review Protocol**:
+  1. Automated CI fails immediately if the review deadline in `audit-allowlist.json` (`2027-01-16`) expires or if any other unapproved high/critical advisory appears.
+  2. Weekly dependabot checks monitor npm for a patched release of `braces` or an updated `eslint-config-next`.
+  3. When an upstream patch is published:
+     ```bash
+     npm update eslint-config-next
+     npm audit
+     ```
+     Once clean, remove the advisory entry from `audit-allowlist.json`.
+
+---
+
+## 6. Pre-Launch Operational Verification Checklist
+
+Before opening the application to public production traffic, execute the operational verification battery:
+
+- [ ] **Full Production Configuration & Redis Connectivity Check**:
   ```bash
   npx tsx scripts/check-production-env.ts --ping
   ```
-  Must exit with code 0 and report 0 errors.
-- [ ] **GitHub Main Branch Protected**:
-  GitHub ruleset active (`ruleset id: 25276834`), requiring PRs, preventing force pushes, and requiring status checks `ci/pipeline` and `Lint, Typecheck, Test & Build`.
-- [ ] **Database Verification Passed**:
-  Staging Database Verification workflow (`staging-verification.yml`) succeeded on latest release commit.
-- [ ] **Health Readiness Validated**:
-  `GET /api/health?readiness=true` returns HTTP 200 with all 3 dependencies `ready`.
-- [ ] **Operational Webhooks Configured**:
-  `ALERT_WEBHOOK_URL` set in production environment variables to route critical alerts to team incident channels.
+  Must report `UPSTASH_REDIS_REST_URL: PING succeeded` and 0 errors.
+- [ ] **Operational Webhook Alert Delivery Verified**:
+  ```bash
+  npx tsx scripts/check-production-env.ts --test-alert
+  ```
+  Confirms outbound HTTP 2xx delivery to team incident channels (`ALERT_WEBHOOK_URL`).
+- [ ] **Dependency Readiness Check**:
+  ```bash
+  npx tsx scripts/check-production-env.ts --test-readiness
+  ```
+  Confirms Supabase database table query and auth infrastructure readiness.
+- [ ] **GitHub Main Branch Protection Enforced**:
+  GitHub ruleset active (`ruleset id: 25276834`), requiring PRs, preventing force pushes, and requiring status checks `Lint, Typecheck, Test & Build` and `Browser E2E`.
+- [ ] **Staging Database Verification Succeeded on Release Commit**:
+  Workflow `staging-verification.yml` passed on latest commit.
