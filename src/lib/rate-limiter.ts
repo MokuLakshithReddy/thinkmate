@@ -1,4 +1,4 @@
-import { reportOperationalAlert } from '@/lib/monitoring';
+import { reportOperationalAlert, reportOperationalAlertAsync } from '@/lib/monitoring';
 
 export interface RateLimitEntry {
   timestamps: number[];
@@ -241,7 +241,7 @@ export class UpstashRedisRateLimitStore implements RateLimitStore {
       }
 
       if (shouldFailClosed) {
-        emitOperatorAlert('REDIS_OUTAGE', {
+        await emitOperatorAlertAsync('REDIS_OUTAGE', {
           key,
           action: 'FAIL_CLOSED_REJECT',
           isAuthEndpoint,
@@ -258,7 +258,7 @@ export class UpstashRedisRateLimitStore implements RateLimitStore {
         };
       }
 
-      emitOperatorAlert('REDIS_OUTAGE', {
+      await emitOperatorAlertAsync('REDIS_OUTAGE', {
         key,
         action: 'DEGRADED_MEMORY_FALLBACK',
         isAuthEndpoint,
@@ -281,6 +281,17 @@ export function emitOperatorAlert(
   details: Record<string, unknown>
 ): void {
   reportOperationalAlert(alertType, details);
+}
+
+/**
+ * Emits a structured, high-visibility operator alert asynchronously
+ * with distributed Redis deduplication guarantees across cluster instances.
+ */
+export async function emitOperatorAlertAsync(
+  alertType: 'CONFIG_MISSING' | 'REDIS_OUTAGE' | 'CONFIG_INVALID',
+  details: Record<string, unknown>
+): Promise<void> {
+  await reportOperationalAlertAsync(alertType, details);
 }
 
 /**

@@ -110,7 +110,13 @@ export async function executeRedisCommand<T = unknown>(
       return { success: false, error: `HTTP ${res.status}` };
     }
     const json = await res.json();
-    return { success: true, result: json.result as T | null };
+    if (json && typeof json === 'object' && 'error' in json && json.error) {
+      return { success: false, error: String(json.error) };
+    }
+    if (!json || typeof json !== 'object' || !('result' in json)) {
+      return { success: false, error: 'Malformed Redis response' };
+    }
+    return { success: true, result: (json.result !== undefined ? json.result : null) as T | null };
   } catch (err) {
     return {
       success: false,
