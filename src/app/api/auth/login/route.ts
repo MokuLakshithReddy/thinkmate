@@ -75,7 +75,7 @@ export async function POST(req: NextRequest) {
     });
 
     if (error || !data?.session) {
-      recordAuthFailure(clientIp, '/api/auth/login');
+      await recordAuthFailure(clientIp, '/api/auth/login');
       return NextResponse.json(
         { error: error?.message || 'Invalid credentials' },
         { status: 401 }

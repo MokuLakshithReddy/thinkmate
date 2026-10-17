@@ -194,4 +194,138 @@ describe('Operational Monitoring & Alerting System', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it('regression: two independent application instances sharing Redis state do not emit duplicate alerts', async () => {
+    process.env.UPSTASH_REDIS_REST_URL = 'https://cluster-redis.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'cluster-token';
+
+    // Shared Redis datastore across instances
+    const sharedRedisStore = new Map<string, unknown>();
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const parsedBody = JSON.parse(String(init?.body || '[]'));
+      const command = parsedBody[0];
+
+      if (command === 'SET') {
+        const key = String(parsedBody[1]);
+        const isNx = parsedBody.includes('NX');
+        if (isNx && sharedRedisStore.has(key)) {
+          // Redis SET ... NX returns null when key exists
+          return new Response(JSON.stringify({ result: null }));
+        }
+        sharedRedisStore.set(key, parsedBody[2]);
+        return new Response(JSON.stringify({ result: 'OK' }));
+      }
+
+      if (command === 'INCR') {
+        const key = String(parsedBody[1]);
+        const current = (Number(sharedRedisStore.get(key)) || 0) + 1;
+        sharedRedisStore.set(key, current);
+        return new Response(JSON.stringify({ result: current }));
+      }
+
+      if (command === 'EXPIRE') {
+        return new Response(JSON.stringify({ result: 1 }));
+      }
+
+      return new Response(JSON.stringify({ result: null }));
+    }) as typeof fetch;
+
+    try {
+      // Instance A triggers the alert first
+      _resetMonitoringState(); // Instance A local memory
+      const instanceA_Alert = await reportOperationalAlertAsync('REDIS_OUTAGE', { key: 'cluster-db-partition' });
+      assert.ok(instanceA_Alert, 'Instance A should acquire the Redis slot and emit alert');
+
+      // Instance B starts with completely clean local memory (simulating a separate container/process)
+      _resetMonitoringState(); // Instance B local memory (empty in-memory map)
+      const instanceB_Alert = await reportOperationalAlertAsync('REDIS_OUTAGE', { key: 'cluster-db-partition' });
+
+      // Instance B must NOT fall back to in-memory deduplication; Redis confirmed key already exists (result: null)
+      assert.strictEqual(instanceB_Alert, null, 'Instance B must NOT emit duplicate alert when Redis holds key');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('regression: two independent application instances aggregate auth failures in shared Redis and alert via async distributed path', async () => {
+    process.env.UPSTASH_REDIS_REST_URL = 'https://cluster-redis.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'cluster-token';
+
+    const sharedRedisStore = new Map<string, unknown>();
+    let alertEmissions = 0;
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const parsedBody = JSON.parse(String(init?.body || '[]'));
+      const command = parsedBody[0];
+
+      if (command === 'SET') {
+        const key = String(parsedBody[1]);
+        const isNx = parsedBody.includes('NX');
+        if (isNx && sharedRedisStore.has(key)) {
+          return new Response(JSON.stringify({ result: null }));
+        }
+        sharedRedisStore.set(key, parsedBody[2]);
+        return new Response(JSON.stringify({ result: 'OK' }));
+      }
+
+      if (command === 'INCR') {
+        const key = String(parsedBody[1]);
+        const current = (Number(sharedRedisStore.get(key)) || 0) + 1;
+        sharedRedisStore.set(key, current);
+        return new Response(JSON.stringify({ result: current }));
+      }
+
+      if (command === 'EXPIRE') {
+        return new Response(JSON.stringify({ result: 1 }));
+      }
+
+      return new Response(JSON.stringify({ result: null }));
+    }) as typeof fetch;
+
+    const originalConsoleError = console.error;
+    console.error = (msg: unknown, json?: unknown) => {
+      if (typeof json === 'string') {
+        try {
+          const parsed = JSON.parse(json);
+          if (parsed.type === 'REPEATED_AUTH_FAILURES') {
+            alertEmissions += 1;
+          }
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    try {
+      const victimIp = '198.51.100.222';
+
+      // Instance A records 2 auth failures from victimIp
+      _resetMonitoringState();
+      await recordAuthFailure(victimIp);
+      await recordAuthFailure(victimIp);
+      assert.strictEqual(alertEmissions, 0);
+
+      // Instance B (separate instance, fresh memory) records 3 more auth failures from victimIp
+      _resetMonitoringState();
+      await recordAuthFailure(victimIp);
+      await recordAuthFailure(victimIp);
+      await recordAuthFailure(victimIp); // Reaches 5 in shared Redis!
+
+      // Alert emitted by Instance B
+      assert.strictEqual(alertEmissions, 1, 'Instance B should trigger alert when shared Redis counter reaches 5');
+
+      // Instance A (fresh memory) records 6th failure
+      _resetMonitoringState();
+      await recordAuthFailure(victimIp);
+
+      // Alert should still be 1 because Redis SET NX deduplication suppressed the duplicate on Instance A!
+      assert.strictEqual(alertEmissions, 1, 'Instance A must not duplicate alert within the deduplication window');
+    } finally {
+      console.error = originalConsoleError;
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
