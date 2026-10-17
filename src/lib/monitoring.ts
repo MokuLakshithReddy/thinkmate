@@ -75,14 +75,25 @@ let webhookDeliveriesFailed = 0;
 let lastWebhookError: string | null = null;
 let lastWebhookDeliveredAt: number | null = null;
 
+export interface RedisCommandOutcome<T = unknown> {
+  success: boolean;
+  result?: T | null;
+  error?: string;
+}
+
 /**
  * Execute an atomic command on Upstash Redis via REST API.
- * Returns null if Redis is unconfigured or request fails.
+ * Distinguishes an intentional Redis response containing { result: null } (e.g. SET NX conflict)
+ * from a connection or authentication failure (success: false).
  */
-async function executeRedisCommand<T = unknown>(command: (string | number)[]): Promise<T | null> {
+export async function executeRedisCommand<T = unknown>(
+  command: (string | number)[]
+): Promise<RedisCommandOutcome<T>> {
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token || typeof fetch === 'undefined') return null;
+  if (!url || !token || typeof fetch === 'undefined') {
+    return { success: false, error: 'Redis unconfigured' };
+  }
 
   try {
     const res = await fetch(url, {
@@ -95,31 +106,45 @@ async function executeRedisCommand<T = unknown>(command: (string | number)[]): P
       signal: AbortSignal.timeout(2000),
     });
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      return { success: false, error: `HTTP ${res.status}` };
+    }
     const json = await res.json();
-    return json.result as T;
-  } catch {
-    return null;
+    return { success: true, result: json.result as T | null };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
 /**
  * Checks whether an alert with this signature should be emitted.
- * If Redis is configured, uses atomic SET NX (set if not exists) across all instances.
- * Falls back to in-memory timestamp tracking if Redis is unreachable.
+ * If Redis is configured and reachable:
+ *   - SET key 1 EX 60 NX returns 'OK' -> slot successfully acquired (emit).
+ *   - SET key 1 EX 60 NX returns null -> another instance already owns the key within 60s (DO NOT EMIT).
+ * Falls back to in-memory timestamp tracking ONLY when Redis is unconfigured or encounters a network failure.
  */
-async function acquireDeduplicationSlot(signature: string, force: boolean): Promise<boolean> {
+export async function acquireDeduplicationSlot(signature: string, force: boolean): Promise<boolean> {
   if (force) return true;
 
   const redisKey = `alert:dedup:${signature}`;
-  const redisResult = await executeRedisCommand<string>(['SET', redisKey, '1', 'EX', DEDUPLICATION_WINDOW_SEC, 'NX']);
+  const outcome = await executeRedisCommand<string>(['SET', redisKey, '1', 'EX', DEDUPLICATION_WINDOW_SEC, 'NX']);
 
-  if (redisResult !== null) {
-    // If result is 'OK', slot was successfully acquired (key was newly set)
-    return redisResult === 'OK';
+  if (outcome.success) {
+    // Redis responded affirmatively.
+    // 'OK' means this instance acquired the lock.
+    // null means another instance already holds the lock within the window.
+    // In BOTH cases, do NOT fall back to in-memory.
+    const acquired = outcome.result === 'OK';
+    if (acquired) {
+      alertDeduplicationMap.set(signature, Date.now());
+    }
+    return acquired;
   }
 
-  // Fallback to in-memory deduplication
+  // Fallback to in-memory deduplication ONLY on Redis/network failure or when unconfigured
   const now = Date.now();
   const lastEmitted = alertDeduplicationMap.get(signature) || 0;
   if (now - lastEmitted < DEDUPLICATION_WINDOW_MS) {
@@ -160,6 +185,10 @@ export function reportOperationalAlert(
 
   // Structured console log for Datadog / CloudWatch / GCP
   console.error(`\n[OPERATOR ALERT] [${alertPayload.severity}] ${type}:`, JSON.stringify(alertPayload, null, 2), '\n');
+
+  // Register in Redis asynchronously so separate application instances also deduplicate this signature
+  const redisKey = `alert:dedup:${signature}`;
+  void executeRedisCommand(['SET', redisKey, '1', 'EX', DEDUPLICATION_WINDOW_SEC, 'NX']).catch(() => {});
 
   // External webhook dispatch with status code verification
   const webhookUrl = process.env.ALERT_WEBHOOK_URL;
@@ -219,16 +248,19 @@ export async function dispatchWebhookNotification(url: string, payload: Operatio
 /**
  * Tracks failed authentication attempts by IP across instances using Redis, falling back to local memory.
  * Emits REPEATED_AUTH_FAILURES alert if failure threshold is reached within the observation window.
+ * Routes the resulting alert through the distributed asynchronous deduplication path.
  */
 export async function recordAuthFailure(ip: string, route: string = '/api/auth/login'): Promise<number> {
   let count = 0;
+  let isDistributed = false;
 
   // Try distributed counter in Redis first
   const redisKey = `auth:failures:${ip}`;
-  const incrResult = await executeRedisCommand<number>(['INCR', redisKey]);
+  const incrOutcome = await executeRedisCommand<number>(['INCR', redisKey]);
 
-  if (typeof incrResult === 'number') {
-    count = incrResult;
+  if (incrOutcome.success && typeof incrOutcome.result === 'number') {
+    count = incrOutcome.result;
+    isDistributed = true;
     if (count === 1) {
       // Set window TTL on the first recorded failure
       await executeRedisCommand(['EXPIRE', redisKey, 60]);
@@ -247,12 +279,13 @@ export async function recordAuthFailure(ip: string, route: string = '/api/auth/l
   }
 
   if (count >= AUTH_FAILURE_ALERT_THRESHOLD) {
-    reportOperationalAlert('REPEATED_AUTH_FAILURES', {
+    // Route repeated-auth-failure alerts through the distributed async path!
+    await reportOperationalAlertAsync('REPEATED_AUTH_FAILURES', {
       ip,
       route,
       count,
       windowMs: AUTH_FAILURE_WINDOW_MS,
-      distributed: typeof incrResult === 'number',
+      distributed: isDistributed,
       runbook: 'Investigate IP for credential stuffing or brute-force attack. Consider blocking at edge firewall.',
     });
   }
