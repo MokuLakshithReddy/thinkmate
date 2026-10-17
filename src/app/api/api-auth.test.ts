@@ -21,6 +21,8 @@ import {
   checkRateLimitAsync,
   checkRateLimit,
   getClientIp,
+  parseAndValidateIp,
+  isValidIp,
   MemoryRateLimitStore,
   UpstashRedisRateLimitStore,
   getActiveRateLimitStore,
@@ -2838,6 +2840,123 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       else delete process.env.UPSTASH_REDIS_REST_URL;
       if (origToken !== undefined) process.env.UPSTASH_REDIS_REST_TOKEN = origToken;
       else delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    }
+  });
+
+  test('parseAndValidateIp and isValidIp correctly handle standards-compliant IPv4 and IPv6 formats', () => {
+    // 1. Compressed IPv6
+    assert.strictEqual(parseAndValidateIp('2001:db8::1'), '2001:db8::1');
+    assert.strictEqual(isValidIp('2001:db8::1'), true);
+    assert.strictEqual(parseAndValidateIp('fe80::1'), 'fe80::1');
+    assert.strictEqual(parseAndValidateIp('::1'), '::1');
+    assert.strictEqual(parseAndValidateIp('::'), '::');
+
+    // 2. Full uncompressed IPv6
+    const fullIpv6 = '2001:0db8:85a3:0000:0000:8a2e:0370:7334';
+    assert.strictEqual(parseAndValidateIp(fullIpv6), fullIpv6);
+    assert.strictEqual(isValidIp(fullIpv6), true);
+
+    // 3. IPv4-mapped IPv6
+    assert.strictEqual(parseAndValidateIp('::ffff:192.0.2.1'), '::ffff:192.0.2.1');
+
+    // 4. Bracketed IPv6 with and without port
+    assert.strictEqual(parseAndValidateIp('[2001:db8::1]'), '2001:db8::1');
+    assert.strictEqual(parseAndValidateIp('[2001:db8::1]:8080'), '2001:db8::1');
+    assert.strictEqual(parseAndValidateIp('[::1]:3000'), '::1');
+    assert.strictEqual(isValidIp('[2001:db8::1]:8080'), true);
+
+    // 5. IPv4 with and without port
+    assert.strictEqual(parseAndValidateIp('192.0.2.1'), '192.0.2.1');
+    assert.strictEqual(parseAndValidateIp('192.0.2.1:8080'), '192.0.2.1');
+    assert.strictEqual(isValidIp('192.0.2.1:8080'), true);
+
+    // 6. Malformed input and out-of-range ports rejected
+    assert.strictEqual(parseAndValidateIp('2001:db8:::1'), null, 'Triple colon is invalid IPv6');
+    assert.strictEqual(parseAndValidateIp('256.0.0.1'), null, 'Octet > 255 is invalid IPv4');
+    assert.strictEqual(parseAndValidateIp('[2001:db8::1]:abc'), null, 'Non-numeric port is invalid');
+    assert.strictEqual(parseAndValidateIp('[2001:db8::1]:99999'), null, 'Port > 65535 is invalid');
+    assert.strictEqual(parseAndValidateIp('[2001:db8::1]:0'), null, 'Port 0 is invalid');
+    assert.strictEqual(parseAndValidateIp('192.0.2.1:99999'), null, 'IPv4 port > 65535 is invalid');
+    assert.strictEqual(parseAndValidateIp('not-an-ip-address'), null);
+    assert.strictEqual(parseAndValidateIp(''), null);
+    assert.strictEqual(parseAndValidateIp(null), null);
+    assert.strictEqual(parseAndValidateIp(undefined), null);
+  });
+
+  test('getClientIp parses IPv6 clients and respects configured proxy chain depth against spoofing', () => {
+    const origDepth = process.env.TRUSTED_PROXY_DEPTH;
+    const origProvider = process.env.TRUSTED_PROXY_PROVIDER;
+    const origTrust = process.env.TRUST_PROXY;
+
+    try {
+      delete process.env.TRUSTED_PROXY_PROVIDER;
+      process.env.TRUST_PROXY = 'true';
+
+      // 1. Single compressed IPv6 client
+      process.env.TRUSTED_PROXY_DEPTH = '1';
+      const req1 = new Request('http://localhost:3000', {
+        headers: { 'x-forwarded-for': '2001:db8::1' },
+      });
+      assert.strictEqual(getClientIp(req1), '2001:db8::1');
+
+      // 2. Bracketed IPv6 with port
+      const req2 = new Request('http://localhost:3000', {
+        headers: { 'x-forwarded-for': '[2001:db8::1]:8443' },
+      });
+      assert.strictEqual(getClientIp(req2), '2001:db8::1');
+
+      // 3. Multi-hop chain with client spoofing attempt:
+      // Client connects from 2001:db8::1, sends fake '198.51.100.99, 10.0.0.1' in x-forwarded-for.
+      // Trusted edge proxy appends client's actual IP [2001:db8::1]:443.
+      // Header becomes: "198.51.100.99, 10.0.0.1, [2001:db8::1]:443"
+      const spoofedChainReq = new Request('http://localhost:3000', {
+        headers: {
+          'x-forwarded-for': '198.51.100.99, 10.0.0.1, [2001:db8::1]:443',
+        },
+      });
+      assert.strictEqual(
+        getClientIp(spoofedChainReq),
+        '2001:db8::1',
+        'Must select rightmost trusted hop and ignore leftmost spoofed IPs'
+      );
+
+      // 4. Depth 2 with IPv6 intermediate proxy
+      process.env.TRUSTED_PROXY_DEPTH = '2';
+      const depth2Req = new Request('http://localhost:3000', {
+        headers: {
+          'x-forwarded-for': 'spoofed.attacker.ip, 2001:db8::dead:beef, [2001:db8::1]:443',
+        },
+      });
+      assert.strictEqual(
+        getClientIp(depth2Req),
+        '2001:db8::dead:beef',
+        'Depth 2 must select second trusted hop from right'
+      );
+
+      // 5. Vercel provider with IPv6 client
+      process.env.TRUSTED_PROXY_PROVIDER = 'vercel';
+      const vercelIpv6Req = new Request('http://localhost:3000', {
+        headers: {
+          'x-vercel-forwarded-for': '2001:db8::42, 10.0.0.1',
+        },
+      });
+      assert.strictEqual(getClientIp(vercelIpv6Req), '2001:db8::42');
+
+      // 6. Cloudflare provider with IPv6 client
+      process.env.TRUSTED_PROXY_PROVIDER = 'cloudflare';
+      const cfIpv6Req = new Request('http://localhost:3000', {
+        headers: {
+          'cf-connecting-ip': '2001:db8::77',
+        },
+      });
+      assert.strictEqual(getClientIp(cfIpv6Req), '2001:db8::77');
+    } finally {
+      if (origDepth !== undefined) process.env.TRUSTED_PROXY_DEPTH = origDepth;
+      else delete process.env.TRUSTED_PROXY_DEPTH;
+      if (origProvider !== undefined) process.env.TRUSTED_PROXY_PROVIDER = origProvider;
+      else delete process.env.TRUSTED_PROXY_PROVIDER;
+      if (origTrust !== undefined) process.env.TRUST_PROXY = origTrust;
+      else delete process.env.TRUST_PROXY;
     }
   });
 });
