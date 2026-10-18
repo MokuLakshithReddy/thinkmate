@@ -3,6 +3,7 @@ import { getServiceSupabaseClient } from '@/services/db/supabase-client';
 import { UpstashRedisRateLimitStore, verifyRateLimiterConfig } from '@/lib/rate-limiter';
 import { getSessionEncryptionKeyStatus } from '@/lib/production-config';
 import { reportOperationalAlertAsync } from '@/lib/monitoring';
+import { DEFAULT_GEMINI_MODEL } from '@/config/models';
 
 type RateLimiterStatus = 'ready' | 'memory_fallback' | 'unconfigured' | 'invalid' | 'unreachable';
 
@@ -102,7 +103,7 @@ export async function GET(req: NextRequest) {
       aiProvider: {
         provider: 'Google GenAI (Gemini)',
         status: aiStatus,
-        model: 'gemini-2.5-flash',
+        model: DEFAULT_GEMINI_MODEL,
       },
       authInfrastructure,
     },

@@ -7,6 +7,7 @@ import {
 import { getSystemPrompt } from './prompts';
 import { ThinkingMode, Insight, normalizeInsightCategory, normalizeInsightStatus } from '@/types';
 import { reportOperationalAlertAsync } from '@/lib/monitoring';
+import { DEFAULT_GEMINI_MODEL } from '@/config/models';
 import { z } from 'zod';
 
 const StreamMetadataSchema = z.object({
@@ -68,7 +69,7 @@ export class GeminiThinkingService implements ThinkingAIService {
     try {
       const ai = new GoogleGenAI({ apiKey: activeKey });
       const systemInstruction = getSystemPrompt(request.currentMode);
-      const modelName = request.model || 'gemini-2.5-flash';
+      const modelName = request.model || DEFAULT_GEMINI_MODEL;
 
       // Format conversation history for Gemini API
       // In @google/genai: contents format is array of { role: 'user' | 'model', parts: [{ text }] }
@@ -85,16 +86,34 @@ export class GeminiThinkingService implements ThinkingAIService {
         });
       }
 
-      const responseStream = await ai.models.generateContentStream({
-        model: modelName,
-        contents,
-        config: {
-          systemInstruction,
-          maxOutputTokens: 2500,
-          temperature: 0.7,
-          abortSignal,
-        },
-      });
+      let responseStream;
+      try {
+        responseStream = await ai.models.generateContentStream({
+          model: modelName,
+          contents,
+          config: {
+            systemInstruction,
+            maxOutputTokens: 2500,
+            temperature: 0.7,
+            abortSignal,
+          },
+        });
+      } catch (streamErr) {
+        if (modelName !== 'gemini-3.8-flash') {
+          responseStream = await ai.models.generateContentStream({
+            model: 'gemini-3.8-flash',
+            contents,
+            config: {
+              systemInstruction,
+              maxOutputTokens: 2500,
+              temperature: 0.7,
+              abortSignal,
+            },
+          });
+        } else {
+          throw streamErr;
+        }
+      }
 
       let pendingBuffer = '';
       let jsonMetaBuffer = '';
