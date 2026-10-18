@@ -38,5 +38,12 @@ export async function fillAuthForm(page: Page, email: string, password: string) 
   const form = authForm(page);
   await form.getByPlaceholder('you@domain.com').fill(email);
   await form.getByPlaceholder('••••••••').fill(password);
+  const loginResponsePromise = page.waitForResponse(
+    (r) => new URL(r.url()).pathname === '/api/auth/login',
+    { timeout: 15_000 }
+  );
   await form.locator('button[type="submit"]').click();
+  const loginResponse = await loginResponsePromise;
+  expect(loginResponse.status(), `Login failed with status ${loginResponse.status()}`).toBe(200);
 }
+

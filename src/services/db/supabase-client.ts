@@ -36,12 +36,13 @@ export function getUserSupabaseClient(accessToken: string): SupabaseClient {
  */
 export function getServiceSupabaseClient(): SupabaseClient {
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!serviceKey || !supabaseUrl) {
+  const currentUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || supabaseUrl;
+  if (!serviceKey || !currentUrl) {
     // If running in unit test environment or during Next.js static build phase
     if (process.env.NODE_ENV === 'test' || process.env.NEXT_PHASE === 'phase-production-build') {
       return supabase;
     }
     throw new Error('SUPABASE_SERVICE_ROLE_KEY and NEXT_PUBLIC_SUPABASE_URL must be configured in environment variables.');
   }
-  return createClient(supabaseUrl, serviceKey);
+  return createClient(currentUrl, serviceKey);
 }

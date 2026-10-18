@@ -165,10 +165,74 @@ export async function acquireDeduplicationSlot(signature: string, force: boolean
  * 1. Outputs structured JSON log to console.error (captured by cloud loggers).
  * 2. Dispatches asynchronously to ALERT_WEBHOOK_URL if configured, validating HTTP response.
  */
+/**
+ * Schedules background asynchronous work using Next.js after() when available in serverless
+ * request execution contexts, falling back to a monitored detached promise.
+ */
+export function scheduleBackgroundWork(task: () => Promise<void>): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const nextServer = require('next/server');
+    if (typeof nextServer.after === 'function') {
+      nextServer.after(task);
+      return;
+    }
+  } catch {
+    // Non-server context or after() unavailable
+  }
+  void task().catch(() => {});
+}
+
+/**
+ * Persists an alert to a durable Redis queue ('alert:durable_queue') with bounded retention (500 entries).
+ * Ensures critical alerts are preserved even across serverless execution terminations.
+ */
+export async function enqueueDurableAlert(alert: OperationalAlert): Promise<boolean> {
+  const payloadStr = JSON.stringify(alert);
+  const outcome = await executeRedisCommand<number>([
+    'LPUSH',
+    'alert:durable_queue',
+    payloadStr,
+  ]);
+  if (outcome.success) {
+    void executeRedisCommand(['LTRIM', 'alert:durable_queue', '0', '499']).catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Retrieves the latest alerts stored in the durable Redis queue.
+ */
+export async function peekDurableAlertQueue(limit = 10): Promise<OperationalAlert[]> {
+  const outcome = await executeRedisCommand<string[]>([
+    'LRANGE',
+    'alert:durable_queue',
+    '0',
+    String(Math.max(0, limit - 1)),
+  ]);
+  if (!outcome.success || !Array.isArray(outcome.result)) return [];
+  const alerts: OperationalAlert[] = [];
+  for (const item of outcome.result) {
+    try {
+      alerts.push(JSON.parse(item));
+    } catch {
+      // ignore malformed item
+    }
+  }
+  return alerts;
+}
+
+/**
+ * Dispatches an operational alert.
+ * 1. Outputs structured JSON log to console.error (captured by cloud loggers).
+ * 2. Enqueues critical alerts durably into Redis.
+ * 3. Dispatches to ALERT_WEBHOOK_URL via supported background mechanism or durable queue.
+ */
 export function reportOperationalAlert(
   type: AlertType,
   details: AlertDetails = {},
-  options: { force?: boolean } = {}
+  options: { force?: boolean; skipBackgroundWebhook?: boolean } = {}
 ): OperationalAlert | null {
   const signature = `${type}:${details.key || details.route || details.ip || 'general'}`;
 
@@ -196,32 +260,66 @@ export function reportOperationalAlert(
   const redisKey = `alert:dedup:${signature}`;
   void executeRedisCommand(['SET', redisKey, '1', 'EX', DEDUPLICATION_WINDOW_SEC, 'NX']).catch(() => {});
 
-  // External webhook dispatch with status code verification
+  // For critical alerts, durably record in Redis queue so notifications survive serverless termination
+  let alreadyEnqueuedDurable = false;
+  if (alertPayload.severity === 'CRITICAL') {
+    void enqueueDurableAlert(alertPayload).catch(() => {});
+    alreadyEnqueuedDurable = true;
+  }
+
+  // External webhook dispatch with status code verification and background scheduling
   const webhookUrl = process.env.ALERT_WEBHOOK_URL;
-  if (webhookUrl && typeof fetch !== 'undefined') {
-    void dispatchWebhookNotification(webhookUrl, alertPayload).catch((webhookErr) => {
-      webhookDeliveriesFailed += 1;
-      lastWebhookError = webhookErr instanceof Error ? webhookErr.message : String(webhookErr);
-      console.warn('[OPERATOR ALERT] Webhook delivery failed:', lastWebhookError);
-    });
+  if (!options.skipBackgroundWebhook && webhookUrl && typeof fetch !== 'undefined') {
+    const deliverTask = async () => {
+      try {
+        await dispatchWebhookNotification(webhookUrl, alertPayload);
+      } catch (webhookErr) {
+        webhookDeliveriesFailed += 1;
+        lastWebhookError = webhookErr instanceof Error ? webhookErr.message : String(webhookErr);
+        console.warn('[OPERATOR ALERT] Webhook delivery failed:', lastWebhookError);
+        // Persist non-critical alerts that failed delivery to durable queue as backup
+        if (!alreadyEnqueuedDurable) {
+          await enqueueDurableAlert(alertPayload).catch(() => {});
+        }
+      }
+    };
+
+    scheduleBackgroundWork(deliverTask);
   }
 
   return alertPayload;
 }
 
 /**
- * Async version of reportOperationalAlert with cross-instance Redis deduplication guarantees.
+ * Async version of reportOperationalAlert with cross-instance Redis deduplication guarantees
+ * and optional synchronous delivery verification.
  */
 export async function reportOperationalAlertAsync(
   type: AlertType,
   details: AlertDetails = {},
-  options: { force?: boolean } = {}
+  options: { force?: boolean; awaitDelivery?: boolean } = {}
 ): Promise<OperationalAlert | null> {
   const signature = `${type}:${details.key || details.route || details.ip || 'general'}`;
   const shouldEmit = await acquireDeduplicationSlot(signature, !!options.force);
   if (!shouldEmit) return null;
 
-  return reportOperationalAlert(type, details, { force: true });
+  const shouldAwait = Boolean(options.awaitDelivery || SEVERITY_MAP[type] === 'CRITICAL');
+  const alert = reportOperationalAlert(type, details, { force: true, skipBackgroundWebhook: shouldAwait });
+  if (alert && shouldAwait) {
+    const webhookUrl = process.env.ALERT_WEBHOOK_URL;
+    if (webhookUrl && typeof fetch !== 'undefined') {
+      try {
+        await dispatchWebhookNotification(webhookUrl, alert);
+      } catch (err) {
+        webhookDeliveriesFailed += 1;
+        lastWebhookError = err instanceof Error ? err.message : String(err);
+        if (alert.severity !== 'CRITICAL') {
+          await enqueueDurableAlert(alert).catch(() => {});
+        }
+      }
+    }
+  }
+  return alert;
 }
 
 /**

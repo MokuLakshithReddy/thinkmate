@@ -5,6 +5,8 @@ import {
   reportOperationalAlertAsync,
   recordAuthFailure,
   dispatchWebhookNotification,
+  enqueueDurableAlert,
+  peekDurableAlertQueue,
   getMonitoringDiagnostics,
   _resetMonitoringState,
   OperationalAlert,
@@ -453,6 +455,120 @@ describe('Operational Monitoring & Alerting System', () => {
 
       const emittedCount = (instance1Result ? 1 : 0) + (instance2Result ? 1 : 0);
       assert.strictEqual(emittedCount, 1, 'Simultaneous multi-instance contention must yield exactly 1 emitted alert');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('persists critical alerts into durable Redis queue and peeks them accurately', async () => {
+    process.env.UPSTASH_REDIS_REST_URL = 'https://cluster-redis.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'cluster-token';
+
+    const redisQueue: string[] = [];
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const parsedBody = JSON.parse(String(init?.body || '[]'));
+      const command = parsedBody[0];
+
+      if (command === 'LPUSH') {
+        redisQueue.unshift(parsedBody[2]);
+        return new Response(JSON.stringify({ result: redisQueue.length }));
+      }
+      if (command === 'LRANGE') {
+        const start = parseInt(parsedBody[2], 10);
+        const stop = parseInt(parsedBody[3], 10);
+        return new Response(JSON.stringify({ result: redisQueue.slice(start, stop + 1) }));
+      }
+      if (command === 'LTRIM') {
+        return new Response(JSON.stringify({ result: 'OK' }));
+      }
+      return new Response(JSON.stringify({ result: 'OK' }));
+    }) as typeof fetch;
+
+    try {
+      const sampleAlert: OperationalAlert = {
+        tag: 'THINKMATE_OPERATOR_ALERT',
+        type: 'READINESS_FAILURE',
+        severity: 'CRITICAL',
+        timestamp: new Date().toISOString(),
+        environment: 'production',
+        details: { route: '/api/health', error: 'Database disconnected' },
+      };
+
+      const enqueued = await enqueueDurableAlert(sampleAlert);
+      assert.strictEqual(enqueued, true, 'Alert should be successfully enqueued to Redis');
+
+      const peeked = await peekDurableAlertQueue(5);
+      assert.strictEqual(peeked.length, 1);
+      assert.strictEqual(peeked[0].type, 'READINESS_FAILURE');
+      assert.strictEqual(peeked[0].details.error, 'Database disconnected');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('records webhook timeout failure and falls back to durable queueing', async () => {
+    process.env.ALERT_WEBHOOK_URL = 'https://slow-webhook.example.com/alerts';
+    process.env.UPSTASH_REDIS_REST_URL = 'https://cluster-redis.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'cluster-token';
+
+    const queuedAlerts: string[] = [];
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const urlStr = String(input);
+      if (urlStr.includes('slow-webhook.example.com')) {
+        // Simulate a client timeout by throwing AbortError
+        const err = new Error('The operation was aborted due to timeout');
+        err.name = 'TimeoutError';
+        throw err;
+      }
+      // Redis calls
+      const parsedBody = JSON.parse(String(init?.body || '[]'));
+      if (parsedBody[0] === 'LPUSH') {
+        queuedAlerts.push(parsedBody[2]);
+        return new Response(JSON.stringify({ result: queuedAlerts.length }));
+      }
+      return new Response(JSON.stringify({ result: 'OK' }));
+    }) as typeof fetch;
+
+    try {
+      const alert = await reportOperationalAlertAsync(
+        'REDIS_OUTAGE',
+        { error: 'Redis connection timeout' },
+        { force: true, awaitDelivery: true }
+      );
+
+      assert.ok(alert);
+      const diag = getMonitoringDiagnostics();
+      assert.strictEqual(diag.webhookDeliveriesFailed, 1);
+      assert.strictEqual(queuedAlerts.length, 1, 'Critical alert must be durably queued exactly once');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('survives Redis outage during alert dispatch and falls back to in-memory deduplication', async () => {
+    process.env.UPSTASH_REDIS_REST_URL = 'https://down-redis.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'down-token';
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      // Simulate complete network failure / outage to Redis
+      throw new Error('ECONNREFUSED connect to down-redis.upstash.io');
+    }) as typeof fetch;
+
+    try {
+      _resetMonitoringState();
+
+      // First alert should succeed via in-memory fallback despite Redis being offline
+      const alert1 = await reportOperationalAlertAsync('REDIS_OUTAGE', { error: 'Network blip' });
+      assert.ok(alert1, 'First alert must be emitted via in-memory fallback during Redis outage');
+
+      // Second identical alert should be throttled by in-memory deduplication
+      const alert2 = await reportOperationalAlertAsync('REDIS_OUTAGE', { error: 'Network blip' });
+      assert.strictEqual(alert2, null, 'Second alert must be throttled by in-memory deduplication');
     } finally {
       globalThis.fetch = originalFetch;
     }

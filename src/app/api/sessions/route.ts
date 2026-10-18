@@ -194,8 +194,8 @@ export async function DELETE(req: NextRequest) {
     await getRepository().deleteSession(id, authUser.id);
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
-    const errorMessage = (err as Error)?.message || '';
-    if (errorMessage.includes('unauthorized') || errorMessage.includes('ownership')) {
+    const errorMessage = ((err as Error)?.message || '').toLowerCase();
+    if (errorMessage.includes('unauthorized') || errorMessage.includes('ownership') || errorMessage.includes('forbidden')) {
       return NextResponse.json({ error: 'Unauthorized session operation' }, { status: 403 });
     }
     return NextResponse.json({ error: 'Failed to delete session' }, { status: 500 });
