@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { CoThinkerStep, ChoiceOption, WORKFLOW_STAGES } from '@/types';
+import { DEFAULT_GEMINI_MODEL } from '@/config/models';
 
 export interface CoThinkPromptContext {
   userName?: string;
@@ -337,15 +338,31 @@ OPTIONS:
       parts: [{ text: userMessage + (selectedOptionId ? ` [Selected Option: ${selectedOptionId}]` : '') }],
     });
 
-    const modelToUse = context.model || 'gemini-2.5-flash';
-    const response = await this.ai.models.generateContent({
-      model: modelToUse,
-      contents,
-      config: {
-        systemInstruction: systemPrompt,
-        temperature: 0.6,
-      },
-    });
+    const modelToUse = context.model || DEFAULT_GEMINI_MODEL;
+    let response;
+    try {
+      response = await this.ai.models.generateContent({
+        model: modelToUse,
+        contents,
+        config: {
+          systemInstruction: systemPrompt,
+          temperature: 0.6,
+        },
+      });
+    } catch (modelErr) {
+      if (modelToUse !== 'gemini-3.8-flash') {
+        response = await this.ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents,
+          config: {
+            systemInstruction: systemPrompt,
+            temperature: 0.6,
+          },
+        });
+      } else {
+        throw modelErr;
+      }
+    }
 
     const text = response.text || '';
     if (!text.trim()) {

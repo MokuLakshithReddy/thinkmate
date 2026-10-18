@@ -8,6 +8,7 @@ import { PreviewPanel } from '@/components/cothinker/PreviewPanel';
 import { SettingsModal } from '@/components/modals/SettingsModal';
 import { AuthModal } from '@/components/modals/AuthModal';
 import { WorkflowStateMachine } from '@/services/workflow/state-machine';
+import { DEFAULT_GEMINI_MODEL } from '@/config/models';
 import {
   getStoredSessions,
   saveStoredSessions,
@@ -554,7 +555,7 @@ export default function Home() {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 
       const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-      const selectedModel = (typeof window !== 'undefined' ? localStorage.getItem('thinkmate_model') : null) || 'gemini-2.5-flash';
+      const selectedModel = (typeof window !== 'undefined' ? localStorage.getItem('thinkmate_model') : null) || DEFAULT_GEMINI_MODEL;
 
       const requestPayload = JSON.stringify({
           sessionId: currentSessionIdRef.current,
