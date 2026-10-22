@@ -26,6 +26,28 @@ test('login rejects cross-origin requests', async ({ request }) => {
   expect(res.status()).toBe(403);
 });
 
+test('CSP policy enforces per-request nonces matching all rendered script tags', async ({ request, page }) => {
+  const res = await request.get('/');
+  expect(res.status()).toBe(200);
+  const csp = res.headers()['content-security-policy'] || '';
+  expect(csp).toContain('script-src');
+  expect(csp).toContain('strict-dynamic');
+  const nonceMatch = csp.match(/'nonce-([^']+)'/);
+  expect(nonceMatch, 'CSP header must contain a script nonce').toBeTruthy();
+  const nonce = nonceMatch![1];
+
+  const html = await res.text();
+  expect(html).toContain(`nonce="${nonce}"`);
+
+  const consoleErrors: string[] = [];
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') consoleErrors.push(msg.text());
+  });
+  await openApp(page);
+  const cspViolations = consoleErrors.filter((e) => e.toLowerCase().includes('violates content security policy'));
+  expect(cspViolations, `Observed CSP violations in browser: ${cspViolations.join('; ')}`).toEqual([]);
+});
+
 test.describe('real account', () => {
   test.beforeAll(() => {
     if (!email || !password) {
@@ -49,11 +71,15 @@ test.describe('real account', () => {
     const reply = await replied;
     expect(reply.status()).toBe(200);
     const replyJson = await reply.json();
-    expect(replyJson.executionMode).not.toBe('error');
+    expect(replyJson.executionMode, 'Execution mode must be genuine gemini').toBe('gemini');
+    expect(typeof replyJson.message).toBe('string');
+    expect(replyJson.message.trim().length, 'Assistant reply message must be non-empty').toBeGreaterThan(10);
+    const assistantSnippet = replyJson.message.trim().slice(0, 30);
 
     await openApp(page, `/?session=${sessionId}`);
     await expect(signOutButton(page)).toBeVisible();
     await expect(page.getByText(/E2E staging check/).first()).toBeVisible();
+    await expect(page.getByText(assistantSnippet).first()).toBeVisible();
 
     await signOutButton(page).click();
     await expect(headerSignInButton(page)).toBeVisible();
@@ -61,3 +87,4 @@ test.describe('real account', () => {
     await expect(headerSignInButton(page)).toBeVisible();
   });
 });
+

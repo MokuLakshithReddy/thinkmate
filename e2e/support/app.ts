@@ -34,9 +34,19 @@ export async function startProblem(page: Page, text: string) {
   await typeMessage(page, text);
 }
 
-export async function fillAuthForm(page: Page, email: string, password: string) {
+export async function fillAuthForm(
+  page: Page,
+  email: string,
+  password: string,
+  options: { path?: string; expectedStatus?: number } = {}
+) {
+  const { path = '/api/auth/login', expectedStatus = 200 } = options;
   const form = authForm(page);
   await form.getByPlaceholder('you@domain.com').fill(email);
   await form.getByPlaceholder('••••••••').fill(password);
+  const responsePromise = page.waitForResponse((r) => new URL(r.url()).pathname === path, { timeout: 15_000 });
   await form.locator('button[type="submit"]').click();
+  const response = await responsePromise;
+  expect(response.status(), `${path} failed with status ${response.status()}`).toBe(expectedStatus);
+  return response;
 }

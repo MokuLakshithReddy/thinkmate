@@ -93,8 +93,8 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ insight });
   } catch (err: unknown) {
-    const msg = (err as Error)?.message || '';
-    if (msg.includes('unauthorized') || msg.includes('ownership')) {
+    const msg = ((err as Error)?.message || '').toLowerCase();
+    if (msg.includes('unauthorized') || msg.includes('ownership') || msg.includes('forbidden')) {
       return NextResponse.json({ error: 'Unauthorized insight operation' }, { status: 403 });
     }
     console.error('Error in POST /api/insights:', err);
@@ -132,8 +132,8 @@ export async function DELETE(req: NextRequest) {
     await getRepository().deleteInsight(id, authUser.id);
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
-    const msg = (err as Error)?.message || '';
-    if (msg.includes('unauthorized') || msg.includes('ownership')) {
+    const msg = ((err as Error)?.message || '').toLowerCase();
+    if (msg.includes('unauthorized') || msg.includes('ownership') || msg.includes('forbidden')) {
       return NextResponse.json({ error: 'Unauthorized insight operation' }, { status: 403 });
     }
     console.error('Error in DELETE /api/insights:', err);
