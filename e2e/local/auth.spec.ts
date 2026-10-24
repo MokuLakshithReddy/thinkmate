@@ -10,7 +10,7 @@ test.describe('signup, email confirmation, login and logout (Supabase mocked)', 
 
     await headerSignInButton(page).click();
     await page.getByRole('button', { name: 'Create Account', exact: true }).first().click();
-    await fillAuthForm(page, 'new-user@example.com', 'correct-horse-battery');
+    await fillAuthForm(page, 'new-user@example.com', 'correct-horse-battery', { path: '/api/auth/signup' });
 
     await expect(page.getByText('Please check your email to confirm your account before signing in.')).toBeVisible();
     await expect(authForm(page).getByPlaceholder('••••••••')).toHaveValue('');
@@ -31,7 +31,7 @@ test.describe('signup, email confirmation, login and logout (Supabase mocked)', 
     await openApp(page);
 
     await headerSignInButton(page).click();
-    await fillAuthForm(page, USER.email, 'wrong-password');
+    await fillAuthForm(page, USER.email, 'wrong-password', { expectedStatus: 401 });
     await expect(page.getByText('Invalid login credentials')).toBeVisible();
     await expect(signOutButton(page)).toHaveCount(0);
 
