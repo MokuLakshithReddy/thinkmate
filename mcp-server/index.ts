@@ -126,6 +126,7 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
       inputSchema: { workspace_id: z.string().uuid() },
     },
     async ({ workspace_id }) => {
+      const correlationId = crypto.randomUUID();
       try {
         const s = await loadState(sb, workspace_id);
         if (!s) return fail('Workspace not found or access denied.');
@@ -152,7 +153,12 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
             .slice(0, 8000)
         );
       } catch (err) {
-        return fail(`Failed to load workspace context: ${err instanceof Error ? err.message : String(err)}`);
+        console.error(`[MCP Context Load Error cid=${correlationId}]:`, err);
+        return fail(
+          process.env.NODE_ENV === 'production'
+            ? `workspace_read_failed: Failed to load workspace context. (ref: ${correlationId})`
+            : `Failed to load workspace context: ${err instanceof Error ? err.message : String(err)}`
+        );
       }
     }
   );
@@ -320,21 +326,37 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
       },
     },
     async ({ workspace_id, message, client_msg_id }) => {
-      // Daily turn limit across the user's workspaces
+      const correlationId = crypto.randomUUID();
+
+      // Daily turn limit across the user's workspaces (Layer 8 daily guard)
       try {
         const { data: used, error: rpcErr } = await sb.rpc('tm_turns_last_day');
-        if (!rpcErr && (used ?? 0) >= Number(process.env.TM_DAILY_TURNS ?? 300)) {
-          return fail('Daily turn limit reached.');
+        if (rpcErr) {
+          console.error(`[MCP Quota Check Error cid=${correlationId}]:`, rpcErr);
+          if (process.env.NODE_ENV === 'production') {
+            return fail(`quota_service_unavailable: Daily turn quota service unavailable. (ref: ${correlationId})`);
+          }
+        } else if ((used ?? 0) >= Number(process.env.TM_DAILY_TURNS ?? 300)) {
+          return fail('daily_cap: Daily turn limit reached.');
         }
-      } catch {
-        // Fallback for offline/mock environments if RPC unavailable
+      } catch (err) {
+        console.error(`[MCP Quota Check Exception cid=${correlationId}]:`, err);
+        if (process.env.NODE_ENV === 'production') {
+          return fail(`quota_service_unavailable: Daily turn quota service unavailable. (ref: ${correlationId})`);
+        }
+        // Explicit non-production fallback for offline/mock test environments
       }
 
       let state;
       try {
         state = await loadState(sb, workspace_id);
       } catch (e) {
-        return fail(`Failed to read workspace state: ${safeErr(e)}`);
+        console.error(`[MCP Workspace Read Error cid=${correlationId}]:`, e);
+        return fail(
+          process.env.NODE_ENV === 'production'
+            ? `workspace_read_failed: Failed to read workspace state. (ref: ${correlationId})`
+            : `Failed to read workspace state: ${safeErr(e)}`
+        );
       }
       if (!state) return fail('Workspace not found or access denied.');
 
@@ -387,7 +409,7 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
       ];
 
       if (DIRECT.test(message)) {
-        await logEvent(sb, workspace_id, 'direct_request', {});
+        await logEvent(sb, workspace_id, 'direct_request', { correlation_id: correlationId });
       }
 
       const t0 = Date.now();
@@ -398,8 +420,13 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
         output = res.output;
         tokens = res.tokens;
       } catch (modelErr) {
-        await logEvent(sb, workspace_id, 'model_error', { message: safeErr(modelErr) });
-        return fail(`AI model execution failed: ${safeErr(modelErr)}`);
+        console.error(`[MCP Model Execution Error cid=${correlationId}]:`, modelErr);
+        await logEvent(sb, workspace_id, 'model_error', { message: safeErr(modelErr), correlation_id: correlationId });
+        return fail(
+          process.env.NODE_ENV === 'production'
+            ? `model_failed: AI model execution failed. (ref: ${correlationId})`
+            : `AI model execution failed: ${safeErr(modelErr)}`
+        );
       }
 
       let applied: TurnAppliedState | null = null;
@@ -420,8 +447,13 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
           userId
         );
       } catch (persistErr) {
-        await logEvent(sb, workspace_id, 'persistence_error', { message: safeErr(persistErr) });
-        return fail(`Failed to persist reasoning turn results to database: ${safeErr(persistErr)}`);
+        console.error(`[MCP Persistence Error cid=${correlationId}]:`, persistErr);
+        await logEvent(sb, workspace_id, 'persistence_error', { message: safeErr(persistErr), correlation_id: correlationId });
+        return fail(
+          process.env.NODE_ENV === 'production'
+            ? `persistence_failed: Failed to persist reasoning turn results to database. (ref: ${correlationId})`
+            : `Failed to persist reasoning turn results to database: ${safeErr(persistErr)}`
+        );
       }
 
       const finalReply = applied?.effective_reply ?? output.reply;
