@@ -57,6 +57,14 @@ jobs:
           EXPECTED_STAGING_PROJECT_REF: ${{ vars.EXPECTED_STAGING_PROJECT_REF || secrets.EXPECTED_STAGING_PROJECT_REF }}
         run: npx tsx scripts/verify-supabase-staging.ts
 
+      - name: Run Staging RPC Concurrency & User-Level Lock Suite
+        env:
+          STAGING_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}
+          STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
+          STAGING_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
+          EXPECTED_STAGING_PROJECT_REF: ${{ vars.EXPECTED_STAGING_PROJECT_REF || secrets.EXPECTED_STAGING_PROJECT_REF }}
+        run: npx tsx scripts/verify-staging-rpc.ts
+
       - name: Run Cross-User RLS Isolation Suite
         env:
           STAGING_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}

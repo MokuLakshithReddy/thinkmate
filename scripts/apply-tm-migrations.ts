@@ -10,6 +10,7 @@ const REQUIRED_RLS_TABLES = [
   'tm_decisions',
   'tm_events',
   'tm_members',
+  'tm_user_quotas',
 ];
 
 const KNOWN_PRODUCTION_REFS = new Set([
@@ -112,6 +113,7 @@ export async function applyMigrations() {
     '006_quota_idempotency.sql',
     '007_atomic_turn_rpc.sql',
     '008_atomic_quota_reservation.sql',
+    '009_user_level_quota_lock.sql',
   ];
 
   // 3. Apply pending migrations sequentially

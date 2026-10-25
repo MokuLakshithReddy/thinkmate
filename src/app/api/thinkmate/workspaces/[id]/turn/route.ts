@@ -33,7 +33,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     );
   }
 
-  // 2. Atomic daily quota check & reservation (prevents boundary race conditions under concurrency)
+  // 2. Atomic daily quota check & reservation (user-level lock prevents boundary race conditions)
   const dailyLimit = Number(process.env.TM_DAILY_TURNS ?? 300);
   try {
     const { data: reserveData, error: reserveErr } = await sb.rpc('tm_reserve_turn_quota', {
@@ -41,22 +41,34 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       p_daily_limit: dailyLimit,
     });
 
-    if (!reserveErr && reserveData) {
-      if (!reserveData.allowed) {
-        return NextResponse.json({ error: 'daily_cap' }, { status: 429 });
+    if (reserveErr) {
+      console.error('[Turn Quota Reservation RPC Error]:', reserveErr);
+      // In production, treat unexpected reservation failure strictly as a service error (fail closed)
+      if (process.env.NODE_ENV === 'production') {
+        return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
       }
-    } else {
-      // Fallback for environments where migration 008 is not yet applied
-      const { data: used, error: quotaErr } = await sb.rpc('tm_turns_last_day');
-      if (quotaErr) {
-        if (process.env.NODE_ENV === 'production') {
-          return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
+
+      // In non-production, fallback is ONLY permitted for positively identified missing RPC migrations
+      const isMissingRpc =
+        reserveErr.message?.includes('function public.tm_reserve_turn_quota') ||
+        reserveErr.message?.includes('Could not find') ||
+        reserveErr.code === 'PGRST202';
+
+      if (isMissingRpc) {
+        const { data: used, error: quotaErr } = await sb.rpc('tm_turns_last_day');
+        if (quotaErr) {
+          console.error('[Turn Quota Fallback Error]:', quotaErr);
+        } else if ((used ?? 0) >= dailyLimit) {
+          return NextResponse.json({ error: 'daily_cap' }, { status: 429 });
         }
-      } else if ((used ?? 0) >= dailyLimit) {
-        return NextResponse.json({ error: 'daily_cap' }, { status: 429 });
+      } else {
+        return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
       }
+    } else if (reserveData && !reserveData.allowed) {
+      return NextResponse.json({ error: 'daily_cap' }, { status: 429 });
     }
-  } catch {
+  } catch (err) {
+    console.error('[Turn Quota Reservation Catch Error]:', err);
     if (process.env.NODE_ENV === 'production') {
       return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
     }

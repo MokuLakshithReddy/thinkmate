@@ -356,17 +356,22 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
   });
 
   describe('execute_thinking_turn Reasoning Tool', () => {
-    it('fails closed in production when tm_turns_last_day RPC fails', async () => {
+    it('fails closed in production when tm_reserve_turn_quota fails, without bypassing via fallback', async () => {
       const origEnv = process.env.NODE_ENV;
       const origFailClosed = process.env.RATE_LIMIT_FAIL_CLOSED;
       (process.env as any).NODE_ENV = 'production';
       process.env.RATE_LIMIT_FAIL_CLOSED = 'false';
+      let fallbackCalled = false;
       try {
         const validWsId = 'a0000000-0000-0000-0000-000000000001';
         const mockSb = {
           rpc: async (fn: string) => {
-            if (fn === 'tm_turns_last_day') {
+            if (fn === 'tm_reserve_turn_quota') {
               return { data: null, error: { message: 'RPC service unavailable' } };
+            }
+            if (fn === 'tm_turns_last_day') {
+              fallbackCalled = true;
+              return { data: 5, error: null };
             }
             return { data: null, error: null };
           },
@@ -381,11 +386,57 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
 
         assert.strictEqual(result.isError, true);
         assert.ok(result.content[0].text.includes('quota_service_unavailable'));
+        assert.strictEqual(fallbackCalled, false, 'Production must never fall back to tm_turns_last_day on reservation failure');
       } finally {
         (process.env as any).NODE_ENV = origEnv;
         if (origFailClosed !== undefined) process.env.RATE_LIMIT_FAIL_CLOSED = origFailClosed;
         else delete process.env.RATE_LIMIT_FAIL_CLOSED;
       }
+    });
+
+    it('falls back to tm_turns_last_day in non-production only when tm_reserve_turn_quota is confirmed missing', async () => {
+      const validWsId = 'a0000000-0000-0000-0000-000000000001';
+      let fallbackCalls = 0;
+      const mockSbMissing = {
+        rpc: async (fn: string) => {
+          if (fn === 'tm_reserve_turn_quota') {
+            return { data: null, error: { code: 'PGRST202', message: 'Could not find the function tm_reserve_turn_quota' } };
+          }
+          if (fn === 'tm_turns_last_day') {
+            fallbackCalls++;
+            return { data: 300, error: null };
+          }
+          return { data: null, error: null };
+        },
+      } as any;
+
+      const serverMissing = buildServer(mockSbMissing, 'dev-user-missing');
+      const handlerMissing = (serverMissing as any)._registeredTools['execute_thinking_turn'].handler;
+      const resultMissing = await handlerMissing({ workspace_id: validWsId, message: 'Test missing' });
+      assert.strictEqual(resultMissing.isError, true);
+      assert.ok(resultMissing.content[0].text.includes('daily_cap'));
+      assert.strictEqual(fallbackCalls, 1);
+
+      // Other non-missing errors in non-production must NOT fall back
+      const mockSbOtherErr = {
+        rpc: async (fn: string) => {
+          if (fn === 'tm_reserve_turn_quota') {
+            return { data: null, error: { message: 'deadlock detected' } };
+          }
+          if (fn === 'tm_turns_last_day') {
+            fallbackCalls++;
+            return { data: 0, error: null };
+          }
+          return { data: null, error: null };
+        },
+      } as any;
+
+      const serverOther = buildServer(mockSbOtherErr, 'dev-user-other');
+      const handlerOther = (serverOther as any)._registeredTools['execute_thinking_turn'].handler;
+      const resultOther = await handlerOther({ workspace_id: validWsId, message: 'Test other err' });
+      assert.strictEqual(resultOther.isError, true);
+      assert.ok(resultOther.content[0].text.includes('quota_service_unavailable'));
+      assert.strictEqual(fallbackCalls, 1, 'Non-missing RPC errors must not trigger fallback');
     });
 
     it('returns stable error codes in production without leaking safeErr internals on model failure', async () => {
@@ -397,7 +448,7 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
         const validWsId = 'a0000000-0000-0000-0000-000000000001';
         const mockWs = { id: validWsId, title: 'Test', stage: 'orient', problem_frame_confirmed: true };
         const mockSb = {
-          rpc: async () => ({ data: 0, error: null }),
+          rpc: async () => ({ data: { allowed: true }, error: null }),
           from: () => ({
             select: () => ({
               eq: () => ({
@@ -617,11 +668,13 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
       assert.ok(res2.content[0].text.includes('[IDEMPOTENT REPLAY]'));
     });
 
-    it('enforces atomic quota reservation under concurrency at the daily limit boundary', async () => {
-      const validWsId = 'a0000000-0000-0000-0000-000000000001';
-      const mockWs = { id: validWsId, title: 'Quota Boundary Test', stage: 'orient', problem_frame_confirmed: true };
+    it('enforces atomic quota reservation under concurrency at the daily limit boundary across different workspaces', async () => {
+      const validWsIdA = 'a0000000-0000-0000-0000-000000000001';
+      const validWsIdB = 'a0000000-0000-0000-0000-000000000002';
+      const mockWsA = { id: validWsIdA, title: 'Workspace A', stage: 'orient', problem_frame_confirmed: true };
+      const mockWsB = { id: validWsIdB, title: 'Workspace B', stage: 'orient', problem_frame_confirmed: true };
 
-      // Simulate a database where only 1 slot remains before hitting the daily quota of 300
+      // Simulate user-level quota serialization where only 1 slot remains before hitting the daily quota
       let currentCount = 299;
       const mockSb = {
         rpc: async (fnName: string, params: any) => {
@@ -647,10 +700,11 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
         },
         from: (table: string) => ({
           select: () => ({
-            eq: () => {
-              const res = Promise.resolve({ data: table === 'tm_workspaces' ? mockWs : [], error: null });
+            eq: (_col: string, val: string) => {
+              const ws = val === validWsIdA ? mockWsA : mockWsB;
+              const res = Promise.resolve({ data: table === 'tm_workspaces' ? ws : [], error: null });
               return Object.assign(res, {
-                maybeSingle: () => Promise.resolve({ data: mockWs, error: null }),
+                maybeSingle: () => Promise.resolve({ data: ws, error: null }),
                 order: () => Promise.resolve({ data: [], error: null }),
               });
             },
@@ -671,16 +725,16 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
       const server = buildServer(mockSb, 'quota-boundary-user', mockRunner as any);
       const handler = (server as any)._registeredTools['execute_thinking_turn'].handler;
 
-      // Launch 2 concurrent turns when only 1 slot is remaining
+      // Launch 2 concurrent turns against two DIFFERENT workspaces of the same user when only 1 slot is remaining
       const [res1, res2] = await Promise.all([
-        handler({ workspace_id: validWsId, message: 'Turn 1' }),
-        handler({ workspace_id: validWsId, message: 'Turn 2' }),
+        handler({ workspace_id: validWsIdA, message: 'Turn in Workspace A' }),
+        handler({ workspace_id: validWsIdB, message: 'Turn in Workspace B' }),
       ]);
 
       const successes = [res1, res2].filter((r) => !r.isError);
       const rejections = [res1, res2].filter((r) => r.isError && r.content[0].text.includes('daily_cap'));
 
-      // Exactly one request succeeded and reserved the last slot; the other was rejected by the atomic reservation
+      // Even across different workspaces, user-level quota serialization strictly allows only 1 request
       assert.strictEqual(successes.length, 1);
       assert.strictEqual(rejections.length, 1);
     });

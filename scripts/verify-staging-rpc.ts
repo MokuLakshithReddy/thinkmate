@@ -10,10 +10,10 @@ async function verifyStagingRpc() {
   console.log('=== Staging Database RPC Live Verification ===');
   console.log(`Target: ${SUPABASE_URL}`);
 
-  if (!ANON_KEY || !SERVICE_KEY || !SUPABASE_ACCESS_TOKEN) {
+  if (!ANON_KEY || !SERVICE_KEY) {
     throw new Error(
       'Missing required environment variables for staging verification: ' +
-      'NEXT_PUBLIC_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ACCESS_TOKEN'
+      'STAGING_SUPABASE_ANON_KEY, STAGING_SUPABASE_SERVICE_ROLE_KEY'
     );
   }
 
@@ -21,30 +21,43 @@ async function verifyStagingRpc() {
     auth: { persistSession: false, autoRefreshToken: false }
   });
 
-  // 1. Confirm migration 007 is recorded in _tm_schema_migrations
-  console.log('\n[Check 1] Verifying migration 007 in _tm_schema_migrations table...');
-  const sqlRes = await fetch(`https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${SUPABASE_ACCESS_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ query: 'SELECT name, applied_at FROM public._tm_schema_migrations ORDER BY applied_at;' }),
-  });
-  if (!sqlRes.ok) {
-    throw new Error(`Failed to query _tm_schema_migrations: ${await sqlRes.text()}`);
+  // 1. Confirm migrations 007 and 009 are recorded in _tm_schema_migrations
+  console.log('\n[Check 1] Verifying migrations 007 and 009 in _tm_schema_migrations table...');
+  let migrations: Array<{ name: string; applied_at: string }> = [];
+  const { data: migData, error: migErr } = await adminClient
+    .from('_tm_schema_migrations')
+    .select('name, applied_at')
+    .order('applied_at');
+
+  if (!migErr && migData) {
+    migrations = migData;
+  } else if (SUPABASE_ACCESS_TOKEN) {
+    const sqlRes = await fetch(`https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${SUPABASE_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ query: 'SELECT name, applied_at FROM public._tm_schema_migrations ORDER BY applied_at;' }),
+    });
+    if (sqlRes.ok) {
+      migrations = await sqlRes.json();
+    }
   }
-  const migrations: Array<{ name: string; applied_at: string }> = await sqlRes.json();
 
   const has007 = migrations.some((m) => m.name === '007_atomic_turn_rpc.sql');
+  const has009 = migrations.some((m) => m.name === '009_user_level_quota_lock.sql');
   console.log('Migrations recorded in staging:');
   for (const m of migrations) {
     console.log(`  - ${m.name} (applied: ${m.applied_at})`);
   }
   if (!has007) {
-    throw new Error('Migration 007_atomic_turn_rpc.sql NOT found in tm_migrations!');
+    throw new Error('Migration 007_atomic_turn_rpc.sql NOT found in _tm_schema_migrations!');
   }
-  console.log('✓ Migration 007_atomic_turn_rpc.sql confirmed deployed.');
+  if (!has009) {
+    throw new Error('Migration 009_user_level_quota_lock.sql NOT found in _tm_schema_migrations!');
+  }
+  console.log('✓ Migrations 007 and 009 confirmed deployed.');
 
   // 2. Provision 2 ephemeral test users
   const nonce = Date.now();
@@ -194,6 +207,51 @@ async function verifyStagingRpc() {
     }
     console.log(`✓ Unauthorized propose update rejected as expected: ${unauthPropErr.message}`);
 
+    // 9. Test User-Level Quota Reservation Serialization Across Different Workspaces (P1 Concurrency Verification)
+    console.log('\n[Check 8] Testing user-level quota serialization across different workspaces...');
+    const { data: ws2Data, error: ws2Err } = await clientA
+      .from('tm_workspaces')
+      .insert({ owner_id: uA.user.id, title: `Workspace 2 for Quota Concurrency ${nonce}` })
+      .select('id')
+      .single();
+
+    if (ws2Err) throw new Error(`Failed to create Workspace 2 as User A: ${ws2Err.message}`);
+    const wsId2 = ws2Data.id;
+    console.log(`✓ Workspace 2 created: ${wsId2}`);
+
+    // Count current turns/reservations for User A
+    const { data: currentTurns, error: countErr } = await clientA.rpc('tm_turns_last_day');
+    if (countErr) throw new Error(`Failed to query initial turn count: ${countErr.message}`);
+    const baseCount = currentTurns ?? 0;
+    console.log(`Initial User A turns in last 24h: ${baseCount}`);
+
+    // Boundary condition: exactly ONE slot remaining
+    const boundaryLimit = baseCount + 1;
+    console.log(`Launching 2 simultaneous concurrent reservations against Workspace 1 (${wsId}) and Workspace 2 (${wsId2}) with limit ${boundaryLimit}...`);
+
+    const [raceRes1, raceRes2] = await Promise.all([
+      clientA.rpc('tm_reserve_turn_quota', { p_workspace_id: wsId, p_daily_limit: boundaryLimit }),
+      clientA.rpc('tm_reserve_turn_quota', { p_workspace_id: wsId2, p_daily_limit: boundaryLimit }),
+    ]);
+
+    console.log('Concurrent reservation results:');
+    console.log('  - Workspace 1 response:', raceRes1);
+    console.log('  - Workspace 2 response:', raceRes2);
+
+    if (raceRes1.error || raceRes2.error) {
+      throw new Error(`RPC execution error during concurrent reservation: ${raceRes1.error?.message || raceRes2.error?.message}`);
+    }
+
+    const allowedCount = [raceRes1.data?.allowed, raceRes2.data?.allowed].filter(Boolean).length;
+    const rejectedCount = [raceRes1.data?.allowed, raceRes2.data?.allowed].filter((a) => a === false).length;
+
+    if (allowedCount !== 1 || rejectedCount !== 1) {
+      throw new Error(
+        `CRITICAL QUOTA RACE FAILURE: Expected exactly 1 allowed and 1 rejected reservation across workspaces, got allowed=${allowedCount}, rejected=${rejectedCount}`
+      );
+    }
+    console.log('✓ User-level row lock strictly serialized concurrent requests across two different workspaces at the quota boundary.');
+
     console.log('\n=== ALL STAGING DATABASE RPC VERIFICATIONS PASSED ===');
   } finally {
     // Teardown
@@ -204,6 +262,9 @@ async function verifyStagingRpc() {
       await adminClient.from('tm_events').delete().eq('workspace_id', wsId);
       await adminClient.from('tm_workspaces').delete().eq('id', wsId);
     }
+    await adminClient.from('tm_events').delete().eq('workspace_id', uA.user.id);
+    await adminClient.from('tm_workspaces').delete().eq('owner_id', uA.user.id);
+    await adminClient.from('tm_user_quotas').delete().eq('user_id', uA.user.id);
     await adminClient.auth.admin.deleteUser(uA.user.id);
     await adminClient.auth.admin.deleteUser(uB.user.id);
     console.log('✓ Cleanup complete.');
