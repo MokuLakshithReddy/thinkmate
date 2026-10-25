@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 const SUPABASE_URL = (process.env.STAGING_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://ffjgbefnubyjzrlvpdkl.supabase.co').trim();
 const ANON_KEY = (process.env.STAGING_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '').trim();
 const SERVICE_KEY = (process.env.STAGING_SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
@@ -220,6 +223,51 @@ async function testLiveMcpEndToEnd() {
     console.log(`✓ Workspace reloaded cleanly: ${state.ws.title}`);
     console.log(`✓ Reloaded messages: ${state.messages.length}`);
     console.log(`✓ Reloaded items: ${state.items.length}`);
+
+    // 8. Replaying the same request ID returns the original result
+    console.log('\n[Step 8] Replaying the same client_msg_id to verify idempotent replay returns original result...');
+    const replayRes = await fetch('http://localhost:3338/mcp', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${jwt}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+      },
+      body: JSON.stringify(mcpPayload),
+    });
+
+    if (!replayRes.ok) {
+      throw new Error(`Replay request failed with status ${replayRes.status}: ${await replayRes.text()}`);
+    }
+
+    const replayRawText = await replayRes.text();
+    let replayJson: any;
+    try {
+      replayJson = JSON.parse(replayRawText);
+    } catch {
+      const dataLine = replayRawText.split('\n').find((l) => l.startsWith('data: '));
+      if (dataLine) {
+        replayJson = JSON.parse(dataLine.slice(6));
+      } else {
+        throw new Error(`Could not parse replay response: ${replayRawText}`);
+      }
+    }
+
+    const replayContentText = replayJson.result?.content?.[0]?.text;
+    if (!replayContentText || !replayContentText.includes(capturedModelOutput.reply)) {
+      throw new Error('Replayed request did not return original model reply!');
+    }
+    console.log('✓ Idempotent replay returned canonical original result.');
+
+    // Verify tm_messages message count is still exactly 2 (no duplicate insertion)
+    const { data: replayMessages } = await adminClient
+      .from('tm_messages')
+      .select('seq')
+      .eq('workspace_id', wsId);
+    if ((replayMessages?.length ?? 0) !== messages.length) {
+      throw new Error(`Expected message count to remain ${messages.length}, but found ${replayMessages?.length}`);
+    }
+    console.log(`✓ Verified tm_messages message count remained exactly ${messages.length} after idempotent replay.`);
 
     console.log('\n=== REAL EXTERNAL MCP CLIENT EXECUTION FULLY VERIFIED ===');
   } finally {

@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 import { NextRequest, NextResponse } from 'next/server';
 import { getServiceSupabaseClient } from '@/services/db/supabase-client';
 import { UpstashRedisRateLimitStore, verifyRateLimiterConfig } from '@/lib/rate-limiter';
@@ -106,7 +109,7 @@ export async function GET(req: NextRequest) {
           ai.models.generateContent({
             model: DEFAULT_GEMINI_MODEL,
             contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
-            config: { maxOutputTokens: 2 },
+            config: { maxOutputTokens: 10 },
           }),
           timeoutPromise,
         ]).finally(() => {
