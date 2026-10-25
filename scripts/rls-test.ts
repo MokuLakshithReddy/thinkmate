@@ -158,8 +158,13 @@ export async function runRlsTests() {
       throw new Error('RLS VIOLATION: User B was able to read User A decisions');
     }
 
-    // 5. Cross-User Mutation & IDOR (User B cannot modify or inject into User A's workspace)
-    console.log('[Test 5] Assert User B cannot mutate User A records...');
+    const { data: readEvents } = await b.from('tm_events').select('id').eq('workspace_id', wsA.id);
+    if ((readEvents ?? []).length > 0) {
+      throw new Error('RLS VIOLATION: User B was able to read User A events');
+    }
+
+    // 5. Cross-User Mutation & IDOR (User B cannot modify or inject into User A's workspace or child tables)
+    console.log('[Test 5] Assert User B cannot mutate or inject User A records...');
     const { error: injectItemErr } = await b
       .from('tm_items')
       .insert({
@@ -172,6 +177,43 @@ export async function runRlsTests() {
       throw new Error('RLS VIOLATION: User B successfully injected item into User A workspace');
     }
 
+    const { error: injectFrameErr } = await b
+      .from('tm_frames')
+      .insert({
+        workspace_id: wsA.id,
+        statement: 'Malicious Frame Injected by B',
+        version: 2,
+      });
+    if (!injectFrameErr) {
+      throw new Error('RLS VIOLATION: User B successfully injected frame into User A workspace');
+    }
+
+    const { error: injectEvErr } = await b
+      .from('tm_evidence')
+      .insert({
+        workspace_id: wsA.id,
+        kind: 'observation',
+        title: 'Malicious Evidence Injected by B',
+        summary: 'Injected findings',
+        limitations: [],
+        added_by: 'user',
+      });
+    if (!injectEvErr) {
+      throw new Error('RLS VIOLATION: User B successfully injected evidence into User A workspace');
+    }
+
+    const { error: injectDecErr } = await b
+      .from('tm_decisions')
+      .insert({
+        workspace_id: wsA.id,
+        selected_item_id: itemA.id,
+        rationale: 'Malicious decision by B',
+      });
+    if (!injectDecErr) {
+      throw new Error('RLS VIOLATION: User B successfully injected decision into User A workspace');
+    }
+
+    // Unauthorized Updates
     const { data: updateWsData } = await b
       .from('tm_workspaces')
       .update({ title: 'Hacked by B' })
@@ -181,14 +223,72 @@ export async function runRlsTests() {
       throw new Error('RLS VIOLATION: User B successfully mutated User A workspace title');
     }
 
-    // 6. Cross-User Deletion (User B cannot delete User A's workspace)
-    console.log('[Test 6] Assert User B cannot delete User A records...');
-    await b.from('tm_workspaces').delete().eq('id', wsA.id);
+    const { data: updateItemData } = await b
+      .from('tm_items')
+      .update({ text: 'Tampered Item Text' })
+      .eq('id', itemA.id)
+      .select();
+    if ((updateItemData ?? []).length > 0) {
+      throw new Error('RLS VIOLATION: User B successfully mutated User A item');
+    }
 
-    // Verify User A workspace is still intact
+    const { data: updateFrameData } = await b
+      .from('tm_frames')
+      .update({ statement: 'Tampered Frame' })
+      .eq('workspace_id', wsA.id)
+      .select();
+    if ((updateFrameData ?? []).length > 0) {
+      throw new Error('RLS VIOLATION: User B successfully mutated User A frame');
+    }
+
+    const { data: updateEvData } = await b
+      .from('tm_evidence')
+      .update({ title: 'Tampered Evidence' })
+      .eq('workspace_id', wsA.id)
+      .select();
+    if ((updateEvData ?? []).length > 0) {
+      throw new Error('RLS VIOLATION: User B successfully mutated User A evidence');
+    }
+
+    const { data: updateDecData } = await b
+      .from('tm_decisions')
+      .update({ rationale: 'Tampered Decision' })
+      .eq('workspace_id', wsA.id)
+      .select();
+    if ((updateDecData ?? []).length > 0) {
+      throw new Error('RLS VIOLATION: User B successfully mutated User A decision');
+    }
+
+    // 6. Cross-User Deletions (User B cannot delete User A records or workspace)
+    console.log('[Test 6] Assert User B cannot delete User A records...');
+    const { data: deleteItemData } = await b.from('tm_items').delete().eq('id', itemA.id).select();
+    if ((deleteItemData ?? []).length > 0) {
+      throw new Error('RLS VIOLATION: User B was able to delete User A item');
+    }
+
+    const { data: deleteEvData } = await b.from('tm_evidence').delete().eq('workspace_id', wsA.id).select();
+    if ((deleteEvData ?? []).length > 0) {
+      throw new Error('RLS VIOLATION: User B was able to delete User A evidence');
+    }
+
+    const { data: deleteDecData } = await b.from('tm_decisions').delete().eq('workspace_id', wsA.id).select();
+    if ((deleteDecData ?? []).length > 0) {
+      throw new Error('RLS VIOLATION: User B was able to delete User A decision');
+    }
+
+    const { data: deleteWsData } = await b.from('tm_workspaces').delete().eq('id', wsA.id).select();
+    if ((deleteWsData ?? []).length > 0) {
+      throw new Error('RLS VIOLATION: User B was able to delete User A workspace');
+    }
+
+    // Verify User A records are completely intact
     const { data: intactWs } = await a.from('tm_workspaces').select('id, title').eq('id', wsA.id).single();
     if (!intactWs || intactWs.title !== 'Secret Project A') {
       throw new Error('RLS VIOLATION: User A workspace was modified or deleted by User B');
+    }
+    const { data: intactItem } = await a.from('tm_items').select('id, text').eq('id', itemA.id).single();
+    if (!intactItem || intactItem.text !== 'Confidential Claim A') {
+      throw new Error('RLS VIOLATION: User A item was modified or deleted by User B');
     }
 
     // 7. Identity Forgery (User B cannot insert workspace claiming User A is owner)
@@ -202,16 +302,40 @@ export async function runRlsTests() {
 
     console.log('All PostgreSQL RLS isolation checks passed successfully.');
   } finally {
-    // Guaranteed cleanup for test-created records
+    // Guaranteed, conclusively verified cleanup for test-created records
     console.log('Cleaning up test-created workspaces...');
+    const cleanupFailures: string[] = [];
+
     if (workspaceAId) {
       const { error: delAErr } = await a.from('tm_workspaces').delete().eq('id', workspaceAId);
-      if (delAErr) console.warn('Warning: Failed to clean up User A workspace:', delAErr.message);
+      if (delAErr) {
+        cleanupFailures.push(`Failed to delete User A workspace (${workspaceAId}): ${delAErr.message}`);
+      } else {
+        const { data: checkA } = await a.from('tm_workspaces').select('id').eq('id', workspaceAId);
+        if ((checkA ?? []).length > 0) {
+          cleanupFailures.push(`User A workspace (${workspaceAId}) remained present after delete command`);
+        }
+      }
     }
+
     if (workspaceBId) {
       const { error: delBErr } = await b.from('tm_workspaces').delete().eq('id', workspaceBId);
-      if (delBErr) console.warn('Warning: Failed to clean up User B workspace:', delBErr.message);
+      if (delBErr) {
+        cleanupFailures.push(`Failed to delete User B workspace (${workspaceBId}): ${delBErr.message}`);
+      } else {
+        const { data: checkB } = await b.from('tm_workspaces').select('id').eq('id', workspaceBId);
+        if ((checkB ?? []).length > 0) {
+          cleanupFailures.push(`User B workspace (${workspaceBId}) remained present after delete command`);
+        }
+      }
     }
+
+    if (cleanupFailures.length > 0) {
+      const failureMsg = `CRITICAL CLEANUP FAILURE:\n${cleanupFailures.map((f) => `  - ${f}`).join('\n')}`;
+      console.error(failureMsg);
+      throw new Error(failureMsg);
+    }
+    console.log('All test-created records cleanly deleted and verified.');
   }
 }
 

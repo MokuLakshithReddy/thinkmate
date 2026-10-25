@@ -14,6 +14,7 @@ const REQUIRED_RLS_TABLES = [
 
 const KNOWN_PRODUCTION_REFS = new Set([
   'gtkvujspajcelzufpggr', // SnapGram / main production reference
+  'ujbpyqubhxycgtaadkce', // Secondary production reference
 ]);
 
 function validateProjectRef(ref: string): void {

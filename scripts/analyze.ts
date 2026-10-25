@@ -11,6 +11,7 @@ export interface PilotSessionRow {
   abandoned: string;
   would_use: string;
   named_situation: string;
+  chosen_idea?: string;
 }
 
 export interface PilotScoreRow {
@@ -21,8 +22,6 @@ export interface PilotScoreRow {
   i: string;
   d: string;
 }
-
-const isSyntheticRun = process.argv.includes('--synthetic') || process.env.PILOT_SYNTHETIC === 'true';
 
 export function parseCsv<T>(path: string): T[] {
   if (!existsSync(path)) return [];
@@ -74,6 +73,15 @@ export function validateSessions(rows: PilotSessionRow[]): string[] {
     if (!['y', 'n'].includes(r.named_situation?.toLowerCase())) {
       errors.push(`Invalid named_situation flag "${r.named_situation}" in session ${r.session_id}. Expected y/n.`);
     }
+
+    if (r.completed?.toLowerCase() === 'y') {
+      const idea = r.chosen_idea?.trim();
+      if (!idea || idea.toLowerCase() === 'none' || idea.toLowerCase() === 'n/a') {
+        errors.push(
+          `Completed session ${r.session_id} is missing required chosen_idea milestone (got "${r.chosen_idea ?? ''}").`
+        );
+      }
+    }
   }
 
   return errors;
@@ -104,9 +112,12 @@ const median = (a: number[]) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
-export function runAnalysis() {
-  const sessionsFile = isSyntheticRun ? 'pilot/sessions.synthetic.csv' : 'pilot/sessions.csv';
-  const scoresFile = isSyntheticRun ? 'pilot/scores.synthetic.csv' : 'pilot/scores.csv';
+export function runAnalysis(options?: { synthetic?: boolean; strict?: boolean }) {
+  const isSynthetic =
+    options?.synthetic ??
+    (process.argv.includes('--synthetic') || process.env.PILOT_SYNTHETIC === 'true');
+  const sessionsFile = isSynthetic ? 'pilot/sessions.synthetic.csv' : 'pilot/sessions.csv';
+  const scoresFile = isSynthetic ? 'pilot/scores.synthetic.csv' : 'pilot/scores.csv';
 
   const sessions = parseCsv<PilotSessionRow>(sessionsFile);
   const scores = parseCsv<PilotScoreRow>(scoresFile);
@@ -123,7 +134,7 @@ export function runAnalysis() {
     return { status: 'pending', gates: [] };
   }
 
-  if (isSyntheticRun) {
+  if (isSynthetic) {
     console.log('========================================================================');
     console.log('       [SYNTHETIC TEST BENCHMARK ONLY - NOT A REAL PILOT RESULT]        ');
     console.log('Warning: Evaluating illustrative mock observations for algorithmic verification.');
@@ -170,9 +181,12 @@ export function runAnalysis() {
   const share = (k: number, d: number) => `${k}/${d} (${d ? Math.round((100 * k) / d) : 0}%)`;
 
   // Protocol milestone enforcement:
-  // Completion requires confirmed frame reached within 45 min and session completed flag
+  // Completion requires confirmed frame reached within 45 min, completed flag, and chosen-idea milestone
   const completed = tmS.filter(
-    (s) => s.completed.toLowerCase() === 'y' && parseFloat(s.minutes_to_frame) <= 45
+    (s) =>
+      s.completed.toLowerCase() === 'y' &&
+      parseFloat(s.minutes_to_frame) <= 45 &&
+      Boolean(s.chosen_idea && s.chosen_idea.trim().length > 0 && s.chosen_idea.toLowerCase() !== 'none')
   ).length;
 
   const accepted = tmS.filter(
@@ -228,17 +242,52 @@ export function runAnalysis() {
     console.log(`  ${x.p} vs ${x.baseline}: ${x.diff.toFixed(1)}`);
   }
 
-  if (isSyntheticRun) {
+  const failedGates = gateResults.filter((g) => !g.pass);
+  const passedAllGates = failedGates.length === 0;
+
+  if (failedGates.length > 0) {
+    console.error('\n=== DECISION GATE EVALUATION FAILED ===');
+    for (const fg of failedGates) {
+      console.error(`  - FAILED: ${fg.name} -> ${fg.detail}`);
+    }
+  } else {
+    console.log('\n=== ALL 5 DECISION GATES PASSED SUCCESSFULLY ===');
+  }
+
+  if (isSynthetic) {
     console.log('\n[NOTICE]: Synthetic run completed for algorithm verification.');
     console.log('Real participant sessions must be collected before publishing release decisions.');
   }
 
-  return { status: 'complete', gates: gateResults };
+  // Enforce unambiguous failure when gates fail:
+  // When analyzing real participant data, or when ENFORCE_PILOT_GATES is set, or with --strict flag
+  const shouldEnforceGatePass =
+    options?.strict ??
+    (!isSynthetic ||
+      process.env.ENFORCE_PILOT_GATES === 'true' ||
+      process.argv.includes('--strict'));
+
+  if (shouldEnforceGatePass && !passedAllGates) {
+    throw new Error(
+      `Decision Gate Verification Failure: ${failedGates.length} gate(s) failed (${failedGates.map((g) => g.name).join(', ')}).`
+    );
+  }
+
+  return {
+    status: passedAllGates ? 'passed' : 'failed',
+    gates: gateResults,
+    failedCount: failedGates.length,
+  };
 }
 
 if (process.env.NODE_ENV !== 'test' && require.main === module) {
   try {
-    runAnalysis();
+    const result = runAnalysis();
+    if (result.status === 'failed') {
+      console.error('[Gate Failure]: One or more decision gates failed criteria.');
+      process.exit(1);
+    }
+    process.exit(0);
   } catch (err) {
     console.error('[Analysis Error]:', err instanceof Error ? err.message : String(err));
     process.exit(1);

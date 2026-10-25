@@ -42,17 +42,19 @@ describe('Production Readiness & Operational Safeguards', () => {
       const origConfirm = process.env.CONFIRM_PRODUCTION_MIGRATION;
       const origToken = process.env.SUPABASE_ACCESS_TOKEN;
       try {
-        process.env.SUPABASE_PROJECT_REF = 'gtkvujspajcelzufpggr'; // Known production ref
-        process.env.SUPABASE_ACCESS_TOKEN = 'mock-access-token-123456';
-        delete process.env.CONFIRM_PRODUCTION_MIGRATION;
+        for (const prodRef of ['gtkvujspajcelzufpggr', 'ujbpyqubhxycgtaadkce']) {
+          process.env.SUPABASE_PROJECT_REF = prodRef;
+          process.env.SUPABASE_ACCESS_TOKEN = 'mock-access-token-123456';
+          delete process.env.CONFIRM_PRODUCTION_MIGRATION;
 
-        const { applyMigrations } = await import('../scripts/apply-tm-migrations');
-        await assert.rejects(
-          async () => {
-            await applyMigrations();
-          },
-          /TARGET SAFETY ABORT/
-        );
+          const { applyMigrations } = await import('../scripts/apply-tm-migrations');
+          await assert.rejects(
+            async () => {
+              await applyMigrations();
+            },
+            /TARGET SAFETY ABORT/
+          );
+        }
       } finally {
         if (origRef) process.env.SUPABASE_PROJECT_REF = origRef;
         else delete process.env.SUPABASE_PROJECT_REF;
@@ -128,6 +130,29 @@ describe('Production Readiness & Operational Safeguards', () => {
     });
   });
 
+  describe('P1 AI Reliability — Health Release Readiness', () => {
+    it('requires real AI verification when release_readiness is requested and fails closed if unconfigured', async () => {
+      const { NextRequest } = await import('next/server');
+      const { GET: healthGet } = await import('../src/app/api/health/route');
+
+      const origKey = process.env.GEMINI_API_KEY;
+      const origGoogleKey = process.env.GOOGLE_API_KEY;
+      try {
+        delete process.env.GEMINI_API_KEY;
+        delete process.env.GOOGLE_API_KEY;
+        const req = new NextRequest('http://localhost:3000/api/health?release_readiness=true');
+        const res = await healthGet(req);
+        const data = await res.json();
+        assert.strictEqual(res.status, 503);
+        assert.strictEqual(data.dependencies.aiProvider.status, 'unconfigured');
+        assert.strictEqual(data.releaseReadiness, 'degraded');
+      } finally {
+        if (origKey) process.env.GEMINI_API_KEY = origKey;
+        if (origGoogleKey) process.env.GOOGLE_API_KEY = origGoogleKey;
+      }
+    });
+  });
+
   describe('P2 Pilot Analysis — Protocol & Milestone Integrity', () => {
     it('validates required fields and milestone bounds in session rows', () => {
       const validRows: PilotSessionRow[] = [
@@ -142,9 +167,30 @@ describe('Production Readiness & Operational Safeguards', () => {
           abandoned: 'n',
           would_use: 'y',
           named_situation: 'y',
+          chosen_idea: 'Idea-HybridCache',
         },
       ];
       assert.deepStrictEqual(validateSessions(validRows), []);
+    });
+
+    it('rejects completed sessions that are missing chosen_idea milestone', () => {
+      const missingIdeaRows: PilotSessionRow[] = [
+        {
+          session_id: 'S003',
+          participant: 'P3',
+          condition: 'thinkmate',
+          brief: 'Z',
+          order: '1',
+          minutes_to_frame: '15',
+          completed: 'y',
+          abandoned: 'n',
+          would_use: 'y',
+          named_situation: 'y',
+          chosen_idea: '',
+        },
+      ];
+      const errors = validateSessions(missingIdeaRows);
+      assert.ok(errors.some((e) => e.includes('missing required chosen_idea milestone')));
     });
 
     it('rejects invalid or out-of-bounds minutes_to_frame (> 45 min)', () => {
@@ -160,6 +206,7 @@ describe('Production Readiness & Operational Safeguards', () => {
           abandoned: 'n',
           would_use: 'y',
           named_situation: 'y',
+          chosen_idea: 'Idea-Test',
         },
       ];
       const errors = validateSessions(invalidRows);
@@ -181,6 +228,22 @@ describe('Production Readiness & Operational Safeguards', () => {
       assert.strictEqual(errors.length, 2);
       assert.ok(errors.some((e) => e.includes('"p" has invalid value "5"')));
       assert.ok(errors.some((e) => e.includes('"d" has invalid value "0"')));
+    });
+
+    it('runAnalysis successfully verifies synthetic benchmark gates and detects failures', async () => {
+      const origSynthetic = process.env.PILOT_SYNTHETIC;
+      try {
+        process.env.PILOT_SYNTHETIC = 'true';
+        const { runAnalysis } = await import('../scripts/analyze');
+        const res = runAnalysis();
+        assert.strictEqual(res.status, 'passed');
+        assert.strictEqual(res.failedCount, 0);
+        assert.strictEqual(res.gates.length, 5);
+        assert.ok(res.gates.every((g) => g.pass));
+      } finally {
+        if (origSynthetic) process.env.PILOT_SYNTHETIC = origSynthetic;
+        else delete process.env.PILOT_SYNTHETIC;
+      }
     });
   });
 });
