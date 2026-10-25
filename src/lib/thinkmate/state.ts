@@ -97,6 +97,12 @@ export interface State {
   evidence: EvidenceRow[];
 }
 
+export interface TurnAppliedState extends State {
+  effective_reply: string;
+  is_replay: boolean;
+  proposed_count?: number;
+}
+
 export async function loadState(sb: SupabaseClient, id: string): Promise<State | null> {
   const { data: ws, error: wsErr } = await sb.from('tm_workspaces').select('*').eq('id', id).maybeSingle();
   if (wsErr) {
@@ -260,7 +266,7 @@ export async function applyModelOutput(
   tokens?: number,
   clientMsgId?: string,
   userId?: string
-): Promise<State | null> {
+): Promise<TurnAppliedState | null> {
   const proposedItemsPayload = out.proposed_items.map((i) => ({
     kind: i.kind,
     text: i.text,
@@ -274,7 +280,7 @@ export async function applyModelOutput(
 
   // 1. Transactional Database RPC Execution
   if (typeof (sb as unknown as { rpc?: unknown }).rpc === 'function') {
-    const { error: rpcErr } = await sb.rpc('tm_apply_turn_tx', {
+    const { data: rpcData, error: rpcErr } = await sb.rpc('tm_apply_turn_tx', {
       p_workspace_id: id,
       p_user_message: userText,
       p_assistant_reply: out.reply,
@@ -291,7 +297,20 @@ export async function applyModelOutput(
     });
 
     if (!rpcErr) {
-      return loadState(sb, id);
+      const resState = await loadState(sb, id);
+      if (resState) {
+        const rpcObj = rpcData as {
+          idempotent_replay?: boolean;
+          assistant_reply?: string;
+          proposed_count?: number;
+        } | null;
+        return Object.assign(resState, {
+          effective_reply: rpcObj?.assistant_reply ?? out.reply,
+          is_replay: Boolean(rpcObj?.idempotent_replay),
+          proposed_count: rpcObj?.proposed_count ?? out.proposed_items.length,
+        });
+      }
+      return null;
     }
 
     const isMissingRpc =
@@ -303,7 +322,24 @@ export async function applyModelOutput(
     }
   }
 
+  // Enforce fail-closed safety in production if the atomic RPC is unavailable
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'Production database safety failure: required atomic transaction RPC public.tm_apply_turn_tx is not deployed.'
+    );
+  }
+
   // 2. Compensating Fallback for Offline / Mock Environments without Database RPC
+  const { data: ws, error: wsErr } = await sb
+    .from('tm_workspaces')
+    .select('proposed_problem_frame')
+    .eq('id', id)
+    .maybeSingle();
+  if (wsErr) {
+    throw new Error(`Failed to load workspace frame for fallback compensation: ${wsErr.message}`);
+  }
+  const originalProposedFrame = ws?.proposed_problem_frame ?? null;
+
   const { data: existing, error: existingErr } = await sb
     .from('tm_items')
     .select('kind,text')
@@ -343,12 +379,20 @@ export async function applyModelOutput(
 
   const userMsgId = insertedMsgs?.[0]?.id;
   const astMsgId = insertedMsgs?.[1]?.id;
+  const insertedItemIds: string[] = [];
+  let frameUpdated = false;
 
   try {
     if (rows.length) {
-      const { error: itemsErr } = await sb.from('tm_items').insert(rows);
+      const { data: insertedItems, error: itemsErr } = await sb
+        .from('tm_items')
+        .insert(rows)
+        .select('id');
       if (itemsErr) {
         throw new Error(`Failed to save proposed items: ${itemsErr.message}`);
+      }
+      if (insertedItems) {
+        insertedItemIds.push(...insertedItems.map((r: { id: string }) => r.id));
       }
     }
 
@@ -363,6 +407,7 @@ export async function applyModelOutput(
       if (frameErr) {
         throw new Error(`Failed to update problem frame: ${frameErr.message}`);
       }
+      frameUpdated = true;
     }
 
     await logEvent(sb, id, 'turn', {
@@ -374,10 +419,15 @@ export async function applyModelOutput(
       tokens: tokens ?? 0,
     });
   } catch (stepErr) {
-    // Compensate inserted messages so no partial turn is retained on failure
-    if (userMsgId) {
+    // Complete compensation across every affected table touched during fallback
+    for (const itemId of insertedItemIds) {
       try {
-        await sb.from('tm_messages').delete().eq('id', userMsgId);
+        await sb.from('tm_items').delete().eq('id', itemId);
+      } catch {}
+    }
+    if (frameUpdated) {
+      try {
+        await sb.from('tm_workspaces').update({ proposed_problem_frame: originalProposedFrame }).eq('id', id);
       } catch {}
     }
     if (astMsgId) {
@@ -385,8 +435,21 @@ export async function applyModelOutput(
         await sb.from('tm_messages').delete().eq('id', astMsgId);
       } catch {}
     }
+    if (userMsgId) {
+      try {
+        await sb.from('tm_messages').delete().eq('id', userMsgId);
+      } catch {}
+    }
     throw stepErr;
   }
 
-  return loadState(sb, id);
+  const resState = await loadState(sb, id);
+  if (resState) {
+    return Object.assign(resState, {
+      effective_reply: out.reply,
+      is_replay: false,
+      proposed_count: rows.length,
+    });
+  }
+  return null;
 }

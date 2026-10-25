@@ -13,6 +13,7 @@ import {
   logEvent,
   DIRECT,
   pickAction,
+  type TurnAppliedState,
 } from '../src/lib/thinkmate/state';
 import { buildSystemPrompt } from '../src/lib/thinkmate/prompts';
 import { runTurn } from '../src/lib/thinkmate/llm';
@@ -20,8 +21,8 @@ import { flags } from '../src/lib/thinkmate/flags';
 import { relevantIds } from '../src/lib/thinkmate/retrieval';
 import { safeErr } from '../src/lib/thinkmate/log';
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
+const getSupabaseUrl = () => process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
+const getSupabaseAnonKey = () => process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
 const APP = process.env.APP_URL ?? 'http://localhost:3000';
 
 const ok = (t: string) => ({ content: [{ type: 'text' as const, text: t }] });
@@ -68,7 +69,7 @@ export function validateMcpConfig(env = process.env) {
   return { valid: issues.length === 0, issues };
 }
 
-function buildServer(sb: SupabaseClient, userId: string) {
+function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
   const server = new McpServer({ name: 'thinkmate', version: '1.0.0' });
 
   server.registerTool(
@@ -383,7 +384,7 @@ function buildServer(sb: SupabaseClient, userId: string) {
       let output;
       let tokens: number | undefined;
       try {
-        const res = await runTurn(system, history);
+        const res = await runner(system, history);
         output = res.output;
         tokens = res.tokens;
       } catch (modelErr) {
@@ -391,8 +392,9 @@ function buildServer(sb: SupabaseClient, userId: string) {
         return fail(`AI model execution failed: ${safeErr(modelErr)}`);
       }
 
+      let applied: TurnAppliedState | null = null;
       try {
-        await applyModelOutput(
+        applied = await applyModelOutput(
           sb,
           workspace_id,
           message,
@@ -408,6 +410,13 @@ function buildServer(sb: SupabaseClient, userId: string) {
         return fail(`Failed to persist reasoning turn results to database: ${safeErr(persistErr)}`);
       }
 
+      const finalReply = applied?.effective_reply ?? output.reply;
+      const isReplay = Boolean(applied?.is_replay);
+
+      if (isReplay) {
+        return ok(`[IDEMPOTENT REPLAY]\n\n${finalReply}\n\nReview & Confirm: ${APP}/thinkmate/${workspace_id}`);
+      }
+
       const proposedSummary = output.proposed_items.length
         ? `\n\nPROPOSED ITEMS (${output.proposed_items.length}):\n` +
           output.proposed_items.map((p) => `- [${p.kind}] ${p.text}`).join('\n')
@@ -417,7 +426,7 @@ function buildServer(sb: SupabaseClient, userId: string) {
         : '';
 
       return ok(
-        `${output.reply}${proposedSummary}${frameSummary}\n\nReview & Confirm: ${APP}/thinkmate/${workspace_id}`
+        `${finalReply}${proposedSummary}${frameSummary}\n\nReview & Confirm: ${APP}/thinkmate/${workspace_id}`
       );
     }
   );
@@ -444,6 +453,12 @@ app.use((req, res, next) => {
   next();
 });
 
+let activeRunner = runTurn;
+
+export function setActiveRunner(runner: typeof runTurn) {
+  activeRunner = runner;
+}
+
 app.post('/mcp', async (req, res) => {
   try {
     const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
@@ -451,7 +466,17 @@ app.post('/mcp', async (req, res) => {
       return res.status(401).set('WWW-Authenticate', 'Bearer').json({ error: 'missing_token' });
     }
 
-    const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    const sbUrl = getSupabaseUrl();
+    const sbAnon = getSupabaseAnonKey();
+    if (!sbUrl || !sbAnon) {
+      return res.status(500).json({
+        jsonrpc: '2.0',
+        error: { code: -32603, message: 'Server configuration error: missing Supabase credentials' },
+        id: null,
+      });
+    }
+
+    const sb = createClient(sbUrl, sbAnon, {
       global: { headers: { Authorization: `Bearer ${token}` } },
       auth: { persistSession: false, autoRefreshToken: false },
     });
@@ -465,7 +490,7 @@ app.post('/mcp', async (req, res) => {
       return res.status(401).set('WWW-Authenticate', 'Bearer').json({ error: 'invalid_token' });
     }
 
-    const server = buildServer(sb, user.id);
+    const server = buildServer(sb, user.id, activeRunner);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 
     res.on('close', () => {
@@ -475,11 +500,12 @@ app.post('/mcp', async (req, res) => {
 
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
-  } catch {
+  } catch (err) {
+    console.error('[MCP Endpoint Error]:', err);
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: '2.0',
-        error: { code: -32603, message: 'Internal error' },
+        error: { code: -32603, message: `Internal error: ${safeErr(err)}` },
         id: null,
       });
     }
@@ -490,7 +516,13 @@ app.get('/mcp', (_req, res) => {
   res.status(405).json({ error: 'method_not_allowed' });
 });
 
-export function startMcpServer(port = Number(process.env.PORT ?? 3333)) {
+export function startMcpServer(
+  port = Number(process.env.PORT ?? 3333),
+  runner?: typeof runTurn
+) {
+  if (runner) {
+    activeRunner = runner;
+  }
   const config = validateMcpConfig();
   if (!config.valid) {
     console.error(

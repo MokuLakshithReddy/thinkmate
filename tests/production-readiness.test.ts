@@ -413,6 +413,136 @@ describe('Production Readiness & Operational Safeguards', () => {
         /Failed to apply turn atomically: deadlock detected between transactions/
       );
     });
+
+    it('fails closed in production environment when required RPC tm_apply_turn_tx is unavailable', async () => {
+      const { applyModelOutput } = await import('../src/lib/thinkmate/state');
+      const wsId = 'a0000000-0000-0000-0000-000000000001';
+      const origEnv = process.env.NODE_ENV;
+
+      try {
+        (process.env as any).NODE_ENV = 'production';
+        const mockSb = {
+          rpc: async () => {
+            return { data: null, error: { message: 'function public.tm_apply_turn_tx does not exist', code: 'PGRST202' } };
+          },
+        } as any;
+
+        const out = {
+          reply: 'Scaling response',
+          guidance_mode: 'hint' as const,
+          proposed_problem_frame: null,
+          proposed_items: [],
+        };
+
+        await assert.rejects(
+          async () => {
+            await applyModelOutput(mockSb, wsId, 'Scaling query', out, 100, 'ideate');
+          },
+          /Production database safety failure: required atomic transaction RPC public.tm_apply_turn_tx is not deployed/
+        );
+      } finally {
+        (process.env as any).NODE_ENV = origEnv;
+      }
+    });
+
+    it('executes complete multi-table compensation in fallback mode when error is injected', async () => {
+      const { applyModelOutput } = await import('../src/lib/thinkmate/state');
+      const wsId = 'a0000000-0000-0000-0000-000000000001';
+      const origEnv = process.env.NODE_ENV;
+
+      const deletedItems: string[] = [];
+      const deletedMessages: string[] = [];
+      let revertedFrame: string | null = null;
+
+      try {
+        (process.env as any).NODE_ENV = 'development';
+        const mockSb = {
+          rpc: async () => {
+            return { data: null, error: { message: 'function public.tm_apply_turn_tx does not exist', code: 'PGRST202' } };
+          },
+          from: (table: string) => {
+            if (table === 'tm_workspaces') {
+              return {
+                select: () => ({
+                  eq: () => ({
+                    maybeSingle: () => Promise.resolve({ data: { id: wsId, proposed_problem_frame: 'Original Frame' }, error: null }),
+                  }),
+                }),
+                update: (payload: any) => ({
+                  eq: () => {
+                    revertedFrame = payload.proposed_problem_frame;
+                    return Promise.resolve({ error: null });
+                  },
+                }),
+              };
+            }
+            if (table === 'tm_items') {
+              return {
+                select: () => ({
+                  eq: () => Promise.resolve({ data: [], error: null }),
+                }),
+                insert: () => ({
+                  select: () => Promise.resolve({ data: [{ id: 'item-comp-1' }], error: null }),
+                }),
+                delete: () => ({
+                  eq: (_col: string, val: string) => {
+                    deletedItems.push(val);
+                    return Promise.resolve({ error: null });
+                  },
+                }),
+              };
+            }
+            if (table === 'tm_messages') {
+              return {
+                insert: () => ({
+                  select: () => Promise.resolve({ data: [{ id: 'msg-user-1' }, { id: 'msg-ast-1' }], error: null }),
+                }),
+                delete: () => ({
+                  eq: (_col: string, val: string) => {
+                    deletedMessages.push(val);
+                    return Promise.resolve({ error: null });
+                  },
+                }),
+              };
+            }
+            if (table === 'tm_events') {
+              return {
+                // Injected failure at event logging step
+                insert: () => Promise.resolve({ error: { message: 'audit event write failed' } }),
+              };
+            }
+            return {
+              select: () => ({
+                eq: () => Promise.resolve({ data: [], error: null }),
+              }),
+            };
+          },
+        } as any;
+
+        const out = {
+          reply: 'Scaling response',
+          guidance_mode: 'hint' as const,
+          proposed_problem_frame: 'New Proposed Frame',
+          proposed_items: [{ kind: 'idea' as const, text: 'Partition by region', origin: 'ai' as const }],
+        };
+
+        await assert.rejects(
+          async () => {
+            await applyModelOutput(mockSb, wsId, 'Partition question', out, 100, 'ideate');
+          },
+          /Failed to log audit event 'turn'/
+        );
+
+        // Verify complete multi-table compensation
+        assert.ok(deletedItems.includes('item-comp-1'), 'Inserted items must be deleted on failure');
+        assert.ok(deletedMessages.includes('msg-user-1'), 'User message must be deleted on failure');
+        assert.ok(deletedMessages.includes('msg-ast-1'), 'Assistant message must be deleted on failure');
+        assert.strictEqual(revertedFrame, 'Original Frame', 'Problem frame must be reverted to original state');
+      } finally {
+        (process.env as any).NODE_ENV = origEnv;
+      }
+    });
   });
 });
+
 
