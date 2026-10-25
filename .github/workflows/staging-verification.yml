@@ -28,6 +28,27 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate Release-Readiness Secrets Pre-Flight
+        env:
+          STAGING_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}
+          STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
+          STAGING_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
+          EXPECTED_STAGING_PROJECT_REF: ${{ vars.EXPECTED_STAGING_PROJECT_REF || secrets.EXPECTED_STAGING_PROJECT_REF }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          echo "=== Validating Required Secrets for Release-Readiness Verification ==="
+          MISSING=0
+          if [ -z "$STAGING_SUPABASE_URL" ]; then echo "::error::Missing secret STAGING_SUPABASE_URL"; MISSING=1; fi
+          if [ -z "$STAGING_SUPABASE_SERVICE_ROLE_KEY" ]; then echo "::error::Missing secret STAGING_SUPABASE_SERVICE_ROLE_KEY"; MISSING=1; fi
+          if [ -z "$STAGING_SUPABASE_ANON_KEY" ]; then echo "::error::Missing secret STAGING_SUPABASE_ANON_KEY"; MISSING=1; fi
+          if [ -z "$EXPECTED_STAGING_PROJECT_REF" ]; then echo "::error::Missing secret/var EXPECTED_STAGING_PROJECT_REF"; MISSING=1; fi
+          if [ -z "$GEMINI_API_KEY" ]; then echo "::error::Missing secret GEMINI_API_KEY. Live model and live MCP verification are mandatory."; MISSING=1; fi
+          if [ "$MISSING" -ne 0 ]; then
+            echo "Release-readiness verification failed pre-flight: required credentials missing. Failing closed."
+            exit 1
+          fi
+          echo "All required staging and AI credentials verified."
+
       - name: Run Staging Verification Suite
         env:
           STAGING_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}
@@ -47,7 +68,6 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
-        if: env.GEMINI_API_KEY != ''
         run: npm run verify:extraction
 
       - name: Run Live MCP End-to-End Suite
@@ -55,10 +75,10 @@ jobs:
           STAGING_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}
           STAGING_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
           STAGING_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
+          EXPECTED_STAGING_PROJECT_REF: ${{ vars.EXPECTED_STAGING_PROJECT_REF || secrets.EXPECTED_STAGING_PROJECT_REF }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
           ALLOWED_ORIGINS: 'http://localhost:3000'
-        if: env.GEMINI_API_KEY != ''
         run: npm run verify:mcp:live
 
       - name: Publish Staging Commit Status

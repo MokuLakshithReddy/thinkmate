@@ -8,7 +8,9 @@ import { z } from 'zod';
  * - gemini-1.5-flash (RETIRED)
  *
  * Current Supported Active Models:
- * - gemini-2.5-flash: Default recommended model. Fast reasoning, balanced latency and cost.
+ * - gemini-3.5-flash-lite: Default recommended model. Fast & lightweight reasoning, optimal latency and cost.
+ * - gemini-3.8-flash: Fast & deep reasoning.
+ * - gemini-2.5-flash: Stable fallback model. Fast reasoning, balanced latency and cost.
  * - gemini-2.5-pro: Deep multi-hop synthesis and complex architectural reasoning.
  */
 export const SUPPORTED_GEMINI_MODELS = [

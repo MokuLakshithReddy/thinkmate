@@ -20,6 +20,7 @@ import { runTurn } from '../src/lib/thinkmate/llm';
 import { flags } from '../src/lib/thinkmate/flags';
 import { relevantIds } from '../src/lib/thinkmate/retrieval';
 import { safeErr } from '../src/lib/thinkmate/log';
+import { checkRateLimitAsync } from '../src/lib/rate-limiter';
 
 const getSupabaseUrl = () => process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
 const getSupabaseAnonKey = () => process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
@@ -79,21 +80,28 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
       description: 'List the ThinkMate workspaces the user can access.',
     },
     async () => {
-      const { data, error } = await sb
-        .from('tm_workspaces')
-        .select('id,title,stage,updated_at')
-        .order('updated_at', { ascending: false })
-        .limit(20);
+      const cid = crypto.randomUUID();
+      try {
+        const { data, error } = await sb
+          .from('tm_workspaces')
+          .select('id,title,stage,updated_at')
+          .order('updated_at', { ascending: false })
+          .limit(20);
 
-      if (error) {
-        return fail(`Failed to list workspaces: ${error.message}`);
+        if (error) {
+          console.error(`[MCP list_thinking_workspaces Error cid=${cid}]:`, error);
+          return fail(`list_workspaces_failed: Failed to list workspaces. (ref: ${cid})`);
+        }
+
+        return ok(
+          (data ?? [])
+            .map((w: any) => `${w.id} | ${w.title} | stage ${w.stage}`)
+            .join('\n') || 'No workspaces yet.'
+        );
+      } catch (err) {
+        console.error(`[MCP list_thinking_workspaces Exception cid=${cid}]:`, err);
+        return fail(`list_workspaces_failed: Failed to list workspaces. (ref: ${cid})`);
       }
-
-      return ok(
-        (data ?? [])
-          .map((w: any) => `${w.id} | ${w.title} | stage ${w.stage}`)
-          .join('\n') || 'No workspaces yet.'
-      );
     }
   );
 
@@ -105,15 +113,22 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
       inputSchema: { title: z.string().min(3).max(120) },
     },
     async ({ title }) => {
-      const { data, error } = await sb
-        .from('tm_workspaces')
-        .insert({ owner_id: userId, title })
-        .select('id')
-        .single();
-      if (error || !data) {
-        return fail(`Could not create the workspace: ${error?.message ?? 'unknown database error'}`);
+      const cid = crypto.randomUUID();
+      try {
+        const { data, error } = await sb
+          .from('tm_workspaces')
+          .insert({ owner_id: userId, title })
+          .select('id')
+          .single();
+        if (error || !data) {
+          console.error(`[MCP create_thinking_workspace Error cid=${cid}]:`, error);
+          return fail(`create_workspace_failed: Failed to create workspace. (ref: ${cid})`);
+        }
+        return ok(`Created ${data.id}. Open: ${APP}/thinkmate/${data.id}`);
+      } catch (err) {
+        console.error(`[MCP create_thinking_workspace Exception cid=${cid}]:`, err);
+        return fail(`create_workspace_failed: Failed to create workspace. (ref: ${cid})`);
       }
-      return ok(`Created ${data.id}. Open: ${APP}/thinkmate/${data.id}`);
     }
   );
 
@@ -179,6 +194,7 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
       },
     },
     async ({ workspace_id, problem_frame, items }) => {
+      const cid = crypto.randomUUID();
       // 1. Transactional Database RPC Execution
       if (typeof (sb as any).rpc === 'function') {
         const { data: rpcData, error: rpcErr } = await sb.rpc('tm_propose_update_tx', {
@@ -199,7 +215,8 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
           rpcErr.message.includes('Could not find') ||
           rpcErr.code === 'PGRST202';
         if (!isMissingRpc) {
-          return fail(`Failed to propose updates atomically: ${rpcErr.message}`);
+          console.error(`[MCP Propose Update RPC Error cid=${cid}]:`, rpcErr);
+          return fail(`propose_update_failed: Failed to propose updates atomically. (ref: ${cid})`);
         }
       }
 
@@ -210,8 +227,11 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
         .eq('id', workspace_id)
         .maybeSingle();
 
-      if (wsErr) return fail(`Database query failed: ${wsErr.message}`);
-      if (!ws) return fail('Workspace not found or access denied.');
+      if (wsErr) {
+        console.error(`[MCP Propose Workspace Query Error cid=${cid}]:`, wsErr);
+        return fail(`propose_update_failed: Database query failed. (ref: ${cid})`);
+      }
+      if (!ws) return fail('not_found: Workspace not found or access denied.');
 
       const insertedItemIds: string[] = [];
       const origFrame = ws.proposed_problem_frame;
@@ -243,7 +263,10 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
             )
             .select('id');
 
-          if (itemsErr) return fail(`Failed to insert proposed items: ${itemsErr.message}`);
+          if (itemsErr) {
+            console.error(`[MCP Propose Items Insert Error cid=${cid}]:`, itemsErr);
+            return fail(`propose_update_failed: Failed to insert proposed items. (ref: ${cid})`);
+          }
           if (insertedItems) {
             insertedItemIds.push(...insertedItems.map((r: any) => r.id));
           }
@@ -255,11 +278,11 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
             .update({ proposed_problem_frame: problem_frame })
             .eq('id', workspace_id);
           if (frameErr) {
-            // Compensate inserted items
+            console.error(`[MCP Propose Frame Update Error cid=${cid}]:`, frameErr);
             for (const itemId of insertedItemIds) {
               await safeDeleteItem(itemId);
             }
-            return fail(`Failed to update problem frame: ${frameErr.message}`);
+            return fail(`propose_update_failed: Failed to update problem frame. (ref: ${cid})`);
           }
         }
 
@@ -267,20 +290,21 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
           .from('tm_events')
           .insert({ workspace_id, event_type: 'mcp_propose', payload: { items: items.length } });
         if (eventErr) {
-          // Compensate items and frame update
+          console.error(`[MCP Propose Audit Event Error cid=${cid}]:`, eventErr);
           for (const itemId of insertedItemIds) {
             await safeDeleteItem(itemId);
           }
           if (problem_frame) {
             await safeRevertFrame();
           }
-          return fail(`Failed to log audit event: ${eventErr.message}`);
+          return fail(`propose_update_failed: Failed to log audit event. (ref: ${cid})`);
         }
       } catch (err) {
+        console.error(`[MCP Propose Catch Error cid=${cid}]:`, err);
         for (const itemId of insertedItemIds) {
           await safeDeleteItem(itemId);
         }
-        return fail(`Unexpected error proposing updates: ${safeErr(err)}`);
+        return fail(`propose_update_failed: Unexpected error proposing updates. (ref: ${cid})`);
       }
 
       return ok(
@@ -297,19 +321,29 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
       inputSchema: { workspace_id: z.string().uuid() },
     },
     async ({ workspace_id }) => {
-      const { data, error } = await sb
-        .from('tm_items')
-        .select('text,status')
-        .eq('workspace_id', workspace_id)
-        .eq('kind', 'question')
-        .neq('status', 'rejected');
+      const cid = crypto.randomUUID();
+      try {
+        const { data, error } = await sb
+          .from('tm_items')
+          .select('text,status')
+          .eq('workspace_id', workspace_id)
+          .eq('kind', 'question')
+          .neq('status', 'rejected');
 
-      if (error) return fail(`Failed to list open questions: ${error.message}`);
+        if (error) {
+          console.error(`[MCP list_open_questions Error cid=${cid}]:`, error);
+          return fail(`list_questions_failed: Failed to list open questions. (ref: ${cid})`);
+        }
 
-      return ok(
-        (data ?? []).map((q: any) => `- (${q.status}) ${q.text}`).join('\n') ||
-          'No open questions.'
-      );
+        return ok(
+          (data ?? [])
+            .map((q: any) => `- (${q.status}) ${q.text}`).join('\n') ||
+              'No open questions.'
+        );
+      } catch (err) {
+        console.error(`[MCP list_open_questions Exception cid=${cid}]:`, err);
+        return fail(`list_questions_failed: Failed to list open questions. (ref: ${cid})`);
+      }
     }
   );
 
@@ -328,16 +362,35 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
     async ({ workspace_id, message, client_msg_id }) => {
       const correlationId = crypto.randomUUID();
 
-      // Daily turn limit across the user's workspaces (Layer 8 daily guard)
+      // 1. User-scoped distributed per-minute rate limit (burst protection)
+      const turnRateCheck = await checkRateLimitAsync(`rate_limit:turn:${userId}`, 20, 60000);
+      if (!turnRateCheck.allowed) {
+        return fail('rate_limit_exceeded: Too many turns in a short period. Please wait a minute before sending more.');
+      }
+
+      // 2. Atomic daily quota check & reservation under row lock (prevents concurrency race at boundary)
+      const dailyLimit = Number(process.env.TM_DAILY_TURNS ?? 300);
       try {
-        const { data: used, error: rpcErr } = await sb.rpc('tm_turns_last_day');
-        if (rpcErr) {
-          console.error(`[MCP Quota Check Error cid=${correlationId}]:`, rpcErr);
-          if (process.env.NODE_ENV === 'production') {
-            return fail(`quota_service_unavailable: Daily turn quota service unavailable. (ref: ${correlationId})`);
+        const { data: reserveData, error: reserveErr } = await sb.rpc('tm_reserve_turn_quota', {
+          p_workspace_id: workspace_id,
+          p_daily_limit: dailyLimit,
+        });
+
+        if (!reserveErr && reserveData) {
+          if (!reserveData.allowed) {
+            return fail('daily_cap: Daily turn limit reached.');
           }
-        } else if ((used ?? 0) >= Number(process.env.TM_DAILY_TURNS ?? 300)) {
-          return fail('daily_cap: Daily turn limit reached.');
+        } else {
+          // Fallback if migration 008 is not yet applied
+          const { data: used, error: rpcErr } = await sb.rpc('tm_turns_last_day');
+          if (rpcErr) {
+            console.error(`[MCP Quota Check Error cid=${correlationId}]:`, rpcErr);
+            if (process.env.NODE_ENV === 'production') {
+              return fail(`quota_service_unavailable: Daily turn quota service unavailable. (ref: ${correlationId})`);
+            }
+          } else if ((used ?? 0) >= dailyLimit) {
+            return fail('daily_cap: Daily turn limit reached.');
+          }
         }
       } catch (err) {
         console.error(`[MCP Quota Check Exception cid=${correlationId}]:`, err);
@@ -537,6 +590,19 @@ app.post('/mcp', async (req, res) => {
       return res.status(401).set('WWW-Authenticate', 'Bearer').json({ error: 'invalid_token' });
     }
 
+    // Shared authenticated-user distributed rate limiter across instances
+    const userRateCheck = await checkRateLimitAsync(`rate_limit:mcp:user:${user.id}`, 60, 60000);
+    if (!userRateCheck.allowed) {
+      return res.status(429).json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32000,
+          message: 'User rate limit exceeded: Too many requests across instances. Please wait a minute before retrying.',
+        },
+        id: null,
+      });
+    }
+
     const server = buildServer(sb, user.id, activeRunner);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 
@@ -548,11 +614,12 @@ app.post('/mcp', async (req, res) => {
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (err) {
-    console.error('[MCP Endpoint Error]:', err);
+    const cid = crypto.randomUUID();
+    console.error(`[MCP Endpoint Error cid=${cid}]:`, err);
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: '2.0',
-        error: { code: -32603, message: `Internal error: ${safeErr(err)}` },
+        error: { code: -32603, message: `Internal server error (ref: ${cid})` },
         id: null,
       });
     }

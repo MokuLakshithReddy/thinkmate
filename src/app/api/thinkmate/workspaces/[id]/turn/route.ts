@@ -33,15 +33,28 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     );
   }
 
-  // 2. Daily quota check (Layer 8)
+  // 2. Atomic daily quota check & reservation (prevents boundary race conditions under concurrency)
+  const dailyLimit = Number(process.env.TM_DAILY_TURNS ?? 300);
   try {
-    const { data: used, error: quotaErr } = await sb.rpc('tm_turns_last_day');
-    if (quotaErr) {
-      if (process.env.NODE_ENV === 'production') {
-        return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
+    const { data: reserveData, error: reserveErr } = await sb.rpc('tm_reserve_turn_quota', {
+      p_workspace_id: id,
+      p_daily_limit: dailyLimit,
+    });
+
+    if (!reserveErr && reserveData) {
+      if (!reserveData.allowed) {
+        return NextResponse.json({ error: 'daily_cap' }, { status: 429 });
       }
-    } else if ((used ?? 0) >= Number(process.env.TM_DAILY_TURNS ?? 300)) {
-      return NextResponse.json({ error: 'daily_cap' }, { status: 429 });
+    } else {
+      // Fallback for environments where migration 008 is not yet applied
+      const { data: used, error: quotaErr } = await sb.rpc('tm_turns_last_day');
+      if (quotaErr) {
+        if (process.env.NODE_ENV === 'production') {
+          return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
+        }
+      } else if ((used ?? 0) >= dailyLimit) {
+        return NextResponse.json({ error: 'daily_cap' }, { status: 429 });
+      }
     }
   } catch {
     if (process.env.NODE_ENV === 'production') {

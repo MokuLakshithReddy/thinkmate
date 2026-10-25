@@ -1,0 +1,9 @@
+fix(core): mandatory live staging tests, safety guard, mcp sanitization & atomic quota reservation
+
+- Enforce mandatory live verification in staging-verification.yml with pre-flight secret validation
+- Add explicit staging ref safety checks and blacklist production project IDs in verify-live-mcp-e2e.ts
+- Fully sanitize MCP error handling with stable error codes and correlation IDs across all tools and routes
+- Add shared authenticated-user distributed rate limiting to /mcp (60 req/min) and execute_thinking_turn (20 req/min)
+- Add migration 008_atomic_quota_reservation.sql with tm_reserve_turn_quota under row lock to eliminate daily quota race condition
+- Update src/config/models.ts comments to document gemini-3.5-flash-lite as active default model
+- Add unit tests verifying atomic quota reservation concurrency and sanitized error responses

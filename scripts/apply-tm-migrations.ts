@@ -111,6 +111,7 @@ export async function applyMigrations() {
     '005_teams.sql',
     '006_quota_idempotency.sql',
     '007_atomic_turn_rpc.sql',
+    '008_atomic_quota_reservation.sql',
   ];
 
   // 3. Apply pending migrations sequentially

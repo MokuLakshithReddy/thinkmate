@@ -1,12 +1,47 @@
 import dns from 'node:dns';
 dns.setDefaultResultOrder('ipv4first');
 
-const SUPABASE_URL = (process.env.STAGING_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://ffjgbefnubyjzrlvpdkl.supabase.co').trim();
-const ANON_KEY = (process.env.STAGING_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '').trim();
-const SERVICE_KEY = (process.env.STAGING_SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+const SUPABASE_URL: string = process.env.STAGING_SUPABASE_URL?.trim() || '';
+const ANON_KEY: string = process.env.STAGING_SUPABASE_ANON_KEY?.trim() || '';
+const SERVICE_KEY: string = process.env.STAGING_SUPABASE_SERVICE_ROLE_KEY?.trim() || '';
+const EXPECTED_STAGING_PROJECT_REF = (
+  process.env.EXPECTED_STAGING_PROJECT_REF ||
+  process.env.STAGING_PROJECT_REF ||
+  ''
+).toLowerCase().trim();
 
-if (!ANON_KEY || !SERVICE_KEY) {
-  throw new Error('Missing required environment variables: NEXT_PUBLIC_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY');
+if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY) {
+  throw new Error(
+    'Missing required staging environment variables: STAGING_SUPABASE_URL, STAGING_SUPABASE_ANON_KEY, STAGING_SUPABASE_SERVICE_ROLE_KEY. ' +
+    'Production environment fallbacks are disabled on destructive verification scripts.'
+  );
+}
+
+if (!EXPECTED_STAGING_PROJECT_REF) {
+  throw new Error(
+    'Missing required EXPECTED_STAGING_PROJECT_REF. ' +
+    'Live MCP verification creates and deletes users and workspaces and must verify the target staging reference.'
+  );
+}
+
+let host = '';
+try {
+  host = new URL(SUPABASE_URL).host.toLowerCase();
+} catch {
+  throw new Error(`STAGING_SUPABASE_URL is not a valid URL: ${SUPABASE_URL}`);
+}
+
+const FORBIDDEN_PRODUCTION_REFS = ['ujbpyqubhxycgtaadkce', 'gtkvujspajcelzufpggr'];
+for (const prodRef of FORBIDDEN_PRODUCTION_REFS) {
+  if (host.includes(prodRef)) {
+    throw new Error(`CRITICAL SAFETY ABORT: Refusing to run destructive MCP test against production project (${prodRef}).`);
+  }
+}
+
+if (!host.startsWith(EXPECTED_STAGING_PROJECT_REF + '.') && !host.includes(EXPECTED_STAGING_PROJECT_REF)) {
+  throw new Error(
+    `CRITICAL SAFETY ABORT: Target host "${host}" does not match expected staging project ref "${EXPECTED_STAGING_PROJECT_REF}".`
+  );
 }
 
 process.env.NEXT_PUBLIC_SUPABASE_URL = SUPABASE_URL;
