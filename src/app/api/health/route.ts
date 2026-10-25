@@ -78,11 +78,39 @@ export async function GET(req: NextRequest) {
   }
 
   const hasGeminiKey = !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
-  const aiStatus: 'ready' | 'unconfigured' = hasGeminiKey ? 'ready' : 'unconfigured';
+  const verifyLiveAI = req.nextUrl.searchParams.get('verify_ai') === 'true';
+  let aiStatus: 'ready' | 'verified' | 'degraded' | 'unconfigured' = hasGeminiKey ? 'ready' : 'unconfigured';
+  let liveVerified = false;
+  let liveMessage = hasGeminiKey ? 'Configured with API key' : 'API key unconfigured';
+
+  if (verifyLiveAI && hasGeminiKey) {
+    try {
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) as string });
+      const timeoutPromise = new Promise<never>((_, rej) => setTimeout(() => rej(new Error('AI probe timed out')), 6000));
+      const res = await Promise.race([
+        ai.models.generateContent({
+          model: DEFAULT_GEMINI_MODEL,
+          contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
+          config: { maxOutputTokens: 2 },
+        }),
+        timeoutPromise,
+      ]);
+      if (res && res.text !== undefined) {
+        liveVerified = true;
+        aiStatus = 'verified';
+        liveMessage = 'Live model generation verified successfully';
+      }
+    } catch (probeErr) {
+      aiStatus = 'degraded';
+      liveMessage = `Live model probe failed: ${probeErr instanceof Error ? probeErr.message : String(probeErr)}`;
+    }
+  }
 
   const authInfrastructure = await checkAuthInfrastructure();
 
-  const readyCount = [dbStatus === 'ready', aiStatus === 'ready', authInfrastructure.status === 'ready'].filter(
+  const isAiReady = aiStatus === 'ready' || aiStatus === 'verified';
+  const readyCount = [dbStatus === 'ready', isAiReady, authInfrastructure.status === 'ready'].filter(
     Boolean
   ).length;
   const overallReadiness: 'ready' | 'degraded' | 'unavailable' =
@@ -103,6 +131,9 @@ export async function GET(req: NextRequest) {
       aiProvider: {
         provider: 'Google GenAI (Gemini)',
         status: aiStatus,
+        configured: hasGeminiKey,
+        liveVerified,
+        message: liveMessage,
         model: DEFAULT_GEMINI_MODEL,
       },
       authInfrastructure,

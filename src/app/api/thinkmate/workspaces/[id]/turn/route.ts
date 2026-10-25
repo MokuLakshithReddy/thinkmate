@@ -25,12 +25,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   // Daily quota check (Layer 8)
   try {
-    const { data: used } = await sb.rpc('tm_turns_last_day');
-    if ((used ?? 0) >= Number(process.env.TM_DAILY_TURNS ?? 300)) {
+    const { data: used, error: quotaErr } = await sb.rpc('tm_turns_last_day');
+    if (quotaErr) {
+      if (process.env.NODE_ENV === 'production') {
+        return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
+      }
+    } else if ((used ?? 0) >= Number(process.env.TM_DAILY_TURNS ?? 300)) {
       return NextResponse.json({ error: 'daily_cap' }, { status: 429 });
     }
   } catch {
-    // Quota RPC not yet deployed or error; continue gracefully
+    if (process.env.NODE_ENV === 'production') {
+      return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
+    }
   }
 
   const rawJson = await req.json().catch(() => null);
@@ -47,7 +53,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // Idempotency: duplicate submit protection (Layer 8)
   if (body.data.client_msg_id) {
     const existing = state.messages.find(
-      (m: any) => m.client_msg_id === body.data.client_msg_id
+      (m) => m.client_msg_id === body.data.client_msg_id
     );
     if (existing) {
       return NextResponse.json(state);
@@ -68,7 +74,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     : 'ask';
 
   // Retrieval for long workspaces (Layer 4)
-  const confirmedCount = state.items.filter((i: any) => i.status === 'confirmed').length;
+  const confirmedCount = state.items.filter((i) => i.status === 'confirmed').length;
   const allowedItemIds = await relevantIds(sb, id, body.data.message, confirmedCount);
 
   const system = buildSystemPrompt({
@@ -99,7 +105,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       Date.now() - t0,
       action,
       tokens,
-      body.data.client_msg_id
+      body.data.client_msg_id,
+      a.user.id
     );
     return NextResponse.json(updated);
   } catch (e) {

@@ -10,7 +10,7 @@ import { checkCsrfOrForbidden } from '@/lib/csrf';
 const CreateSessionSchema = z
   .object({
     title: z.string().min(1, 'Title is required').max(120),
-    problemStatement: z.string().min(1, 'Problem statement is required'),
+    problemStatement: z.string().min(1, 'Problem statement is required').max(8000, 'Problem statement cannot exceed 8,000 characters'),
     currentMode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']).default('understand'),
     currentStage: z
       .enum([

@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { questionStreak, originLooksRight, norm } from './state';
-import { ModelOutput, ItemKind } from './schemas';
-import { canMove, suggestStage, type Stage, type Counts } from './stages';
+import { questionStreak, originLooksRight } from './state';
+import { ModelOutput } from './schemas';
+import { canMove, suggestStage, type Counts } from './stages';
 import { chooseAction, type Signals } from './policy';
 import { verificationOf } from './evidence';
 

@@ -7,14 +7,14 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
   const a = await authed();
   if (!a) return unauthorized();
 
-  const s: any = await loadState(a.sb, id);
+  const s = await loadState(a.sb, id);
   if (!s) return NextResponse.json({ error: 'not_found' }, { status: 404 });
 
   const section = (st: string) => [
     `## ${st.toUpperCase()}`,
     ...s.items
-      .filter((i: any) => i.status === st)
-      .map((i: any) => `- [${i.kind} | origin: ${i.origin} | ${i.verification}] ${i.text}`),
+      .filter((i) => i.status === st)
+      .map((i) => `- [${i.kind} | origin: ${i.origin} | ${i.verification ?? 'unassessed'}] ${i.text}`),
     '',
   ];
 
@@ -28,7 +28,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
     '',
     '## Frame history',
     ...(s.frames.length
-      ? s.frames.map((f: any) => `- v${f.version}: ${f.statement}`)
+      ? s.frames.map((f) => `- v${f.version}: ${f.statement}`)
       : ['- None yet']),
     '',
     ...section('confirmed'),
@@ -37,7 +37,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
     '## Evidence',
     ...(s.evidence?.length
       ? s.evidence.map(
-          (e: any) =>
+          (e) =>
             `- (${e.kind}) **${e.title}**: ${e.summary}${
               e.source_ref ? ' [' + e.source_ref + ']' : ''
             }`
@@ -47,7 +47,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
     '## Decisions',
     ...(s.decisions?.length
       ? s.decisions.map(
-          (d: any) =>
+          (d) =>
             `- **Rationale:** ${d.rationale}${
               d.reconsider_if ? ' *(reconsider if: ' + d.reconsider_if + ')*' : ''
             }`

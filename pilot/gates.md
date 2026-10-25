@@ -10,3 +10,10 @@
 
 ### Why Paired Design
 With so few people (n = 8), a median of two unpaired groups swings on one person. Pairing removes ability differences between people. With n = 8, one person is 12.5 percentage points, so run no significance tests. Commit this table to `/pilot/gates.md` BEFORE session 1.
+
+### Protocol Decision & Alignment
+The pilot adheres strictly to a **2-session paired within-subjects design** (n = 8 participants, 16 total sessions):
+- Each participant completes exactly two sessions: **ThinkMate plus one assigned baseline** (4 participants paired against Ordinary AI Condition A, 4 participants paired against Socratic AI Condition B).
+- This supersedes the earlier Version 4 3-condition proposal to avoid severe participant fatigue during intensive 45-minute thinking sessions.
+- The consent script (`consent.md`), prompt protocol (`prompts.md`), rubric anchors (`rubric.md`), schema (`sessions.csv`), and analysis tool (`scripts/analyze.ts`) are 100% aligned to this 2-session paired protocol.
+- Analysis gates evaluate individual paired score differences (`ThinkMate - Baseline`) without conflating conditions as if participants had experienced all three.

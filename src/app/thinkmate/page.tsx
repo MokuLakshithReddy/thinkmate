@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { createClient } from '@/lib/thinkmate/auth';
 import CreateWorkspaceForm from './CreateWorkspaceForm';
+import type { WorkspaceRow } from '@/lib/thinkmate/state';
 
 export const metadata = {
   title: 'ThinkMate Workspaces — AI Thinking Partner',
@@ -90,7 +91,7 @@ export default async function ThinkMatePage() {
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {workspaces.map((ws: any) => (
+              {((workspaces ?? []) as WorkspaceRow[]).map((ws) => (
                 <Link
                   key={ws.id}
                   href={`/thinkmate/${ws.id}`}

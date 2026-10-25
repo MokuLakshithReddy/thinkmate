@@ -221,16 +221,26 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
 
     if (this.client && typeof (this.client as unknown as Record<string, unknown>).from === 'function') {
       try {
-        const { data, error } = await this.client
+        const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        let query = this.client
           .from('workflow_idempotency_keys')
-          .select('response_payload, request_hash')
+          .select('response_payload, request_hash, created_at')
           .eq('user_id', userId)
           .eq('session_id', sessionId)
-          .eq('client_request_id', clientRequestId)
-          .maybeSingle();
+          .eq('client_request_id', clientRequestId);
+
+        if (typeof (query as unknown as Record<string, unknown>).gt === 'function') {
+          query = (query as unknown as { gt: (col: string, val: string) => typeof query }).gt('created_at', cutoff24h);
+        }
+
+        const { data, error } = await query.maybeSingle();
 
         if (error) {
           throw new Error(`Database failure looking up idempotency record: ${error.message}`);
+        }
+
+        if (data?.created_at && new Date(data.created_at as string).getTime() < new Date(cutoff24h).getTime()) {
+          return null;
         }
 
         if (data?.response_payload) {
@@ -265,6 +275,25 @@ export class SupabaseThinkingRepository implements ThinkingRepository {
       }
     }
     return null;
+  }
+
+  /**
+   * Bounded cleanup mechanism for expired idempotency records (> 24 hours).
+   * Prevents unbounded table growth in workflow_idempotency_keys.
+   */
+  async cleanupExpiredIdempotencyKeys(maxAgeHours = 24): Promise<number> {
+    if (!this.client || typeof (this.client as unknown as Record<string, unknown>).from !== 'function') return 0;
+    const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000).toISOString();
+    const { data, error } = await this.client
+      .from('workflow_idempotency_keys')
+      .delete()
+      .lt('created_at', cutoff)
+      .select('id');
+    if (error) {
+      console.warn('[Repository] Failed to clean up expired idempotency keys:', error);
+      return 0;
+    }
+    return data?.length ?? 0;
   }
 
   /**

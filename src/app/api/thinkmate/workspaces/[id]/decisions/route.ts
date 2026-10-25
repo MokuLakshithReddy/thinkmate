@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { authed, unauthorized } from '@/lib/thinkmate/auth';
-import { logEvent } from '@/lib/thinkmate/state';
+import { logEvent, type ItemRow } from '@/lib/thinkmate/state';
 
 const Body = z.object({
   selected_item_id: z.string().uuid(),
@@ -25,7 +25,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .eq('workspace_id', id)
     .in('id', ids);
 
-  const sel = (items ?? []).find((i: any) => i.id === b.data.selected_item_id);
+  const itemsList = (items ?? []) as ItemRow[];
+  const sel = itemsList.find((i) => i.id === b.data.selected_item_id);
   if (
     !sel ||
     sel.kind !== 'idea' ||

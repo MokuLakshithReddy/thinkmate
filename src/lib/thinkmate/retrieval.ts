@@ -28,7 +28,7 @@ export async function relevantIds(
       const [v] = await embed([message], 'RETRIEVAL_QUERY');
       const { data } = await sb.rpc('tm_match_items', { ws, query: v, lim: 10 });
       if (data && Array.isArray(data)) {
-        return new Set<string>((data as any[]).map((r) => r.id));
+        return new Set<string>((data as Array<{ id: string }>).map((r) => r.id));
       }
     } catch {
       // Fall through to FTS if vector call is unavailable
@@ -36,5 +36,5 @@ export async function relevantIds(
   }
 
   const { data } = await sb.rpc('tm_search_items', { ws, q: message, lim: 10 });
-  return new Set<string>((data ?? []).map((r: any) => r.id));
+  return new Set<string>(((data ?? []) as Array<{ id: string }>).map((r) => r.id));
 }

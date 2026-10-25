@@ -29,11 +29,13 @@ export async function research(question: string, context: string): Promise<Resea
     config: { tools: [{ googleSearch: {} }], temperature: 0.2 },
   });
 
-  const chunks = res.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+  const chunks = (res.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []) as Array<{
+    web?: { uri?: string; title?: string };
+  }>;
   const sources: ResearchSource[] = chunks
-    .map((c: any) => ({
-      uri: (c.web?.uri as string) || '',
-      title: c.web?.title as string | undefined,
+    .map((c) => ({
+      uri: c.web?.uri || '',
+      title: c.web?.title,
     }))
     .filter((s) => Boolean(s.uri))
     .slice(0, 6);

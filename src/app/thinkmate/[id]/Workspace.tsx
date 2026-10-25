@@ -22,7 +22,7 @@ export default function Workspace({ initial }: { initial: State }) {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(0);
   const [activeTab, setActiveTab] = useState<'thinking' | 'evidence'>('thinking');
   const [lastMsgId, setLastMsgId] = useState<string>('');
 
@@ -52,27 +52,31 @@ export default function Workspace({ initial }: { initial: State }) {
   };
 
   useEffect(() => {
-    post('/events', { type: 'session_start' });
+    fetch(`${base}/events`, {
+      method: 'POST',
+      headers: J,
+      body: JSON.stringify({ type: 'session_start' }),
+    }).catch(() => {});
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
-  }, []);
+  }, [base]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [st.messages]);
 
-  const mins = Math.max(0, Math.floor((now - Date.parse(st.ws.created_at)) / 60000));
+  const mins = now > 0 ? Math.max(0, Math.floor((now - Date.parse(st.ws.created_at)) / 60000)) : 0;
 
   // Compute counts for stage suggestion
-  const confirmedItems = st.items.filter((i: any) => i.status === 'confirmed');
+  const confirmedItems = st.items.filter((i) => i.status === 'confirmed');
   const counts: Counts = {
     hasMessages: st.messages.length > 0,
     frameConfirmed: Boolean(st.ws.problem_frame_confirmed),
-    claims: confirmedItems.filter((i: any) => i.kind === 'claim').length,
-    hypotheses: confirmedItems.filter((i: any) => i.kind === 'hypothesis').length,
-    ideas: confirmedItems.filter((i: any) => i.kind === 'idea').length,
-    counterarguments: confirmedItems.filter((i: any) => i.kind === 'counterargument').length,
-    experiments: confirmedItems.filter((i: any) => i.kind === 'experiment').length,
+    claims: confirmedItems.filter((i) => i.kind === 'claim').length,
+    hypotheses: confirmedItems.filter((i) => i.kind === 'hypothesis').length,
+    ideas: confirmedItems.filter((i) => i.kind === 'idea').length,
+    counterarguments: confirmedItems.filter((i) => i.kind === 'counterargument').length,
+    experiments: confirmedItems.filter((i) => i.kind === 'experiment').length,
     evidenceLinked: (st.links ?? []).length,
     decided: (st.decisions ?? []).length > 0,
   };
@@ -124,7 +128,7 @@ export default function Workspace({ initial }: { initial: State }) {
       const u = await res.json();
       setSt((s) => ({
         ...s,
-        items: s.items.map((i: any) => (i.id === u.id ? u : i)),
+        items: s.items.map((i) => (i.id === u.id ? u : i)),
       }));
     }
   }
@@ -148,7 +152,7 @@ export default function Workspace({ initial }: { initial: State }) {
     }
   }
 
-  async function setMode(mode: string) {
+  async function setMode(mode: 'guide' | 'balanced' | 'ideas') {
     await post('/events', { type: 'mode_changed', payload: { mode } });
     setSt((s) => ({ ...s, ws: { ...s.ws, mode } }));
   }
@@ -210,7 +214,7 @@ export default function Workspace({ initial }: { initial: State }) {
     }
   }
 
-  const pendingCount = st.items.filter((i: any) => i.status === 'proposed').length;
+  const pendingCount = st.items.filter((i) => i.status === 'proposed').length;
   const confirmedCount = confirmedItems.length;
 
   return (
@@ -370,7 +374,7 @@ export default function Workspace({ initial }: { initial: State }) {
               </p>
             </div>
           ) : (
-            st.messages.map((m: any) => {
+            st.messages.map((m) => {
               const isUser = m.role === 'user';
               return (
                 <div
@@ -467,7 +471,7 @@ export default function Workspace({ initial }: { initial: State }) {
               onItem={item}
               onFrame={frame}
               onDecide={(ideaId) => setDecisionIdeaId(ideaId)}
-              onCheckExisting={(ideaText) => {
+              onCheckExisting={() => {
                 setActiveTab('evidence');
               }}
             />
@@ -485,7 +489,7 @@ export default function Workspace({ initial }: { initial: State }) {
             <p className="text-xs text-slate-400">
               Selected Idea:{' '}
               <strong className="text-slate-200">
-                "{st.items.find((i: any) => i.id === decisionIdeaId)?.text}"
+                &quot;{st.items.find((i) => i.id === decisionIdeaId)?.text}&quot;
               </strong>
             </p>
 
@@ -518,15 +522,15 @@ export default function Workspace({ initial }: { initial: State }) {
               </div>
 
               {/* Rejected Ideas Checkboxes */}
-              {st.items.filter((i: any) => i.kind === 'idea' && i.id !== decisionIdeaId).length > 0 && (
+              {st.items.filter((i) => i.kind === 'idea' && i.id !== decisionIdeaId).length > 0 && (
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-1">
                     Select other candidate ideas rejected in favor of this:
                   </label>
                   <div className="space-y-1 max-h-32 overflow-y-auto">
                     {st.items
-                      .filter((i: any) => i.kind === 'idea' && i.id !== decisionIdeaId)
-                      .map((alt: any) => (
+                      .filter((i) => i.kind === 'idea' && i.id !== decisionIdeaId)
+                      .map((alt) => (
                         <label
                           key={alt.id}
                           className="flex items-center gap-2 text-xs text-slate-400 hover:text-slate-200 cursor-pointer"

@@ -1,7 +1,7 @@
 'use client';
 
 import { AnimatePresence, motion } from 'framer-motion';
-import type { State } from '@/lib/thinkmate/state';
+import type { State, ItemRow } from '@/lib/thinkmate/state';
 
 type Act = 'confirm' | 'reject' | 'edit';
 
@@ -39,7 +39,7 @@ function Card({
   onCheckExisting,
   linkedCount = 0,
 }: {
-  i: any;
+  i: ItemRow;
   pending?: boolean;
   onItem: Props['onItem'];
   onDecide?: Props['onDecide'];
@@ -145,8 +145,8 @@ function Card({
 }
 
 export function ThinkingPanel({ st, onItem, onFrame, onDecide, onCheckExisting }: Props) {
-  const by = (status: string) => st.items.filter((i: any) => i.status === status);
-  const links = (st.links ?? []) as any[];
+  const by = (status: string) => st.items.filter((i) => i.status === status);
+  const links = st.links ?? [];
   const f = st.ws;
 
   const getLinkedCount = (itemId: string) =>
@@ -195,7 +195,7 @@ export function ThinkingPanel({ st, onItem, onFrame, onDecide, onCheckExisting }
                 </button>
                 <button
                   onClick={() => {
-                    const t = window.prompt('Edit problem frame:', f.proposed_problem_frame);
+                    const t = window.prompt('Edit problem frame:', f.proposed_problem_frame ?? undefined);
                     if (t && t.trim() !== f.proposed_problem_frame) onFrame('edit', t.trim());
                   }}
                   className="px-2.5 py-1 rounded-md bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 transition"
@@ -232,7 +232,7 @@ export function ThinkingPanel({ st, onItem, onFrame, onDecide, onCheckExisting }
           </p>
         ) : (
           <AnimatePresence mode="popLayout">
-            {by('proposed').map((item: any) => (
+            {by('proposed').map((item) => (
               <Card
                 key={item.id}
                 i={item}
@@ -262,7 +262,7 @@ export function ThinkingPanel({ st, onItem, onFrame, onDecide, onCheckExisting }
           </p>
         ) : (
           <AnimatePresence mode="popLayout">
-            {by('confirmed').map((item: any) => (
+            {by('confirmed').map((item) => (
               <Card
                 key={item.id}
                 i={item}

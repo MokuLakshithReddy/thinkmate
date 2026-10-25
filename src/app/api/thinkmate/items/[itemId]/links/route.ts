@@ -4,6 +4,8 @@ import { authed, unauthorized } from '@/lib/thinkmate/auth';
 import { logEvent } from '@/lib/thinkmate/state';
 import { verificationOf } from '@/lib/thinkmate/evidence';
 
+import type { SupabaseClient } from '@supabase/supabase-js';
+
 const Body = z.object({
   evidence_id: z.string().uuid(),
   relation: z.enum(['supports', 'contradicts', 'context']).optional(),
@@ -11,9 +13,10 @@ const Body = z.object({
 
 type Ctx = { params: Promise<{ itemId: string }> };
 
-async function recompute(sb: any, itemId: string) {
+async function recompute(sb: SupabaseClient, itemId: string) {
   const { data } = await sb.from('tm_item_evidence').select('relation').eq('item_id', itemId);
-  const v = verificationOf((data ?? []).map((r: any) => r.relation));
+  const rows = (data ?? []) as { relation: string }[];
+  const v = verificationOf(rows.map((r) => r.relation));
   await sb
     .from('tm_items')
     .update({ verification: v, updated_at: new Date().toISOString() })

@@ -24,12 +24,12 @@ export function EvidencePanel({
   const [researching, setResearching] = useState(false);
   const [researchErr, setResearchErr] = useState('');
 
-  const claims = (st.items as any[]).filter(
+  const claims = st.items.filter(
     (i) => i.status === 'confirmed' && ['claim', 'hypothesis'].includes(i.kind)
   );
 
-  const evidence = (st.evidence ?? []) as any[];
-  const links = (st.links ?? []) as any[];
+  const evidence = st.evidence ?? [];
+  const links = st.links ?? [];
 
   async function addEvidence(e: React.FormEvent) {
     e.preventDefault();
@@ -215,7 +215,7 @@ export function EvidencePanel({
                     );
                     return (
                       <div key={c.id} className="flex flex-wrap items-center justify-between gap-1 py-1">
-                        <span className="truncate max-w-[160px] text-slate-300">"{c.text}"</span>
+                        <span className="truncate max-w-[160px] text-slate-300">&quot;{c.text}&quot;</span>
                         <div className="flex items-center gap-1">
                           {existingLink ? (
                             <button

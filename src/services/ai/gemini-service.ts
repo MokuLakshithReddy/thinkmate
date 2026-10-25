@@ -8,6 +8,7 @@ import { getSystemPrompt } from './prompts';
 import { ThinkingMode, Insight, normalizeInsightCategory, normalizeInsightStatus } from '@/types';
 import { reportOperationalAlertAsync } from '@/lib/monitoring';
 import { DEFAULT_GEMINI_MODEL } from '@/config/models';
+import { getFallbackModelChain, isTransientModelError } from './model-fallback';
 import { z } from 'zod';
 
 const StreamMetadataSchema = z.object({
@@ -86,22 +87,14 @@ export class GeminiThinkingService implements ThinkingAIService {
         });
       }
 
+      const modelCandidates = getFallbackModelChain(modelName);
       let responseStream;
-      try {
-        responseStream = await ai.models.generateContentStream({
-          model: modelName,
-          contents,
-          config: {
-            systemInstruction,
-            maxOutputTokens: 2500,
-            temperature: 0.7,
-            abortSignal,
-          },
-        });
-      } catch (streamErr) {
-        if (modelName !== 'gemini-3.8-flash') {
+      let lastStreamErr: unknown;
+
+      for (const candidate of modelCandidates) {
+        try {
           responseStream = await ai.models.generateContentStream({
-            model: 'gemini-3.8-flash',
+            model: candidate,
             contents,
             config: {
               systemInstruction,
@@ -110,9 +103,18 @@ export class GeminiThinkingService implements ThinkingAIService {
               abortSignal,
             },
           });
-        } else {
-          throw streamErr;
+          break;
+        } catch (streamErr) {
+          lastStreamErr = streamErr;
+          if (!isTransientModelError(streamErr)) {
+            throw streamErr;
+          }
+          console.warn(`[GeminiService] Stream model ${candidate} failed with transient error, falling back:`, streamErr);
         }
+      }
+
+      if (!responseStream) {
+        throw lastStreamErr || new Error('All candidate streaming AI models failed to respond');
       }
 
       let pendingBuffer = '';

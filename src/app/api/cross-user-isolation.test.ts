@@ -7,7 +7,7 @@ import { POST as postCoThink } from '@/app/api/cothink/route';
 import { POST as postTransition } from '@/app/api/workflow/transition/route';
 import { supabase } from '@/services/db/supabase-client';
 import { SupabaseThinkingRepository } from '@/services/db/repository';
-import { ThinkingSession } from '@/types';
+import { ThinkingSession, Insight, SessionMessage, CoThinkerStep, ThinkingMode } from '@/types';
 
 /**
  * Application-Level End-to-End Cross-User Isolation Suite
@@ -50,7 +50,7 @@ describe('Application-Level Cross-User Isolation & Anti-IDOR Protections', () =>
   const origTransitionMode = SupabaseThinkingRepository.prototype.transitionMode;
 
   beforeEach(() => {
-    (process.env as any).NODE_ENV = 'test';
+    (process.env as Record<string, string | undefined>).NODE_ENV = 'test';
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key-test-test-test';
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test-project.supabase.co';
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'test-anon-key-test-test-test';
@@ -107,7 +107,7 @@ describe('Application-Level Cross-User Isolation & Anti-IDOR Protections', () =>
       if (!session || session.userId !== userId) {
         return [];
       }
-      return Array.from(database.insights.values()).filter((i) => i.sessionId === sessionId && i.userId === userId) as any[];
+      return Array.from(database.insights.values()).filter((i) => i.sessionId === sessionId && i.userId === userId) as unknown as Insight[];
     };
 
     SupabaseThinkingRepository.prototype.upsertInsight = async function (insight, userId) {
@@ -117,8 +117,8 @@ describe('Application-Level Cross-User Isolation & Anti-IDOR Protections', () =>
         throw new Error('Unauthorized insight operation: session belongs to another user or does not exist');
       }
       const record = { ...insight, userId };
-      database.insights.set(insight.id, record as any);
-      return insight as any;
+      database.insights.set(insight.id, record);
+      return insight;
     };
 
     SupabaseThinkingRepository.prototype.deleteInsight = async function (id, userId) {
@@ -136,7 +136,7 @@ describe('Application-Level Cross-User Isolation & Anti-IDOR Protections', () =>
       if (!session || session.userId !== userId) {
         return [];
       }
-      return Array.from(database.messages.values()).filter((m) => m.sessionId === sessionId && m.userId === userId) as any[];
+      return Array.from(database.messages.values()).filter((m) => m.sessionId === sessionId && m.userId === userId) as unknown as SessionMessage[];
     };
 
     SupabaseThinkingRepository.prototype.recordWorkflowStep = async function (params, userId) {
@@ -145,8 +145,8 @@ describe('Application-Level Cross-User Isolation & Anti-IDOR Protections', () =>
       if (!session || session.userId !== userId) {
         throw new Error('Unauthorized session transition attempt');
       }
-      session.currentStage = params.nextStage as any;
-      session.currentMode = params.nextMode as any;
+      session.currentStage = params.nextStage as CoThinkerStep;
+      session.currentMode = params.nextMode as ThinkingMode;
       return {
         sessionId: params.sessionId,
         assistantMessageId: 'asst-msg-1',
@@ -182,8 +182,8 @@ describe('Application-Level Cross-User Isolation & Anti-IDOR Protections', () =>
 
     if (origEnvAnon !== undefined) process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = origEnvAnon;
     else delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-    if (origNodeEnv !== undefined) (process.env as any).NODE_ENV = origNodeEnv;
-    else delete (process.env as any).NODE_ENV;
+    if (origNodeEnv !== undefined) (process.env as Record<string, string | undefined>).NODE_ENV = origNodeEnv;
+    else delete (process.env as Record<string, string | undefined>).NODE_ENV;
 
     supabase.auth.getUser = origGetUser;
     SupabaseThinkingRepository.prototype.getSession = origGetSession;

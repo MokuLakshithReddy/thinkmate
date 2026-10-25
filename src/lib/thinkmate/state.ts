@@ -1,8 +1,103 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { ModelOutput } from './schemas';
 import { chooseAction, type Signals } from './policy';
+import type { Stage } from './stages';
 
-export async function loadState(sb: SupabaseClient, id: string) {
+export interface WorkspaceRow {
+  id: string;
+  owner_id: string;
+  title: string;
+  mode: 'guide' | 'balanced' | 'ideas';
+  stage: Stage;
+  problem_frame: string | null;
+  problem_frame_confirmed: boolean;
+  proposed_problem_frame: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ItemRow {
+  id: string;
+  workspace_id: string;
+  kind: 'claim' | 'hypothesis' | 'idea' | 'counterargument' | 'experiment' | 'question';
+  text: string;
+  origin: 'user' | 'ai';
+  status: 'proposed' | 'confirmed' | 'rejected';
+  verification?: 'unassessed' | 'supported' | 'contradicted' | 'mixed';
+  superseded_by?: string | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+  embedding?: number[] | null;
+}
+
+export interface MessageRow {
+  id: string;
+  seq: number;
+  workspace_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  guidance_mode?: string | null;
+  policy_action?: string | null;
+  client_msg_id?: string | null;
+  created_at: string;
+}
+
+export interface EvidenceRow {
+  id: string;
+  workspace_id: string;
+  kind: 'observation' | 'interview' | 'document' | 'dataset' | 'experiment' | 'web_source';
+  title: string;
+  source_ref?: string | null;
+  summary: string;
+  limitations: string[];
+  added_by: 'user' | 'research';
+  meta?: Record<string, unknown>;
+  created_by?: string;
+  created_at: string;
+}
+
+export interface ItemEvidenceRow {
+  item_id: string;
+  evidence_id: string;
+  workspace_id: string;
+  relation: 'supports' | 'contradicts' | 'context';
+}
+
+export interface DecisionRow {
+  id: string;
+  workspace_id: string;
+  selected_item_id: string;
+  rationale: string;
+  rejected_item_ids: string[];
+  reconsider_if?: string | null;
+  created_by?: string;
+  created_at: string;
+}
+
+export interface FrameRow {
+  id: string;
+  workspace_id: string;
+  version: number;
+  statement: string;
+  stakeholders: string[];
+  scope?: string | null;
+  supersedes_id?: string | null;
+  created_by?: string;
+  created_at: string;
+}
+
+export interface State {
+  ws: WorkspaceRow;
+  items: ItemRow[];
+  messages: MessageRow[];
+  links: ItemEvidenceRow[];
+  decisions: DecisionRow[];
+  frames: FrameRow[];
+  evidence: EvidenceRow[];
+}
+
+export async function loadState(sb: SupabaseClient, id: string): Promise<State | null> {
   const { data: ws } = await sb.from('tm_workspaces').select('*').eq('id', id).maybeSingle();
   if (!ws) return null;
 
@@ -16,17 +111,15 @@ export async function loadState(sb: SupabaseClient, id: string) {
   ]);
 
   return {
-    ws,
-    items: items.data ?? [],
-    messages: messages.data ?? [],
-    links: links.data ?? [],
-    decisions: decisions.data ?? [],
-    frames: frames.data ?? [],
-    evidence: evidence.data ?? [],
+    ws: ws as WorkspaceRow,
+    items: (items.data ?? []) as ItemRow[],
+    messages: (messages.data ?? []) as MessageRow[],
+    links: (links.data ?? []) as ItemEvidenceRow[],
+    decisions: (decisions.data ?? []) as DecisionRow[],
+    frames: (frames.data ?? []) as FrameRow[],
+    evidence: (evidence.data ?? []) as EvidenceRow[],
   };
 }
-
-export type State = NonNullable<Awaited<ReturnType<typeof loadState>>>;
 
 export async function logEvent(
   sb: SupabaseClient,
@@ -77,16 +170,16 @@ export function originLooksRight(claim: string, userText: string): boolean {
 export function ctxFrom(s: State, allowedItemIds?: Set<string> | null) {
   const pick = (status: string, kind?: string) =>
     s.items
-      .filter((i: any) => {
+      .filter((i: ItemRow) => {
         if (i.status !== status) return false;
         if (kind && i.kind !== kind) return false;
         if (allowedItemIds && status === 'confirmed' && !allowedItemIds.has(i.id)) return false;
         return true;
       })
-      .map((i: any) => i.text as string);
+      .map((i: ItemRow) => i.text);
 
-  const evidence = (s.evidence as any[]).map(
-    (e) => `${e.title}: ${String(e.summary || '').slice(0, 200)}`
+  const evidence = s.evidence.map(
+    (e: EvidenceRow) => `${e.title}: ${String(e.summary || '').slice(0, 200)}`
   );
 
   return {
@@ -107,17 +200,17 @@ const STUCK = /(don't know|do not know|not sure|stuck|no idea|idk|confused)/i;
 const short = (t: string) => t.trim().split(/\s+/).length <= 4;
 
 export function signalsFrom(s: State, message: string): Signals {
-  const items = s.items as any[];
+  const items = s.items;
   const conf = items.filter((i) => i.status === 'confirmed');
-  const linked = new Set((s.links as any[]).map((l) => l.item_id));
-  const assistants = s.messages.filter((m: any) => m.role === 'assistant') as any[];
+  const linked = new Set(s.links.map((l) => l.item_id));
+  const assistants = s.messages.filter((m) => m.role === 'assistant');
 
   let since = 0;
   for (let i = assistants.length - 1; i >= 0 && assistants[i].policy_action !== 'summarize'; i--) {
     since++;
   }
 
-  const prevUser = [...s.messages].reverse().find((m: any) => m.role === 'user') as any;
+  const prevUser = [...s.messages].reverse().find((m) => m.role === 'user');
 
   return {
     mode: s.ws.mode,
@@ -125,14 +218,14 @@ export function signalsFrom(s: State, message: string): Signals {
     directRequest: DIRECT.test(message),
     frameConfirmed: s.ws.problem_frame_confirmed,
     frameText: s.ws.problem_frame ?? s.ws.proposed_problem_frame,
-    questionStreak: questionStreak(s.messages as any),
-    stuck: STUCK.test(message) || (short(message) && Boolean(prevUser) && short(prevUser.content)),
+    questionStreak: questionStreak(s.messages),
+    stuck: STUCK.test(message) || (short(message) && (prevUser ? short(prevUser.content) : false)),
     unsupportedConfirmed: conf.filter(
       (i) => ['claim', 'hypothesis'].includes(i.kind) && !linked.has(i.id)
     ).length,
     ideas: conf.filter((i) => i.kind === 'idea').length,
     turnsSinceSummary: since,
-    decided: (s.decisions as any[]).length > 0,
+    decided: s.decisions.length > 0,
     lastAction: assistants.length ? assistants[assistants.length - 1].policy_action ?? null : null,
   };
 }
@@ -147,10 +240,12 @@ export async function applyModelOutput(
   ms: number,
   action: string,
   tokens?: number,
-  clientMsgId?: string
-) {
+  clientMsgId?: string,
+  userId?: string
+): Promise<State | null> {
   const { data: existing } = await sb.from('tm_items').select('kind,text').eq('workspace_id', id);
-  const seen = new Set((existing ?? []).map((i: any) => i.kind + ':' + norm(i.text)));
+  const existingRows = (existing ?? []) as { kind: string; text: string }[];
+  const seen = new Set(existingRows.map((i) => i.kind + ':' + norm(i.text)));
 
   const rows = out.proposed_items
     .map((i) => ({
@@ -158,9 +253,9 @@ export async function applyModelOutput(
       text: i.text,
       origin:
         i.kind === 'question'
-          ? 'ai'
+          ? ('ai' as const)
           : i.origin === 'user' && !originLooksRight(i.text, userText)
-          ? 'ai'
+          ? ('ai' as const)
           : i.origin,
     }))
     .filter((r) => !seen.has(r.kind + ':' + norm(r.text)))
@@ -197,6 +292,7 @@ export async function applyModelOutput(
   }
 
   await logEvent(sb, id, 'turn', {
+    user_id: userId,
     guidance_mode: out.guidance_mode,
     policy_action: action,
     proposed: rows.length,

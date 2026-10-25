@@ -1,6 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { CoThinkerStep, ChoiceOption, WORKFLOW_STAGES } from '@/types';
 import { DEFAULT_GEMINI_MODEL } from '@/config/models';
+import { getFallbackModelChain, isTransientModelError } from './model-fallback';
 
 export interface CoThinkPromptContext {
   userName?: string;
@@ -338,30 +339,36 @@ OPTIONS:
       parts: [{ text: userMessage + (selectedOptionId ? ` [Selected Option: ${selectedOptionId}]` : '') }],
     });
 
-    const modelToUse = context.model || DEFAULT_GEMINI_MODEL;
+    const primaryModel = context.model || DEFAULT_GEMINI_MODEL;
+    const modelCandidates = getFallbackModelChain(primaryModel);
     let response;
-    try {
-      response = await this.ai.models.generateContent({
-        model: modelToUse,
-        contents,
-        config: {
-          systemInstruction: systemPrompt,
-          temperature: 0.6,
-        },
-      });
-    } catch (modelErr) {
-      if (modelToUse !== 'gemini-3.8-flash') {
+    let succeededModel = primaryModel;
+    let lastError: unknown;
+
+    for (const candidate of modelCandidates) {
+      try {
         response = await this.ai.models.generateContent({
-          model: 'gemini-3.8-flash',
+          model: candidate,
           contents,
           config: {
             systemInstruction: systemPrompt,
             temperature: 0.6,
           },
         });
-      } else {
-        throw modelErr;
+        succeededModel = candidate;
+        break;
+      } catch (err) {
+        lastError = err;
+        if (!isTransientModelError(err)) {
+          // Do not retry quota, auth, or validation errors against alternate models
+          throw err;
+        }
+        console.warn(`[CoThinkEngine] Model ${candidate} encountered transient error, falling back:`, err);
       }
+    }
+
+    if (!response) {
+      throw lastError || new Error('All candidate AI models failed to respond');
     }
 
     const text = response.text || '';
@@ -404,7 +411,7 @@ OPTIONS:
       options: options.length > 0 ? options : flowchartTarget.options,
       progressPercent: flowchartTarget.progressPercent,
       executionMode: 'gemini',
-      modelName: modelToUse,
+      modelName: succeededModel,
     };
   }
 }
