@@ -55,7 +55,7 @@ test.describe('session restoration and cloud history (Supabase mocked)', () => {
     });
     await api.install();
 
-    await openApp(page, `/?session=${CLOUD_SESSION_ID}`);
+    await openApp(page, `/app?session=${CLOUD_SESSION_ID}`);
     await expect(page.getByText('Saved cloud reply: what slows releases today?')).toBeVisible();
 
     await page.reload();

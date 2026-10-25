@@ -225,16 +225,26 @@ async function verifyStagingRpc() {
     const baseCount = currentTurns ?? 0;
     console.log(`Initial User A turns in last 24h: ${baseCount}`);
 
-    // Boundary condition: exactly ONE slot remaining
-    const boundaryLimit = baseCount + 1;
-    console.log(`Launching 2 simultaneous concurrent reservations against Workspace 1 (${wsId}) and Workspace 2 (${wsId2}) with limit ${boundaryLimit}...`);
+    // Free plan allows 30 turns/day. Seed events so exactly 1 slot remains (29 turns used)
+    const neededToSeed = Math.max(0, 29 - baseCount);
+    if (neededToSeed > 0) {
+      const dummyEvents = Array.from({ length: neededToSeed }).map((_, idx) => ({
+        workspace_id: wsId,
+        event_type: 'turn',
+        payload: { seed_index: idx },
+      }));
+      const { error: seedErr } = await adminClient.from('tm_events').insert(dummyEvents);
+      if (seedErr) throw new Error(`Failed to seed dummy turns for boundary test: ${seedErr.message}`);
+    }
+
+    console.log(`Launching 2 simultaneous concurrent reservations via tm_reserve_turn_quota_for_plan against Workspace 1 (${wsId}) and Workspace 2 (${wsId2})...`);
 
     const [raceRes1, raceRes2] = await Promise.all([
-      clientA.rpc('tm_reserve_turn_quota', { p_workspace_id: wsId, p_daily_limit: boundaryLimit }),
-      clientA.rpc('tm_reserve_turn_quota', { p_workspace_id: wsId2, p_daily_limit: boundaryLimit }),
+      clientA.rpc('tm_reserve_turn_quota_for_plan', { p_workspace_id: wsId }),
+      clientA.rpc('tm_reserve_turn_quota_for_plan', { p_workspace_id: wsId2 }),
     ]);
 
-    console.log('Concurrent reservation results:');
+    console.log('Concurrent plan reservation results:');
     console.log('  - Workspace 1 response:', raceRes1);
     console.log('  - Workspace 2 response:', raceRes2);
 
@@ -250,7 +260,7 @@ async function verifyStagingRpc() {
         `CRITICAL QUOTA RACE FAILURE: Expected exactly 1 allowed and 1 rejected reservation across workspaces, got allowed=${allowedCount}, rejected=${rejectedCount}`
       );
     }
-    console.log('✓ User-level row lock strictly serialized concurrent requests across two different workspaces at the quota boundary.');
+    console.log('✓ User-level row lock strictly serialized concurrent requests across two different workspaces at the plan quota boundary.');
 
     console.log('\n=== ALL STAGING DATABASE RPC VERIFICATIONS PASSED ===');
   } finally {

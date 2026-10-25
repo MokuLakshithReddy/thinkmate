@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import type { State } from '@/lib/thinkmate/state';
+import { apiFetch } from '@/lib/thinkmate/api-client';
 
 const J = { 'Content-Type': 'application/json' };
 
@@ -22,7 +23,7 @@ export function EvidencePanel({
   });
   const [researchQuery, setResearchQuery] = useState('');
   const [researching, setResearching] = useState(false);
-  const [researchErr, setResearchErr] = useState('');
+  const [researchErr, setResearchErr] = useState<React.ReactNode>('');
 
   const claims = st.items.filter(
     (i) => i.status === 'confirmed' && ['claim', 'hypothesis'].includes(i.kind)
@@ -35,7 +36,7 @@ export function EvidencePanel({
     e.preventDefault();
     if (!f.title.trim() || !f.summary.trim()) return;
 
-    const res = await fetch(`/api/thinkmate/workspaces/${wsId}/evidence`, {
+    const res = await apiFetch(`/api/thinkmate/workspaces/${wsId}/evidence`, {
       method: 'POST',
       headers: J,
       body: JSON.stringify(f),
@@ -48,7 +49,7 @@ export function EvidencePanel({
   }
 
   async function linkEvidence(itemId: string, evidenceId: string, relation: string) {
-    await fetch(`/api/thinkmate/items/${itemId}/links`, {
+    await apiFetch(`/api/thinkmate/items/${itemId}/links`, {
       method: 'PUT',
       headers: J,
       body: JSON.stringify({ evidence_id: evidenceId, relation }),
@@ -57,7 +58,7 @@ export function EvidencePanel({
   }
 
   async function unlinkEvidence(itemId: string, evidenceId: string) {
-    await fetch(`/api/thinkmate/items/${itemId}/links`, {
+    await apiFetch(`/api/thinkmate/items/${itemId}/links`, {
       method: 'DELETE',
       headers: J,
       body: JSON.stringify({ evidence_id: evidenceId }),
@@ -74,7 +75,7 @@ export function EvidencePanel({
     setResearchErr('');
 
     try {
-      const res = await fetch(`/api/thinkmate/workspaces/${wsId}/research`, {
+      const res = await apiFetch(`/api/thinkmate/workspaces/${wsId}/research`, {
         method: 'POST',
         headers: J,
         body: JSON.stringify({ question: q }),
@@ -85,13 +86,20 @@ export function EvidencePanel({
         onChange();
       } else {
         const data = await res.json().catch(() => ({}));
-        setResearchErr(
-          data.error === 'no_sources'
-            ? 'No verified web sources could ground this research topic.'
-            : data.error === 'research_cap'
-            ? 'Research limit reached for this session.'
-            : 'Research failed. Please retry.'
-        );
+        if (data.error === 'plan_limit' || data.error === 'research_cap') {
+          setResearchErr(
+            <span>
+              Research limit reached.{' '}
+              <a href="/pricing" className="text-sky-400 underline font-medium hover:text-sky-300">
+                Upgrade for more research searches
+              </a>
+            </span>
+          );
+        } else if (data.error === 'no_sources') {
+          setResearchErr('No verified web sources could ground this research topic.');
+        } else {
+          setResearchErr('Research failed. Please retry.');
+        }
       }
     } catch {
       setResearchErr('Network error conducting research.');

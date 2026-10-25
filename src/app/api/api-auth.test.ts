@@ -1324,7 +1324,12 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       const unconfirmedReq = new NextRequest('http://localhost:3000/api/auth/signup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:3000', Host: 'localhost:3000' },
-        body: JSON.stringify({ email: 'unconfirmed@thinkmate.ai', password: 'securepassword123' }),
+        body: JSON.stringify({
+          email: 'unconfirmed@thinkmate.ai',
+          password: 'securepassword123',
+          accepted_terms: true,
+          age_confirmed: true,
+        }),
       });
       const unconfirmedRes = await signupPost(unconfirmedReq);
       assert.strictEqual(unconfirmedRes.status, 200);
@@ -1349,7 +1354,12 @@ describe('API Security Boundaries & Authentication Enforcement', () => {
       const confirmedReq = new NextRequest('http://localhost:3000/api/auth/signup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:3000', Host: 'localhost:3000' },
-        body: JSON.stringify({ email: 'confirmed@thinkmate.ai', password: 'securepassword123' }),
+        body: JSON.stringify({
+          email: 'confirmed@thinkmate.ai',
+          password: 'securepassword123',
+          accepted_terms: true,
+          age_confirmed: true,
+        }),
       });
       const confirmedRes = await signupPost(confirmedReq);
       assert.strictEqual(confirmedRes.status, 200);

@@ -68,7 +68,7 @@ test.describe('expired auth and explicit local draft (Supabase/Gemini mocked, si
       ],
     });
     await api.install();
-    await openApp(page, `/?session=${CLOUD_SESSION_ID}`);
+    await openApp(page, `/app?session=${CLOUD_SESSION_ID}`);
     await expect(page.getByText('Saved cloud reply: what does the team lack most?')).toBeVisible();
 
     api.authenticated = false;

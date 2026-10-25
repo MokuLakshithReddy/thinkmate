@@ -51,6 +51,14 @@ export async function POST(req: NextRequest) {
 
   const { email, password } = parsed.data;
 
+  const emailLimit = await checkRateLimitAsync(`auth:login:email:${email.toLowerCase()}`, 8, 15 * 60 * 1000);
+  if (!emailLimit.allowed) {
+    return createRateLimitErrorResponse(
+      emailLimit,
+      'Too many attempts for this account. Please wait and try again.'
+    );
+  }
+
   try {
     const { data, error } = await supabase.auth.signInWithPassword({
       email,
@@ -59,8 +67,9 @@ export async function POST(req: NextRequest) {
 
     if (error || !data?.session) {
       await recordAuthFailure(clientIp, '/api/auth/login');
+      const notConfirmed = error?.message?.toLowerCase().includes('not confirmed');
       return NextResponse.json(
-        { error: error?.message || 'Invalid credentials' },
+        { error: notConfirmed ? 'Please confirm your email first.' : 'Invalid email or password.' },
         { status: 401 }
       );
     }

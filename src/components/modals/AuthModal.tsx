@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { Lock, Mail, ShieldCheck, AlertCircle } from 'lucide-react';
+import Link from 'next/link';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -15,6 +16,8 @@ export function AuthModal({ isOpen, onClose, onAuthSuccess }: AuthModalProps) {
   const [tab, setTab] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [agreed, setAgreed] = useState(false);
+  const [adult, setAdult] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
@@ -26,11 +29,20 @@ export function AuthModal({ isOpen, onClose, onAuthSuccess }: AuthModalProps) {
       return;
     }
 
+    if (tab === 'signup' && (!agreed || !adult)) {
+      setErrorMessage('Please accept the Terms & Privacy Policy and confirm your age requirement.');
+      return;
+    }
+
     setIsLoading(true);
     setErrorMessage(null);
     setSuccessNotice(null);
 
     const endpoint = tab === 'signin' ? '/api/auth/login' : '/api/auth/signup';
+    const payload =
+      tab === 'signin'
+        ? { email: email.trim(), password }
+        : { email: email.trim(), password, accepted_terms: true, age_confirmed: true };
 
     try {
       const res = await fetch(endpoint, {
@@ -39,7 +51,7 @@ export function AuthModal({ isOpen, onClose, onAuthSuccess }: AuthModalProps) {
           'Content-Type': 'application/json',
         },
         credentials: 'same-origin',
-        body: JSON.stringify({ email: email.trim(), password }),
+        body: JSON.stringify(payload),
       });
 
       const data = await res.json();
@@ -51,8 +63,6 @@ export function AuthModal({ isOpen, onClose, onAuthSuccess }: AuthModalProps) {
       }
 
       if (tab === 'signup' && (data.requiresEmailConfirmation || !data.session)) {
-        // Email confirmation is required by Supabase Auth: no active session exists yet.
-        // Do not mark the user authenticated; keep the confirmation notice prominently displayed.
         setSuccessNotice(
           data.message || 'Account created! Please check your inbox to confirm your email before signing in.'
         );
@@ -81,7 +91,7 @@ export function AuthModal({ isOpen, onClose, onAuthSuccess }: AuthModalProps) {
       isOpen={isOpen}
       onClose={onClose}
       title={tab === 'signin' ? 'Sign in to ThinkMate' : 'Create ThinkMate Account'}
-      description="Access your encrypted cloud thinking sessions and synchronize your insights across devices."
+      description="Your sessions are stored in your account and you can delete them at any time."
       maxWidth="sm"
     >
       <div className="space-y-4">
@@ -152,27 +162,71 @@ export function AuthModal({ isOpen, onClose, onAuthSuccess }: AuthModalProps) {
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1 flex items-center gap-1.5">
-              <Lock className="h-3.5 w-3.5 text-sky-400" />
-              Password
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
+                <Lock className="h-3.5 w-3.5 text-sky-400" />
+                Password
+              </label>
+              {tab === 'signin' && (
+                <Link
+                  href="/forgot-password"
+                  onClick={onClose}
+                  className="text-[11px] text-sky-400 hover:underline"
+                >
+                  Forgot password?
+                </Link>
+              )}
+            </div>
             <input
               type="password"
               required
-              minLength={6}
+              minLength={8}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
+              placeholder="•••••••• (min 8 chars)"
               className="w-full bg-[#101728] border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-sky-500"
             />
           </div>
+
+          {tab === 'signup' && (
+            <div className="space-y-2 text-[11px] text-slate-300 pt-1">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={agreed}
+                  onChange={(e) => setAgreed(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-0"
+                />
+                <span>
+                  I agree to the{' '}
+                  <a className="underline text-sky-400" href="/terms" target="_blank" rel="noopener noreferrer">
+                    Terms
+                  </a>{' '}
+                  and{' '}
+                  <a className="underline text-sky-400" href="/privacy" target="_blank" rel="noopener noreferrer">
+                    Privacy Policy
+                  </a>
+                  .
+                </span>
+              </label>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={adult}
+                  onChange={(e) => setAdult(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-0"
+                />
+                <span>I am 18 or older, or a parent or guardian has agreed on my behalf.</span>
+              </label>
+            </div>
+          )}
 
           <div className="pt-2">
             <Button
               type="submit"
               variant="primary"
               size="md"
-              disabled={isLoading}
+              disabled={isLoading || (tab === 'signup' && (!agreed || !adult))}
               className="w-full text-xs font-medium"
             >
               {isLoading
@@ -189,7 +243,7 @@ export function AuthModal({ isOpen, onClose, onAuthSuccess }: AuthModalProps) {
         {/* Security Assurance Footer */}
         <div className="pt-2 border-t border-slate-800/80 flex items-center gap-2 text-[11px] text-slate-400">
           <ShieldCheck className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-          <span>Sessions use secure, server-managed HttpOnly cookies protected against XSS.</span>
+          <span>Sign-in uses secure HttpOnly cookies.</span>
         </div>
       </div>
     </Modal>

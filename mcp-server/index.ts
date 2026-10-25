@@ -368,12 +368,10 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
         return fail('rate_limit_exceeded: Too many turns in a short period. Please wait a minute before sending more.');
       }
 
-      // 2. Atomic daily quota check & reservation under user-level lock (prevents concurrency race at boundary)
-      const dailyLimit = Number(process.env.TM_DAILY_TURNS ?? 300);
+      // 2. Atomic daily quota check & reservation (limit comes from user's active plan)
       try {
-        const { data: reserveData, error: reserveErr } = await sb.rpc('tm_reserve_turn_quota', {
+        const { data: reserveData, error: reserveErr } = await sb.rpc('tm_reserve_turn_quota_for_plan', {
           p_workspace_id: workspace_id,
-          p_daily_limit: dailyLimit,
         });
 
         if (reserveErr) {
@@ -390,6 +388,7 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
             reserveErr.code === 'PGRST202';
 
           if (isMissingRpc) {
+            const dailyLimit = Number(process.env.TM_DAILY_TURNS ?? 300);
             const { data: used, error: rpcErr } = await sb.rpc('tm_turns_last_day');
             if (rpcErr) {
               console.error(`[MCP Quota Fallback Error cid=${correlationId}]:`, rpcErr);

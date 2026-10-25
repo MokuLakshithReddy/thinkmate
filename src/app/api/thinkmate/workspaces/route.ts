@@ -6,6 +6,11 @@ export async function POST(req: Request) {
   const a = await authed();
   if (!a) return unauthorized();
 
+  const { data: usage } = await a.sb.rpc('tm_my_usage');
+  if (usage && (usage?.workspaces_used ?? 0) >= (usage?.workspaces_limit ?? 3)) {
+    return NextResponse.json({ error: 'plan_limit', upgrade: true }, { status: 429 });
+  }
+
   const { title } = await req.json().catch(() => ({}));
   const { data, error } = await a.sb
     .from('tm_workspaces')

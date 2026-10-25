@@ -1,7 +1,7 @@
 import { expect, type Page } from '@playwright/test';
 
 /** Navigates and waits for the client's first /api/auth/session check, i.e. until React has hydrated. */
-export async function openApp(page: Page, path = '/') {
+export async function openApp(page: Page, path = '/app') {
   const sessionCheck = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/auth/session');
   await page.goto(path);
   await sessionCheck;
@@ -44,6 +44,11 @@ export async function fillAuthForm(
   const form = authForm(page);
   await form.getByPlaceholder('you@domain.com').fill(email);
   await form.getByPlaceholder('••••••••').fill(password);
+  const checkboxes = form.locator('input[type="checkbox"]');
+  const count = await checkboxes.count();
+  for (let i = 0; i < count; i++) {
+    await checkboxes.nth(i).check();
+  }
   const responsePromise = page.waitForResponse((r) => new URL(r.url()).pathname === path, { timeout: 15_000 });
   await form.locator('button[type="submit"]').click();
   const response = await responsePromise;

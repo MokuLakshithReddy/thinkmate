@@ -1,0 +1,881 @@
+'use client';
+
+import React, { useState, useRef, useSyncExternalStore, useEffect, useCallback } from 'react';
+import { CoThinkerStep, ChatMessage, ChoiceOption, ThinkingSession } from '@/types';
+import { TopNav } from '@/components/cothinker/TopNav';
+import { WorkflowCanvas } from '@/components/cothinker/WorkflowCanvas';
+import { PreviewPanel } from '@/components/cothinker/PreviewPanel';
+import { SettingsModal } from '@/components/modals/SettingsModal';
+import { AuthModal } from '@/components/modals/AuthModal';
+import { WorkflowStateMachine } from '@/services/workflow/state-machine';
+import { DEFAULT_GEMINI_MODEL } from '@/config/models';
+import {
+  getStoredSessions,
+  saveStoredSessions,
+  getStoredMessages,
+  appendStoredMessage,
+  clearAllLocalData,
+} from '@/lib/storage';
+
+interface HistorySnapshot {
+  step: CoThinkerStep;
+  progressPercent: number;
+  messages: ChatMessage[];
+  options?: ChoiceOption[];
+  problemStatement: string;
+  clarifiedObjective: string;
+}
+
+const DEFAULT_NEUTRAL_WELCOME: ChatMessage = {
+  id: 'msg-init-neutral',
+  role: 'assistant',
+  step: 'welcome',
+  timestamp: '2026-10-12T00:00:00.000Z',
+  content: `Welcome to ThinkMate, your personal AI thinking partner.
+
+I help you think through complex problems by clarifying objectives, breaking down tensions, exploring perspectives, and challenging assumptions.
+
+What problem, decision, or dilemma would you like to explore today?`,
+  options: [{ id: 'start_new', label: 'Describe a new problem' }],
+  executionMode: 'simulator',
+  simulatedNotice: 'Session kickoff. Ready to explore your dilemma.',
+};
+
+function subscribeToStorage(callback: () => void) {
+  if (typeof window === 'undefined') return () => {};
+  window.addEventListener('storage', callback);
+  return () => window.removeEventListener('storage', callback);
+}
+
+function getStoredSessionsSnapshot(): string {
+  if (typeof window === 'undefined') return '[]';
+  return localStorage.getItem('thinkmate_sessions_v1') || '[]';
+}
+
+function getServerSessionsSnapshot(): string {
+  return '[]';
+}
+
+export default function Home() {
+  const [viewMode, setViewMode] = useState<'editor' | 'app'>('editor');
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Cloud Sessions & Authentication State (Authoritative source of truth)
+  const [cloudSessions, setCloudSessions] = useState<ThinkingSession[]>([]);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [userEmail, setUserEmail] = useState<string | undefined>(undefined);
+
+  // Read stored offline sessions via useSyncExternalStore
+  const storedSessionsJson = useSyncExternalStore(
+    subscribeToStorage,
+    getStoredSessionsSnapshot,
+    getServerSessionsSnapshot
+  );
+
+  const localDraftSessions: ThinkingSession[] = React.useMemo(() => {
+    try {
+      return JSON.parse(storedSessionsJson);
+    } catch {
+      return [];
+    }
+  }, [storedSessionsJson]);
+
+  const [refreshCloudTrigger, setRefreshCloudTrigger] = useState(0);
+  const refreshCloudSessions = useCallback(() => {
+    setRefreshCloudTrigger((prev) => prev + 1);
+  }, []);
+
+  // Synchronize authoritative cloud sessions and auth state via server-managed cookie credentials
+  useEffect(() => {
+    let ignore = false;
+
+    // Purge legacy bearer token from browser localStorage if present
+    if (typeof window !== 'undefined' && localStorage.getItem('thinkmate_auth_token')) {
+      localStorage.removeItem('thinkmate_auth_token');
+    }
+
+    // Verify authentication status (read-only GET)
+    fetch('/api/auth/session', {
+      credentials: 'same-origin',
+    })
+      .then((res) => res.json())
+      .then(async (data) => {
+        if (ignore) return;
+        if (data.authenticated && data.user) {
+          setIsAuthenticated(true);
+          setUserEmail(data.user.email);
+        } else if (data.canRefresh) {
+          // Access token expired but refresh token cookie is present: trigger explicit CSRF-protected POST refresh
+          try {
+            const refreshRes = await fetch('/api/auth/refresh', {
+              method: 'POST',
+              credentials: 'same-origin',
+            });
+            if (refreshRes.ok) {
+              const refreshData = await refreshRes.json();
+              if (!ignore && refreshData.user) {
+                setIsAuthenticated(true);
+                setUserEmail(refreshData.user.email);
+                refreshCloudSessions();
+                return;
+              }
+            }
+          } catch (refreshErr) {
+            console.warn('Initial session refresh attempt failed:', refreshErr);
+          }
+          if (!ignore) {
+            setIsAuthenticated(false);
+            setUserEmail(undefined);
+          }
+        } else {
+          setIsAuthenticated(false);
+          setUserEmail(undefined);
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to verify session status:', err);
+      });
+
+    // Fetch cloud sessions
+    fetch('/api/sessions', {
+      credentials: 'same-origin',
+    })
+      .then((res) => {
+        if (ignore) return;
+        if (res.ok) {
+          return res.json().then((data) => {
+            if (!ignore) {
+              setIsAuthenticated(true);
+              if (Array.isArray(data.sessions)) {
+                setCloudSessions(data.sessions);
+              }
+            }
+          });
+        } else if (res.status === 401) {
+          setIsAuthenticated(false);
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to fetch cloud sessions from server:', err);
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [isSettingsOpen, isAuthModalOpen, refreshCloudTrigger, refreshCloudSessions]);
+
+  // Workflow State
+  const [currentStep, setCurrentStep] = useState<CoThinkerStep>('welcome');
+  const [progressPercent, setProgressPercent] = useState(10);
+  const [problemStatement, setProblemStatement] = useState<string>('');
+  const [clarifiedObjective, setClarifiedObjective] = useState<string>('');
+  const [customMessages, setCustomMessages] = useState<ChatMessage[] | null>(null);
+  const [customOptions, setCustomOptions] = useState<ChoiceOption[] | undefined>(undefined);
+
+  // Active sessions: Authenticated users only see cloud sessions. Local drafts remain segregated for offline guests.
+  const availableSessions = isAuthenticated ? cloudSessions : localDraftSessions;
+
+  // Active messages derived from cloud sessions, local drafts, or default welcome
+  const messages: ChatMessage[] = React.useMemo(() => {
+    if (customMessages) return customMessages;
+    if (availableSessions.length > 0) {
+      const latest = availableSessions[0];
+      const resumeOptionId = `resume_${latest.id}`;
+      const isCloud = isAuthenticated;
+      return [
+        {
+          id: 'msg-init-saved',
+          role: 'assistant',
+          step: 'welcome',
+          timestamp: '2026-10-12T00:00:00.000Z',
+          content: `Welcome back to ThinkMate.\n\nI found ${availableSessions.length} ${isCloud ? 'cloud-synced' : 'saved'} session(s) in your account:\n\n${availableSessions
+            .slice(0, 3)
+            .map((s, idx) => `${idx + 1}. **${s.title}** (*${s.currentMode} mode*)`)
+            .join('\n')}\n\nWould you like to resume **${latest.title}** or start a new problem?`,
+          options: [
+            {
+              id: resumeOptionId,
+              label: `Resume "${latest.title.length > 40 ? latest.title.slice(0, 38) + '...' : latest.title}"`,
+            },
+            { id: 'start_new', label: 'Start a new problem' },
+          ],
+          executionMode: isCloud ? 'gemini' : 'simulator',
+          simulatedNotice: isCloud
+            ? 'Authoritative session history loaded from Supabase PostgreSQL.'
+            : 'Offline draft session history loaded from browser storage.',
+        },
+      ];
+    }
+    return [DEFAULT_NEUTRAL_WELCOME];
+  }, [customMessages, availableSessions, isAuthenticated]);
+
+  const currentOptions: ChoiceOption[] | undefined =
+    customOptions !== undefined ? customOptions : messages[messages.length - 1]?.options;
+
+  // Authoritative Session ID state and ref
+  // Explicit session kind tracking ('cloud' for verified DB sessions, 'local' for unauthenticated drafts)
+  const isCloudUuid = (id: string | null | undefined): boolean =>
+    typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+  const [activeSessionId, setActiveSessionId] = useState<string>('');
+  const [sessionKind, setSessionKind] = useState<'cloud' | 'local' | null>(null);
+  const currentSessionIdRef = useRef<string>('');
+  const sessionKindRef = useRef<'cloud' | 'local' | null>(null);
+
+  // Message held back after an authentication/persistence failure, so it can be resent once the user
+  // reauthenticates or explicitly opts into a local draft. Never silently rerouted.
+  const pendingRetryRef = useRef<{ text: string; selectedOptionId?: string; userMsgId: string } | null>(null);
+  const explicitLocalDraftRef = useRef(false);
+
+  const updateSessionState = (id: string, kind: 'cloud' | 'local' | null) => {
+    currentSessionIdRef.current = id;
+    sessionKindRef.current = kind;
+    setActiveSessionId(id);
+    setSessionKind(kind);
+  };
+
+  // Load session records by ID (supports cloud database and offline drafts)
+  const loadSessionById = useCallback(
+    async (targetSessionId: string) => {
+      if (isCloudUuid(targetSessionId)) {
+        try {
+          const detailRes = await fetch(`/api/sessions?id=${targetSessionId}`, {
+            credentials: 'same-origin',
+          });
+          if (detailRes.ok) {
+            const detailData = await detailRes.json();
+            const session = detailData.session;
+            if (session) {
+              updateSessionState(session.id, 'cloud');
+              setProblemStatement(session.problemStatement || '');
+
+              if (Array.isArray(session.messages) && session.messages.length > 0) {
+                const loadedChat: ChatMessage[] = session.messages.map(
+                  (m: { id: string; role: 'user' | 'assistant'; content: string; mode?: string; createdAt?: string; suggestedQuestions?: string[] }) => ({
+                    id: m.id,
+                    role: m.role,
+                    content: m.content,
+                    step: m.mode
+                      ? WorkflowStateMachine.deriveCurrentStage(m.mode as 'understand' | 'explore' | 'challenge' | 'decide' | 'act', 0)
+                      : 'describe_problem',
+                    timestamp: m.createdAt || new Date().toISOString(),
+                    options: m.suggestedQuestions?.map((q: string, i: number) => ({ id: `opt_${i}`, label: q })),
+                  })
+                );
+                setCustomMessages(loadedChat);
+              }
+
+              const resumedStage =
+                session.currentStage ||
+                WorkflowStateMachine.deriveCurrentStage(session.currentMode, session.messages?.length || 0);
+              setCurrentStep(resumedStage);
+              return true;
+            }
+          }
+        } catch (fetchErr) {
+          console.warn('Failed to load session details from server:', fetchErr);
+        }
+      }
+
+      // Check local drafts
+      const localMatch = localDraftSessions.find((s) => s.id === targetSessionId);
+      if (localMatch) {
+        updateSessionState(localMatch.id, 'local');
+        setProblemStatement(localMatch.problemStatement || '');
+        const localMessages = getStoredMessages(localMatch.id);
+        if (localMessages.length > 0) {
+          const loadedChat: ChatMessage[] = localMessages.map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            step: m.mode
+              ? WorkflowStateMachine.deriveCurrentStage(m.mode as 'understand' | 'explore' | 'challenge' | 'decide' | 'act', 0)
+              : 'describe_problem',
+            timestamp: m.createdAt,
+            options: m.suggestedQuestions?.map((q: string, i: number) => ({ id: `opt_${i}`, label: q })),
+          }));
+          setCustomMessages(loadedChat);
+        }
+        return true;
+      }
+      return false;
+    },
+    [localDraftSessions]
+  );
+
+  // Resume session from URL search query parameter ?session=UUID. Stop after the first
+  // successful load: loadSessionById changes whenever local drafts are saved.
+  const urlSessionResumedRef = useRef(false);
+  useEffect(() => {
+    if (typeof window === 'undefined' || urlSessionResumedRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const sessionParam = params.get('session');
+    if (sessionParam) {
+      const timer = setTimeout(async () => {
+        if (await loadSessionById(sessionParam)) {
+          urlSessionResumedRef.current = true;
+        }
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [loadSessionById]);
+
+  // Undo / Redo stacks
+  const [pastSnapshots, setPastSnapshots] = useState<HistorySnapshot[]>([]);
+  const [futureSnapshots, setFutureSnapshots] = useState<HistorySnapshot[]>([]);
+
+  const takeSnapshot = (): HistorySnapshot => ({
+    step: currentStep,
+    progressPercent,
+    messages,
+    options: currentOptions,
+    problemStatement,
+    clarifiedObjective,
+  });
+
+  const handleUndo = () => {
+    if (pastSnapshots.length === 0) return;
+    const previous = pastSnapshots[pastSnapshots.length - 1];
+    const newPast = pastSnapshots.slice(0, pastSnapshots.length - 1);
+    const current = takeSnapshot();
+
+    setFutureSnapshots((prev) => [current, ...prev]);
+    setPastSnapshots(newPast);
+
+    setCurrentStep(previous.step);
+    setProgressPercent(previous.progressPercent);
+    setCustomMessages(previous.messages);
+    setCustomOptions(previous.options);
+    setProblemStatement(previous.problemStatement);
+    setClarifiedObjective(previous.clarifiedObjective);
+  };
+
+  const handleRedo = () => {
+    if (futureSnapshots.length === 0) return;
+    const next = futureSnapshots[0];
+    const newFuture = futureSnapshots.slice(1);
+    const current = takeSnapshot();
+
+    setPastSnapshots((prev) => [...prev, current]);
+    setFutureSnapshots(newFuture);
+
+    setCurrentStep(next.step);
+    setProgressPercent(next.progressPercent);
+    setCustomMessages(next.messages);
+    setCustomOptions(next.options);
+    setProblemStatement(next.problemStatement);
+    setClarifiedObjective(next.clarifiedObjective);
+  };
+
+  // Performs an authenticated request, attempting one CSRF-protected token refresh on 401.
+  const fetchWithSessionRefresh = async (url: string, init: RequestInit): Promise<Response> => {
+    const res = await fetch(url, init);
+    if (res.status !== 401) return res;
+    try {
+      const refreshRes = await fetch('/api/auth/refresh', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+      if (refreshRes.ok) {
+        return await fetch(url, init);
+      }
+    } catch (refreshErr) {
+      console.warn('Silent session refresh attempt failed:', refreshErr);
+    }
+    return res;
+  };
+
+  const buildPersistenceFailureMessage = (kind: 'auth' | 'error', detail?: string): ChatMessage => ({
+    id: `msg-auth-${Date.now()}`,
+    role: 'assistant',
+    content:
+      kind === 'auth'
+        ? `**Your sign-in session has expired.** Your message has been kept and has not been sent.\n\nSign in again to continue this cloud session, or explicitly continue as a local draft that is stored only in this browser and will not sync to your account.`
+        : `**Could not save to your cloud session${detail ? `: ${detail}` : ''}.** Your message has been kept and has not been sent.\n\nRetry, or explicitly continue as a local draft that is stored only in this browser and will not sync to your account.`,
+    step: currentStep,
+    timestamp: new Date().toISOString(),
+    executionMode: 'error',
+    simulatedNotice: kind === 'auth' ? 'Authentication required' : detail,
+    options:
+      kind === 'auth'
+        ? [
+            { id: 'reauth_signin', label: 'Sign in again' },
+            { id: 'switch_local_draft', label: 'Continue as local draft (not synced)' },
+          ]
+        : [
+            { id: 'retry_pending', label: 'Retry' },
+            { id: 'switch_local_draft', label: 'Continue as local draft (not synced)' },
+          ],
+  });
+
+  const handleSendMessage = async (inputText: string, inputOptionId?: string) => {
+    let text = inputText;
+    let selectedOptionId = inputOptionId;
+    let baseMessages = messages;
+
+    if (selectedOptionId === 'reauth_signin') {
+      setIsAuthModalOpen(true);
+      return;
+    }
+
+    if (selectedOptionId === 'retry_pending' || selectedOptionId === 'switch_local_draft') {
+      const pending = pendingRetryRef.current;
+      if (!pending) return;
+      if (selectedOptionId === 'switch_local_draft') {
+        explicitLocalDraftRef.current = true;
+        updateSessionState(`draft-${Date.now()}`, 'local');
+        if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('session')) {
+          const url = new URL(window.location.href);
+          url.searchParams.delete('session');
+          window.history.replaceState(window.history.state, '', url.toString());
+        }
+      }
+      pendingRetryRef.current = null;
+      baseMessages = messages.filter((m) => m.id !== pending.userMsgId && !m.id.startsWith('msg-auth-'));
+      text = pending.text;
+      selectedOptionId = pending.selectedOptionId;
+    }
+
+    // Record current state into undo stack
+    setPastSnapshots((prev) => [...prev, takeSnapshot()]);
+    setFutureSnapshots([]); // Clear redo stack on new action
+
+    // If user clicked resume on an existing session, load authoritative records
+    if (selectedOptionId?.startsWith('resume_')) {
+      const targetSessionId = selectedOptionId.replace('resume_', '');
+      await loadSessionById(targetSessionId);
+    }
+
+    // Special kickoff handling: clicking "Start a new problem" transitions from welcome to describe_problem
+    if (currentStep === 'welcome' && selectedOptionId === 'start_new') {
+      const userKickoffMsg: ChatMessage = {
+        id: `msg-user-${Date.now()}`,
+        role: 'user',
+        content: text || 'Start a new problem',
+        step: 'welcome',
+        timestamp: new Date().toISOString(),
+        selectedOptionId,
+      };
+      const assistantIntroMsg: ChatMessage = {
+        id: `msg-ast-${Date.now()}`,
+        role: 'assistant',
+        content: "What is the core dilemma or problem you are trying to understand and solve? Describe the situation, tension, or challenge you're facing.",
+        step: 'describe_problem',
+        timestamp: new Date().toISOString(),
+        executionMode: isAuthenticated ? 'gemini' : 'simulator',
+      };
+      setCurrentStep('describe_problem');
+      setProgressPercent(20);
+      setProblemStatement('');
+      setClarifiedObjective('');
+      setCustomMessages([userKickoffMsg, assistantIntroMsg]);
+      return;
+    }
+
+    const userMsg: ChatMessage = {
+      id: `msg-user-${Date.now()}`,
+      role: 'user',
+      content: text,
+      step: currentStep,
+      timestamp: new Date().toISOString(),
+      selectedOptionId,
+    };
+
+    const nextHistory = [...baseMessages, userMsg];
+
+    const holdForRetry = (kind: 'auth' | 'error', detail?: string) => {
+      pendingRetryRef.current = { text, selectedOptionId, userMsgId: userMsg.id };
+      setIsLoading(false);
+      if (kind === 'auth') {
+        setIsAuthenticated(false);
+      }
+      setCustomOptions(undefined);
+      setCustomMessages([...nextHistory, buildPersistenceFailureMessage(kind, detail)]);
+    };
+
+    setCustomMessages(nextHistory);
+    setIsLoading(true);
+
+    // For authenticated users, create an authentic database session once problem description is provided
+    if (isAuthenticated && sessionKindRef.current !== 'cloud' && !explicitLocalDraftRef.current && (currentStep === 'describe_problem' || (!currentSessionIdRef.current && text.trim().length > 0))) {
+      try {
+        const activeProblem = text.trim();
+        const title =
+          activeProblem.length > 0
+            ? activeProblem.slice(0, 48) + (activeProblem.length > 48 ? '...' : '')
+            : 'New Thinking Session';
+
+        const createRes = await fetchWithSessionRefresh('/api/sessions', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            title,
+            problemStatement: activeProblem,
+            currentMode: 'understand',
+            currentStage: 'describe_problem',
+          }),
+        });
+
+        const createData = createRes.ok ? await createRes.json().catch(() => ({})) : null;
+        if (createData?.session?.id && isCloudUuid(createData.session.id)) {
+          updateSessionState(createData.session.id, 'cloud');
+          refreshCloudSessions();
+        } else {
+          console.warn('Cloud session creation returned status', createRes.status);
+          if (createRes.status === 401) {
+            holdForRetry('auth');
+          } else {
+            const errorData = createRes.ok ? {} : await createRes.json().catch(() => ({}));
+            holdForRetry('error', errorData.error || `server returned status ${createRes.status}`);
+          }
+          return;
+        }
+      } catch (err) {
+        console.warn('Failed to pre-create session in database:', err);
+        holdForRetry('error', 'network error');
+        return;
+      }
+    } else if (!isAuthenticated && !currentSessionIdRef.current) {
+      updateSessionState(`demo-${Date.now()}`, 'local');
+    }
+
+    if (currentStep === 'describe_problem') {
+      setProblemStatement(text);
+    }
+
+    try {
+      // Session kind, not transient auth state, decides the endpoint: a cloud session is never rerouted to the simulator.
+      const isCloud = sessionKindRef.current === 'cloud' && isCloudUuid(currentSessionIdRef.current);
+      const endpoint = isCloud ? '/api/cothink' : '/api/demo/cothink';
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+      const clientRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+      const selectedModel = (typeof window !== 'undefined' ? localStorage.getItem('thinkmate_model') : null) || DEFAULT_GEMINI_MODEL;
+
+      const requestPayload = JSON.stringify({
+          sessionId: currentSessionIdRef.current,
+          step: currentStep,
+          userMessage: text,
+          selectedOptionId,
+          problemStatement: currentStep === 'describe_problem' ? text : problemStatement,
+          clarifiedObjective,
+          clientRequestId,
+          model: selectedModel,
+        });
+
+        const requestInit: RequestInit = {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers,
+          body: requestPayload,
+        };
+        const res = isCloud
+          ? await fetchWithSessionRefresh(endpoint, requestInit)
+          : await fetch(endpoint, requestInit);
+
+        // Handle concurrency conflict: reload authoritative state from server
+        if (res.status === 409) {
+          const conflictData = await res.json().catch(() => ({}));
+          await loadSessionById(currentSessionIdRef.current);
+          const conflictNoticeMsg: ChatMessage = {
+            id: `msg-conflict-${Date.now()}`,
+            role: 'assistant',
+            content: `⚠️ **Concurrent Workflow Update**: ${conflictData.error || 'The session stage was updated by another request.'}\n\nYour session has been re-synchronized with the authoritative database state.`,
+            step: conflictData.currentStage || currentStep,
+            timestamp: new Date().toISOString(),
+            executionMode: 'simulator',
+          };
+          setCustomMessages((prev) => (prev ? [...prev, conflictNoticeMsg] : [conflictNoticeMsg]));
+          return;
+        }
+
+        // Still unauthorized after a refresh attempt: keep the cloud session ID and the user's message,
+        // and ask the user to reauthenticate or explicitly switch to a local draft.
+        if (res.status === 401 && isCloud) {
+          holdForRetry('auth');
+          return;
+        }
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || `Co-think API failed with status ${res.status}`);
+      }
+
+      const data = await res.json();
+
+      const assistantMsg: ChatMessage = {
+        id: `msg-ast-${Date.now()}`,
+        role: 'assistant',
+        content: data.message,
+        step: data.nextStep,
+        options: data.options,
+        timestamp: new Date().toISOString(),
+        executionMode: data.executionMode,
+        modelName: data.modelName,
+        simulatedNotice: data.simulatedNotice,
+      };
+
+      setCustomMessages([...nextHistory, assistantMsg]);
+      setCurrentStep(data.nextStep);
+      setCustomOptions(data.options);
+      setProgressPercent(data.progressPercent || 50);
+
+      if (data.nextStep === 'break_subproblems' && !clarifiedObjective) {
+        setClarifiedObjective(text);
+      }
+
+      // If session is NOT cloud-persisted (offline guest, or degraded/fallen-back draft),
+      // persist it into localStorage immediately so no conversation is ever lost
+      if (sessionKindRef.current !== 'cloud') {
+        const activeProblem = currentStep === 'describe_problem' ? text : problemStatement;
+        const title =
+          activeProblem.length > 0
+            ? activeProblem.slice(0, 48) + (activeProblem.length > 48 ? '...' : '')
+            : 'Local Draft Session';
+
+        const localId = currentSessionIdRef.current || `local-${Date.now()}`;
+        if (!currentSessionIdRef.current) {
+          updateSessionState(localId, 'local');
+        }
+
+        const existingSessions = getStoredSessions();
+        const sessionIndex = existingSessions.findIndex((s) => s.id === localId);
+        const updatedSession: ThinkingSession = {
+          id: localId,
+          userId: 'demo-local',
+          title,
+          problemStatement: activeProblem,
+          currentMode: WorkflowStateMachine.getModeForStage(data.nextStep),
+          status: 'active',
+          createdAt:
+            sessionIndex >= 0 ? existingSessions[sessionIndex].createdAt : new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+
+        if (sessionIndex >= 0) {
+          existingSessions[sessionIndex] = updatedSession;
+        } else {
+          existingSessions.unshift(updatedSession);
+        }
+        saveStoredSessions(existingSessions);
+
+        appendStoredMessage(localId, {
+          id: userMsg.id,
+          sessionId: localId,
+          role: 'user',
+          content: userMsg.content,
+          mode: WorkflowStateMachine.getModeForStage(currentStep),
+          createdAt: userMsg.timestamp,
+        });
+
+        appendStoredMessage(localId, {
+          id: assistantMsg.id,
+          sessionId: localId,
+          role: 'assistant',
+          content: assistantMsg.content,
+          mode: WorkflowStateMachine.getModeForStage(data.nextStep),
+          createdAt: assistantMsg.timestamp,
+        });
+      } else {
+        // Authenticated mode: refresh cloud sessions list to reflect updated timestamps
+        refreshCloudSessions();
+      }
+    } catch (err: unknown) {
+      console.error('Co-think communication error:', err);
+      const errMsg = (err as Error)?.message || 'Network or API error occurred.';
+      const fallbackMsg: ChatMessage = {
+        id: `msg-err-${Date.now()}`,
+        role: 'assistant',
+        content: `I encountered an issue processing this workflow stage: **${errMsg}**\n\nYour input ("${text}") has been retained. Please retry or check your connection.`,
+        step: currentStep,
+        timestamp: new Date().toISOString(),
+        executionMode: 'error',
+        simulatedNotice: errMsg,
+      };
+      setCustomMessages([...nextHistory, fallbackMsg]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleRestart = () => {
+    pendingRetryRef.current = null;
+    explicitLocalDraftRef.current = false;
+    updateSessionState('', null);
+    setCurrentStep('welcome');
+    setProgressPercent(10);
+    setProblemStatement('');
+    setClarifiedObjective('');
+    setCustomMessages(null);
+    setCustomOptions(undefined);
+    setPastSnapshots([]);
+    setFutureSnapshots([]);
+  };
+
+  const handleShare = () => {
+    if (typeof window === 'undefined' || !navigator.clipboard) return;
+    if (activeSessionId) {
+      const shareUrl = `${window.location.origin}/app?session=${encodeURIComponent(activeSessionId)}`;
+      navigator.clipboard.writeText(shareUrl);
+      alert(`ThinkMate session link copied to clipboard:\n${shareUrl}`);
+    } else {
+      navigator.clipboard.writeText(window.location.href);
+      alert('ThinkMate application link copied to clipboard!');
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      const res = await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+      const data = await res.json().catch(() => null);
+      if (data && !data.upstreamRevoked && data.upstreamError) {
+        console.warn('Local cookies cleared, but upstream session revocation could not be confirmed:', data.upstreamError);
+      }
+    } catch (err) {
+      console.warn('Sign out request failed:', err);
+    }
+    // Clear all local browser storage on sign-out to prevent data leaks across shared devices
+    clearAllLocalData(true);
+    setIsAuthenticated(false);
+    setUserEmail(undefined);
+    setCloudSessions([]);
+    handleRestart();
+  };
+
+  const handleRemix = () => {
+    if (!problemStatement.trim()) return;
+    const forkedProblem = `Fork: ${problemStatement}`;
+    updateSessionState('', null);
+    setCurrentStep('clarify_objective');
+    setProgressPercent(30);
+    setProblemStatement(forkedProblem);
+    setClarifiedObjective('');
+    const kickoffUser: ChatMessage = {
+      id: `msg-user-${Date.now()}`,
+      role: 'user',
+      content: forkedProblem,
+      step: 'describe_problem',
+      timestamp: new Date().toISOString(),
+    };
+    const kickoffAssistant: ChatMessage = {
+      id: `msg-ast-${Date.now()}`,
+      role: 'assistant',
+      content: `Created a new reasoning branch for this problem:\n\n**${forkedProblem}**\n\nLet's clarify your primary goal, target metrics, or key constraints.`,
+      step: 'clarify_objective',
+      timestamp: new Date().toISOString(),
+      executionMode: isAuthenticated ? 'gemini' : 'simulator',
+    };
+    setCustomMessages([kickoffUser, kickoffAssistant]);
+  };
+
+  return (
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-50 text-slate-900 font-sans antialiased selection:bg-purple-100 selection:text-purple-900">
+      {/* Top Header */}
+      <TopNav
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        onOpenSettings={() => setIsSettingsOpen(true)}
+        onShare={handleShare}
+        userName={userEmail ? userEmail.split('@')[0] : (isAuthenticated ? 'Cloud User' : 'Guest Thinker')}
+        userEmail={userEmail}
+        isAuthenticated={isAuthenticated}
+        onOpenAuth={() => setIsAuthModalOpen(true)}
+        onSignOut={handleSignOut}
+        onBack={handleRestart}
+        onRemix={problemStatement ? handleRemix : undefined}
+      />
+
+      {/* Main Dual-Pane Workspace */}
+      <main className="flex-1 flex overflow-hidden bg-slate-50">
+        {/* Left Pane: Flowchart Canvas */}
+        <section
+          className={
+            viewMode === 'editor'
+              ? 'flex-1 lg:flex-[1.05] border-r border-slate-200/90 flex flex-col h-full bg-slate-50/50 transition-all'
+              : 'hidden lg:flex lg:flex-[1.05] border-r border-slate-200/90 flex-col h-full bg-slate-50/50'
+          }
+        >
+          <WorkflowCanvas
+            currentStep={currentStep}
+            isLoading={isLoading}
+            canUndo={pastSnapshots.length > 0}
+            canRedo={futureSnapshots.length > 0}
+            onUndo={handleUndo}
+            onRedo={handleRedo}
+          />
+        </section>
+
+        {/* Right Pane: Interactive Chat Preview Panel */}
+        <section
+          className={
+            viewMode === 'app'
+              ? 'flex-1 flex flex-col h-full bg-white transition-all overflow-hidden'
+              : 'hidden lg:flex flex-1 lg:flex-[1.15] flex-col h-full bg-white overflow-hidden'
+          }
+        >
+          <PreviewPanel
+            currentStep={currentStep}
+            progressPercent={progressPercent}
+            messages={messages}
+            currentOptions={currentOptions}
+            isLoading={isLoading}
+            onSendMessage={handleSendMessage}
+            onRestart={handleRestart}
+            userName={isAuthenticated && sessionKind === 'cloud' ? 'Cloud Thinker' : 'Guest Thinker'}
+            activeSessionId={activeSessionId}
+          />
+        </section>
+      </main>
+
+      {/* Settings Modal */}
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        onClearAllData={async (options) => {
+          if (options?.wipeCloud) {
+            clearAllLocalData(true);
+            setIsAuthenticated(false);
+            setCloudSessions([]);
+          } else {
+            clearAllLocalData(false);
+          }
+          handleRestart();
+        }}
+      />
+
+      {/* Authentication Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onAuthSuccess={(user) => {
+          setIsAuthenticated(true);
+          setUserEmail(user.email);
+          refreshCloudSessions();
+          if (pendingRetryRef.current) {
+            const resumeNotice: ChatMessage = {
+              id: `msg-auth-${Date.now()}`,
+              role: 'assistant',
+              content: 'You are signed in again. Your held message has not been sent yet — resend it to continue this session.',
+              step: currentStep,
+              timestamp: new Date().toISOString(),
+              options: [
+                { id: 'retry_pending', label: 'Resend my message' },
+                { id: 'switch_local_draft', label: 'Continue as local draft (not synced)' },
+              ],
+            };
+            setCustomOptions(undefined);
+            setCustomMessages((prev) => [...(prev || []).filter((m) => !m.id.startsWith('msg-auth-')), resumeNotice]);
+          }
+        }}
+      />
+    </div>
+  );
+}

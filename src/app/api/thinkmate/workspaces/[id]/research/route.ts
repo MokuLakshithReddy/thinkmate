@@ -5,6 +5,8 @@ import { authed, unauthorized } from '@/lib/thinkmate/auth';
 import { logEvent } from '@/lib/thinkmate/state';
 import { research } from '@/lib/thinkmate/research';
 
+export const maxDuration = 60;
+
 const Body = z.object({ question: z.string().trim().min(5).max(300) });
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -27,14 +29,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   if (!ws) return NextResponse.json({ error: 'not_found' }, { status: 404 });
 
-  const { count } = await a.sb
-    .from('tm_events')
-    .select('id', { count: 'exact', head: true })
-    .eq('workspace_id', id)
-    .eq('event_type', 'research');
-
-  if ((count ?? 0) >= 10) {
-    return NextResponse.json({ error: 'research_cap' }, { status: 429 });
+  const { data: usage } = await a.sb.rpc('tm_my_usage');
+  if (usage && (usage?.research_used ?? 0) >= (usage?.research_limit ?? 3)) {
+    return NextResponse.json({ error: 'plan_limit', upgrade: true }, { status: 429 });
   }
 
   const r = await research(b.data.question, ws.problem_frame ?? 'not framed yet').catch(() => null);

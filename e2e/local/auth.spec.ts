@@ -16,7 +16,12 @@ test.describe('signup, email confirmation, login and logout (Supabase mocked)', 
     await expect(authForm(page).getByPlaceholder('••••••••')).toHaveValue('');
 
     const [signup] = api.callsTo('/api/auth/signup');
-    expect(signup.body).toEqual({ email: 'new-user@example.com', password: 'correct-horse-battery' });
+    expect(signup.body).toEqual({
+      email: 'new-user@example.com',
+      password: 'correct-horse-battery',
+      accepted_terms: true,
+      age_confirmed: true,
+    });
     expect(signup.headers['content-type']).toBe('application/json');
     expect(new URL(signup.headers['origin']).origin).toBe(new URL(page.url()).origin);
 

@@ -16,6 +16,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'),
   title: 'ThinkMate — Personal AI Thinking Partner',
   description:
     'Collaborative problem-understanding partner that helps you clarify goals, decompose problems, explore alternatives, challenge assumptions, and turn decisions into action plans.',

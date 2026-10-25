@@ -6,9 +6,17 @@ import { readBoundedJson } from '@/lib/request-utils';
 import { checkRateLimitAsync, getClientIp, createRateLimitErrorResponse } from '@/lib/rate-limiter';
 import { checkAuthEntryCsrfOrForbidden } from '@/lib/csrf';
 
+import { recordConsent } from '@/lib/legal';
+
 const SignUpSchema = z.object({
   email: z.string().email('Please provide a valid email address').max(100),
-  password: z.string().min(6, 'Password must be at least 6 characters').max(100),
+  password: z.string().min(8, 'Password must be at least 8 characters').max(100),
+  accepted_terms: z.literal(true, {
+    message: 'You must accept the Terms and Privacy Policy.',
+  }),
+  age_confirmed: z.literal(true, {
+    message: 'You must confirm you are 18 or older or have parental consent.',
+  }),
 });
 
 export async function POST(req: NextRequest) {
@@ -60,6 +68,10 @@ export async function POST(req: NextRequest) {
         { error: error.message || 'Signup failed' },
         { status: 400 }
       );
+    }
+
+    if (data.user?.id) {
+      await recordConsent(data.user.id);
     }
 
     const session = data?.session;

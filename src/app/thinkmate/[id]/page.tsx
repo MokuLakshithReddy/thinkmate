@@ -17,7 +17,7 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
   } = await sb.auth.getUser();
 
   if (!user) {
-    redirect('/login');
+    redirect(`/login?next=${encodeURIComponent(`/thinkmate/${id}`)}`);
   }
 
   const state = await loadState(sb, id);

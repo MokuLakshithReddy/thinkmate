@@ -104,7 +104,14 @@ function credentialRequest(
       'x-forwarded-for': ip,
       ...overrides.headers,
     },
-    body: overrides.body ?? JSON.stringify({ email: 'user@thinkmate.ai', password: 'correct-horse-battery' }),
+    body:
+      overrides.body ??
+      JSON.stringify({
+        email: 'user@thinkmate.ai',
+        password: 'correct-horse-battery',
+        accepted_terms: true,
+        age_confirmed: true,
+      }),
   });
 }
 
@@ -186,11 +193,19 @@ describe('Auth hardening: distributed rate limits, refresh recovery, credential 
 
       // Attempts from this instance are recorded in shared Redis for every other instance to see.
       for (let i = 0; i < 10; i++) {
-        const res = await loginPost(credentialRequest('/api/auth/login', '203.0.113.11'));
+        const res = await loginPost(
+          credentialRequest('/api/auth/login', '203.0.113.11', {
+            body: JSON.stringify({ email: `user${i}@thinkmate.ai`, password: 'correct-horse-battery' }),
+          })
+        );
         assert.strictEqual(res.status, 401, `Attempt ${i + 1} should reach credential verification`);
       }
       assert.strictEqual(redis.zsets.get('auth:login:203.0.113.11')?.length, 10);
-      const eleventh = await loginPost(credentialRequest('/api/auth/login', '203.0.113.11'));
+      const eleventh = await loginPost(
+        credentialRequest('/api/auth/login', '203.0.113.11', {
+          body: JSON.stringify({ email: 'user11@thinkmate.ai', password: 'correct-horse-battery' }),
+        })
+      );
       assert.strictEqual(eleventh.status, 429);
       assert.ok(redis.evalKeys.includes('auth:signup:203.0.113.10'));
     });
