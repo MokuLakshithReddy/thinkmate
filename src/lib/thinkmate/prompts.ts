@@ -22,7 +22,7 @@ const MODE_RULES = {
   ideas: 'When asked, or once the problem frame is confirmed, give 3 distinct candidate ideas, one sentence each plus its key assumption. Then ask the user to critique one.',
 } as const;
 
-const fmt = (a: string[]) => (a.length ? a.join(' | ') : 'none');
+const fmt = (a: string[]) => JSON.stringify(a.slice(0, 40).map((s) => s.slice(0, 300)));
 
 export function buildSystemPrompt(c: Ctx): string {
   return `You are ThinkMate, a thinking partner for students working on hackathon and innovation problems. Help the user understand the problem and defend their own decisions. Do not hand them answers by default.

@@ -320,6 +320,16 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
       },
     },
     async ({ workspace_id, message, client_msg_id }) => {
+      // Daily turn limit across the user's workspaces
+      try {
+        const { data: used, error: rpcErr } = await sb.rpc('tm_turns_last_day');
+        if (!rpcErr && (used ?? 0) >= Number(process.env.TM_DAILY_TURNS ?? 300)) {
+          return fail('Daily turn limit reached.');
+        }
+      } catch {
+        // Fallback for offline/mock environments if RPC unavailable
+      }
+
       let state;
       try {
         state = await loadState(sb, workspace_id);
@@ -394,6 +404,10 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
 
       let applied: TurnAppliedState | null = null;
       try {
+        output = {
+          ...output,
+          proposed_items: output.proposed_items.map((p) => ({ ...p, origin: 'ai' as const })),
+        };
         applied = await applyModelOutput(
           sb,
           workspace_id,
@@ -435,6 +449,7 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
 }
 
 const app = express();
+app.set('trust proxy', 1);
 
 app.use(express.json({ limit: '100kb' }));
 app.use('/mcp', rateLimit({ windowMs: 60_000, limit: 60 }));

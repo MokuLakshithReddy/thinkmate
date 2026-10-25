@@ -20,7 +20,7 @@ Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforce
    - Validates state transitions via server-side Zod schemas (`/api/workflow/transition`).
 
 3. **Official Google GenAI Integration**:
-   - Powered by `@google/genai` using Gemini 2.5 Flash / Flash Lite.
+   - Powered by `@google/genai` using Gemini 3.5 Flash Lite (default: `gemini-3.5-flash-lite`, with support for `gemini-3.8-flash` and `gemini-2.5-pro`).
    - Server-side streaming via Server-Sent Events (SSE) with structured metadata event protocol (`/api/think/stream`) for headless or programmatic consumers, while `/api/cothink` serves step-by-step UI workflow sessions.
    - Grounded reasoning: No fabricated citations, statistics, or imaginary benchmarks.
    - Resilient offline simulator fallback for automated tests and offline development.
@@ -45,9 +45,9 @@ Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforce
 ## 🛠️ Tech Stack
 
 - **Framework**: Next.js 16 (App Router with Turbopack)
-- **Language**: TypeScript (Strict type checking, zero `any` policy)
+- **Language**: TypeScript (Strict type checking across core application and domain modules)
 - **Styling**: Tailwind CSS v4 with dark workspace aesthetic (deep navy `#090D16`, subtle cyan accents, slate borders)
-- **AI SDK**: `@google/genai` (Official Google GenAI SDK, Gemini 2.5 Flash / Flash Lite)
+- **AI SDK**: `@google/genai` (Official Google GenAI SDK, defaulting to Gemini 3.5 Flash Lite)
 - **Database & Auth**: Supabase PostgreSQL with Row Level Security (RLS) & GoTrue Auth
 - **Rate Limiting**: Distributed sliding-window limiter via Upstash Redis with bounded in-memory fallback
 - **Validation**: Zod schema validation & strict JSON bounds (64KB payload limits)
@@ -189,7 +189,7 @@ npx tsx scripts/verify-mock-mcp-e2e.ts       # Deterministic mocked runner for o
 
 Production authentication **fails closed**: if Upstash Redis is missing or unreachable, `/api/auth/login`, `/api/auth/signup` and `/api/auth/refresh` return `503` rather than falling back to per-instance limits. Every variable below is documented in [`.env.example`](.env.example).
 
-1. **Supabase**: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`; migrations in `supabase/migrations/` applied. Do not set any `STAGING_SUPABASE_*` variable in production.
+1. **Supabase**: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`. *(Note on migration naming: numbered migrations `001`–`007` are tracked via `_tm_schema_migrations` and applied via `scripts/apply-migration-direct.ts`, while timestamped files exist for standard Supabase CLI migrations. Run `npm run verify:staging` to verify active database schema).* Do not set any `STAGING_SUPABASE_*` variable in production.
 2. **Gemini**: `GEMINI_API_KEY` (or `GOOGLE_API_KEY`).
 3. **Upstash Redis**: `UPSTASH_REDIS_REST_URL` (https) and `UPSTASH_REDIS_REST_TOKEN`. Shared by every instance for rate limits and refresh-token rotation recovery.
 4. **Token-rotation key**: `SESSION_ENCRYPTION_KEY`, a dedicated secret of at least 32 bytes (`openssl rand -base64 48`), identical on every instance.
@@ -269,6 +269,8 @@ npm run dev:mcp
   }
 }
 ```
+
+> **Note on Token Expiration**: Supabase user access tokens (JWTs) have a default lifetime of 1 hour (3600s). For prolonged MCP client usage, refresh the access token via Supabase Auth or acquire a dedicated service token for headless automation.
 
 ---
 

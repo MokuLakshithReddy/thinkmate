@@ -122,7 +122,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   } catch (e) {
     await logEvent(sb, id, 'persistence_error', { message: safeErr(e) }, { required: false });
     return NextResponse.json(
-      { error: 'persistence_failed', details: safeErr(e) },
+      { error: 'persistence_failed' },
       { status: 500 }
     );
   }
