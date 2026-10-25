@@ -403,6 +403,97 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
       assert.ok(result.content[0].text.includes('Specific Redis response.'));
       assert.strictEqual(result.content[0].text.includes('Latest Memcached response.'), false);
     });
+
+    it('handles concurrent duplicate requests safely, returning the original stored response to both', async () => {
+      const validWsId = 'a0000000-0000-0000-0000-000000000001';
+      const clientMsgId = 'c0000000-0000-0000-0000-000000000003';
+      const mockWs = { id: validWsId, title: 'Concurrency Test', stage: 'orient', problem_frame_confirmed: true };
+
+      let rpcCallCount = 0;
+      const seenMsgIds = new Set<string>();
+
+      const mockSb = {
+        rpc: async (fnName: string, params: any) => {
+          assert.strictEqual(fnName, 'tm_apply_turn_tx');
+          rpcCallCount++;
+          if (seenMsgIds.has(params.p_client_msg_id)) {
+            // Concurrent duplicate: return original stored assistant reply
+            return {
+              data: {
+                idempotent_replay: true,
+                assistant_reply: 'Canonical stored response from request 1.',
+                user_message_id: 'u1',
+                assistant_message_id: 'a1',
+              },
+              error: null,
+            };
+          }
+          seenMsgIds.add(params.p_client_msg_id);
+          return {
+            data: {
+              idempotent_replay: false,
+              assistant_reply: 'Canonical stored response from request 1.',
+              user_message_id: 'u1',
+              assistant_message_id: 'a1',
+            },
+            error: null,
+          };
+        },
+        from: (table: string) => ({
+          select: () => ({
+            eq: () => {
+              const res = Promise.resolve({ data: table === 'tm_workspaces' ? mockWs : [], error: null });
+              return Object.assign(res, {
+                maybeSingle: () => Promise.resolve({ data: mockWs, error: null }),
+                order: () => Promise.resolve({ data: [], error: null }),
+              });
+            },
+          }),
+        }),
+      } as any;
+
+      let turnCallCount = 0;
+      const mockRunner = async () => {
+        turnCallCount++;
+        return {
+          output: {
+            reply: `Divergent local generation #${turnCallCount}`,
+            guidance_mode: 'hint' as const,
+            proposed_problem_frame: null,
+            proposed_items: [],
+          },
+          tokens: 40,
+        };
+      };
+
+      const server = buildServer(mockSb, 'user-123', mockRunner as any);
+      const handler = (server as any)._registeredTools['execute_thinking_turn'].handler;
+
+      // Simulate 2 concurrent requests with identical client_msg_id
+      const [res1, res2] = await Promise.all([
+        handler({
+          workspace_id: validWsId,
+          message: 'How do we handle replication lag?',
+          client_msg_id: clientMsgId,
+        }),
+        handler({
+          workspace_id: validWsId,
+          message: 'How do we handle replication lag?',
+          client_msg_id: clientMsgId,
+        }),
+      ]);
+
+      assert.strictEqual(res1.isError, undefined);
+      assert.strictEqual(res2.isError, undefined);
+      assert.strictEqual(rpcCallCount, 2);
+
+      // Both requests must return the canonical response from request 1
+      assert.ok(res1.content[0].text.includes('Canonical stored response from request 1.'));
+      assert.ok(res2.content[0].text.includes('Canonical stored response from request 1.'));
+
+      // The second concurrent request is identified as an idempotent replay
+      assert.ok(res2.content[0].text.includes('[IDEMPOTENT REPLAY]'));
+    });
   });
 
   describe('MCP Startup Configuration Validation', () => {
