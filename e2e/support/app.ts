@@ -44,6 +44,11 @@ export async function fillAuthForm(
   const form = authForm(page);
   await form.getByPlaceholder('you@domain.com').fill(email);
   await form.getByPlaceholder('••••••••').fill(password);
+  const checkboxes = form.locator('input[type="checkbox"]');
+  const count = await checkboxes.count();
+  for (let i = 0; i < count; i++) {
+    await checkboxes.nth(i).check();
+  }
   const responsePromise = page.waitForResponse((r) => new URL(r.url()).pathname === path, { timeout: 15_000 });
   await form.locator('button[type="submit"]').click();
   const response = await responsePromise;
