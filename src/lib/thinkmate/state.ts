@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { ModelOutput } from './schemas';
 import { chooseAction, type Signals } from './policy';
 import type { Stage } from './stages';
+import { safeErr } from './log';
 
 export interface WorkspaceRow {
   id: string;
@@ -419,27 +420,53 @@ export async function applyModelOutput(
       tokens: tokens ?? 0,
     });
   } catch (stepErr) {
-    // Complete compensation across every affected table touched during fallback
+    // Complete compensation across every affected table touched during fallback.
+    // Note: This compensation is best-effort for non-production environments.
+    // Production strictly enforces the transactional RPC tm_apply_turn_tx above.
+    const compensationErrors: string[] = [];
+
     for (const itemId of insertedItemIds) {
       try {
-        await sb.from('tm_items').delete().eq('id', itemId);
-      } catch {}
+        const { error } = await sb.from('tm_items').delete().eq('id', itemId);
+        if (error) compensationErrors.push(`Failed to delete item ${itemId}: ${error.message}`);
+      } catch (e: unknown) {
+        compensationErrors.push(`Failed to delete item ${itemId}: ${safeErr(e)}`);
+      }
     }
     if (frameUpdated) {
       try {
-        await sb.from('tm_workspaces').update({ proposed_problem_frame: originalProposedFrame }).eq('id', id);
-      } catch {}
+        const { error } = await sb.from('tm_workspaces').update({ proposed_problem_frame: originalProposedFrame }).eq('id', id);
+        if (error) compensationErrors.push(`Failed to revert proposed_problem_frame: ${error.message}`);
+      } catch (e: unknown) {
+        compensationErrors.push(`Failed to revert proposed_problem_frame: ${safeErr(e)}`);
+      }
     }
     if (astMsgId) {
       try {
-        await sb.from('tm_messages').delete().eq('id', astMsgId);
-      } catch {}
+        const { error } = await sb.from('tm_messages').delete().eq('id', astMsgId);
+        if (error) compensationErrors.push(`Failed to delete assistant message ${astMsgId}: ${error.message}`);
+      } catch (e: unknown) {
+        compensationErrors.push(`Failed to delete assistant message ${astMsgId}: ${safeErr(e)}`);
+      }
     }
     if (userMsgId) {
       try {
-        await sb.from('tm_messages').delete().eq('id', userMsgId);
-      } catch {}
+        const { error } = await sb.from('tm_messages').delete().eq('id', userMsgId);
+        if (error) compensationErrors.push(`Failed to delete user message ${userMsgId}: ${error.message}`);
+      } catch (e: unknown) {
+        compensationErrors.push(`Failed to delete user message ${userMsgId}: ${safeErr(e)}`);
+      }
     }
+
+    if (compensationErrors.length > 0) {
+      console.error(
+        `[Fallback Compensation Alert]: Non-transactional cleanup failed: ${compensationErrors.join('; ')}`
+      );
+      throw new Error(
+        `Fallback persistence failed with partial compensation failure: ${safeErr(stepErr)}. Cleanup errors: ${compensationErrors.join('; ')}`
+      );
+    }
+
     throw stepErr;
   }
 

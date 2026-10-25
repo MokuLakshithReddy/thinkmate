@@ -12,6 +12,7 @@ import { z } from 'zod';
  * - gemini-2.5-pro: Deep multi-hop synthesis and complex architectural reasoning.
  */
 export const SUPPORTED_GEMINI_MODELS = [
+  'gemini-3.5-flash',
   'gemini-3.8-flash',
   'gemini-2.5-flash',
   'gemini-2.5-pro',
@@ -19,7 +20,7 @@ export const SUPPORTED_GEMINI_MODELS = [
 
 export type SupportedGeminiModel = (typeof SUPPORTED_GEMINI_MODELS)[number];
 
-export const DEFAULT_GEMINI_MODEL: SupportedGeminiModel = 'gemini-3.8-flash';
+export const DEFAULT_GEMINI_MODEL: SupportedGeminiModel = 'gemini-3.5-flash';
 
 export const SupportedModelSchema = z
   .enum(SUPPORTED_GEMINI_MODELS)
@@ -34,12 +35,18 @@ export interface ModelMetadata {
 }
 
 export const GEMINI_MODEL_METADATA: Record<SupportedGeminiModel, ModelMetadata> = {
-  'gemini-3.8-flash': {
-    id: 'gemini-3.8-flash',
-    name: 'Gemini 3.8 Flash',
+  'gemini-3.5-flash': {
+    id: 'gemini-3.5-flash',
+    name: 'Gemini 3.5 Flash',
     tagline: 'Recommended: Fast & Deep Reasoning',
     description: 'Ultra-low latency with advanced multimodal reasoning. Ideal for real-time interactive co-thinking.',
     isDefault: true,
+  },
+  'gemini-3.8-flash': {
+    id: 'gemini-3.8-flash',
+    name: 'Gemini 3.8 Flash',
+    tagline: 'Fast & Deep Reasoning',
+    description: 'Ultra-low latency with advanced multimodal reasoning.',
   },
   'gemini-2.5-flash': {
     id: 'gemini-2.5-flash',

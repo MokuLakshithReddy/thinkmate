@@ -542,6 +542,72 @@ describe('Production Readiness & Operational Safeguards', () => {
         (process.env as any).NODE_ENV = origEnv;
       }
     });
+
+    it('surfaces compensation errors when non-transactional rollback cleanup fails', async () => {
+      const { applyModelOutput } = await import('../src/lib/thinkmate/state');
+      const wsId = 'a0000000-0000-0000-0000-000000000001';
+      const origEnv = process.env.NODE_ENV;
+
+      try {
+        (process.env as any).NODE_ENV = 'development';
+        const mockSb = {
+          rpc: async () => {
+            return { data: null, error: { message: 'function public.tm_apply_turn_tx does not exist', code: 'PGRST202' } };
+          },
+          from: (table: string) => {
+            if (table === 'tm_workspaces') {
+              return {
+                select: () => ({
+                  eq: () => ({
+                    maybeSingle: () => Promise.resolve({ data: { id: wsId, proposed_problem_frame: 'Original' }, error: null }),
+                  }),
+                }),
+                update: () => ({
+                  eq: () => Promise.resolve({ error: { message: 'permission denied during rollback' } }),
+                }),
+              };
+            }
+            if (table === 'tm_items') {
+              return {
+                select: () => ({ eq: () => Promise.resolve({ data: [], error: null }) }),
+                insert: () => ({ select: () => Promise.resolve({ data: [{ id: 'item-1' }], error: null }) }),
+                delete: () => ({ eq: () => Promise.resolve({ error: { message: 'foreign key constraint during cleanup' } }) }),
+              };
+            }
+            if (table === 'tm_messages') {
+              return {
+                insert: () => ({ select: () => Promise.resolve({ data: [{ id: 'm1' }, { id: 'm2' }], error: null }) }),
+                delete: () => ({ eq: () => Promise.resolve({ error: null }) }),
+              };
+            }
+            if (table === 'tm_events') {
+              return {
+                insert: () => Promise.resolve({ error: { message: 'simulated event error' } }),
+              };
+            }
+            return {
+              select: () => ({ eq: () => Promise.resolve({ data: [], error: null }) }),
+            };
+          },
+        } as any;
+
+        const out = {
+          reply: 'Scaling answer',
+          guidance_mode: 'hint' as const,
+          proposed_problem_frame: 'New Frame',
+          proposed_items: [{ kind: 'idea' as const, text: 'Test item', origin: 'ai' as const }],
+        };
+
+        await assert.rejects(
+          async () => {
+            await applyModelOutput(mockSb, wsId, 'Prompt text', out, 100, 'ideate');
+          },
+          /Fallback persistence failed with partial compensation failure/
+        );
+      } finally {
+        (process.env as any).NODE_ENV = origEnv;
+      }
+    });
   });
 });
 

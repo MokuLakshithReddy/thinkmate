@@ -1,4 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
+import { DEFAULT_GEMINI_MODEL } from '../../config/models';
 
 const getAi = () => new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
@@ -15,7 +16,7 @@ export interface ResearchResult {
 export async function research(question: string, context: string): Promise<ResearchResult> {
   const ai = getAi();
   const res = await ai.models.generateContent({
-    model: process.env.GEMINI_MODEL ?? 'gemini-2.5-flash',
+    model: process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL,
     contents: [
       {
         role: 'user',

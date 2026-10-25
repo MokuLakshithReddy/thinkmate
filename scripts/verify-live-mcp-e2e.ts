@@ -66,36 +66,34 @@ async function testLiveMcpEndToEnd() {
     wsId = wsData.id;
     console.log(`✓ Test workspace created: ${wsId}`);
 
-    // 4. Start MCP Server locally on port 3338 with live or fallback runner
-    console.log('[Step 4] Starting ThinkMate MCP server on port 3338...');
-    const runner = async (system: any, history: any) => {
-      try {
-        const { runTurn } = await import('../src/lib/thinkmate/llm');
-        return await runTurn(system, history);
-      } catch (err) {
-        console.warn(`[E2E Runner Notice]: Gemini API returned transient issue (${(err as any)?.message || err}), using verified realistic synthesis output.`);
-        return {
-          output: {
-            reply: 'To minimize latency across regional database clusters, adopt regional sharding based on user locality (e.g. EU/US/APAC) combined with asynchronous cross-region replication for read replicas.',
-            guidance_mode: 'hint' as const,
-            proposed_problem_frame: 'Multi-region latency and cross-cluster fault tolerance architecture',
-            proposed_items: [
-              { kind: 'idea' as const, text: 'Partition user rows by primary home region using hashed tenancy key', origin: 'ai' as const },
-              { kind: 'claim' as const, text: 'Local reads reduce round-trip latency to under 15ms', origin: 'ai' as const },
-              { kind: 'hypothesis' as const, text: 'Asynchronous cross-region replication avoids blocking write transactions', origin: 'ai' as const },
-            ],
-          },
-          tokens: 185,
-        };
-      }
+    // 4. Start MCP Server locally on port 3338 with live AI runner
+    const geminiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)?.trim();
+    if (!geminiKey) {
+      throw new Error('GEMINI_API_KEY is required for live AI verification. To run with deterministic mocks, use scripts/verify-mock-mcp-e2e.ts');
+    }
+
+    const { runTurn } = await import('../src/lib/thinkmate/llm');
+    const { DEFAULT_GEMINI_MODEL } = await import('../src/config/models');
+    const activeModel = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+
+    console.log(`[Step 4] Starting ThinkMate MCP server on port 3338...`);
+    console.log(`  AI Execution Mode: [LIVE GEMINI AI GENERATION]`);
+    console.log(`  Target Model: ${activeModel}`);
+
+    let capturedModelOutput: any = null;
+    const liveRunner = async (system: any, history: any) => {
+      // Direct live AI execution — fails test if Gemini fails
+      const res = await runTurn(system, history);
+      capturedModelOutput = res.output;
+      return res;
     };
 
-    server = startMcpServer(3338, runner as any);
+    server = startMcpServer(3338, liveRunner as any);
     await new Promise((resolve) => setTimeout(resolve, 500));
-    console.log('✓ MCP server is listening on port 3338.');
+    console.log('✓ MCP server is listening on port 3338 with live AI runner.');
 
     // 5. Connect as a real external MCP client over HTTP
-    console.log('[Step 5] External MCP client executing execute_thinking_turn via HTTP POST /mcp...');
+    console.log('\n[Step 5] External MCP client executing execute_thinking_turn via HTTP POST /mcp...');
     const clientMsgId = crypto.randomUUID();
     const question = 'How should we partition user data across regional database clusters to minimize latency and ensure fault tolerance?';
 
@@ -150,8 +148,17 @@ async function testLiveMcpEndToEnd() {
       throw new Error(`MCP tool execution failed or produced empty text: ${JSON.stringify(mcpJson.result)}`);
     }
 
-    console.log('✓ External MCP request succeeded with live AI generation.');
-    console.log(`✓ Content preview: ${contentText.slice(0, 180)}...`);
+    if (!capturedModelOutput) {
+      throw new Error('Live Gemini model was not called during execute_thinking_turn execution!');
+    }
+
+    // Verify MCP response strictly contains the live model reply
+    if (!contentText.includes(capturedModelOutput.reply)) {
+      throw new Error('MCP response content does not match the live model reply returned by Gemini!');
+    }
+
+    console.log('✓ External MCP request succeeded with genuine live AI generation.');
+    console.log(`✓ Live model reply preview: ${capturedModelOutput.reply.slice(0, 150)}...`);
 
     // 6. Direct Staging Database Verification
     console.log('\n[Step 6] Verifying live database persistence on staging database...');
@@ -171,6 +178,13 @@ async function testLiveMcpEndToEnd() {
       throw new Error(`Expected at least 2 messages (user & assistant), found: ${messages.length}`);
     }
 
+    // Assert live model reply was persisted to tm_messages
+    const persistedAssistant = messages.find((m) => m.role === 'assistant');
+    if (!persistedAssistant || persistedAssistant.content !== capturedModelOutput.reply) {
+      throw new Error('Persisted assistant message in staging DB does not match live model output!');
+    }
+    console.log('✓ Live model output verified in tm_messages.');
+
     const { data: items, error: iErr } = await adminClient
       .from('tm_items')
       .select('kind, text, status, origin')
@@ -181,6 +195,12 @@ async function testLiveMcpEndToEnd() {
     for (const it of items) {
       console.log(`  - [${it.status}] ${it.kind}: ${it.text}`);
     }
+
+    // Assert proposed items in database match captured model proposed items
+    if (items.length !== capturedModelOutput.proposed_items.length) {
+      throw new Error(`Expected ${capturedModelOutput.proposed_items.length} proposed items in staging DB, found ${items.length}`);
+    }
+    console.log('✓ Proposed items verified against live model output.');
 
     const { data: events, error: eErr } = await adminClient
       .from('tm_events')
