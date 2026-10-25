@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { authed, unauthorized } from '@/lib/thinkmate/auth';
 import { TurnInput } from '@/lib/thinkmate/schemas';
+
+export const maxDuration = 60;
 import {
   loadState,
   ctxFrom,
@@ -33,12 +35,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     );
   }
 
-  // 2. Atomic daily quota check & reservation (user-level lock prevents boundary race conditions)
-  const dailyLimit = Number(process.env.TM_DAILY_TURNS ?? 300);
+  // 2. Atomic daily quota check & reservation (limit comes from user's active plan)
   try {
-    const { data: reserveData, error: reserveErr } = await sb.rpc('tm_reserve_turn_quota', {
+    const { data: reserveData, error: reserveErr } = await sb.rpc('tm_reserve_turn_quota_for_plan', {
       p_workspace_id: id,
-      p_daily_limit: dailyLimit,
     });
 
     if (reserveErr) {
@@ -55,6 +55,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         reserveErr.code === 'PGRST202';
 
       if (isMissingRpc) {
+        const dailyLimit = Number(process.env.TM_DAILY_TURNS ?? 300);
         const { data: used, error: quotaErr } = await sb.rpc('tm_turns_last_day');
         if (quotaErr) {
           console.error('[Turn Quota Fallback Error]:', quotaErr);

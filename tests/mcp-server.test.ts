@@ -366,7 +366,7 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
         const validWsId = 'a0000000-0000-0000-0000-000000000001';
         const mockSb = {
           rpc: async (fn: string) => {
-            if (fn === 'tm_reserve_turn_quota') {
+            if (fn === 'tm_reserve_turn_quota_for_plan' || fn === 'tm_reserve_turn_quota') {
               return { data: null, error: { message: 'RPC service unavailable' } };
             }
             if (fn === 'tm_turns_last_day') {
@@ -399,7 +399,7 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
       let fallbackCalls = 0;
       const mockSbMissing = {
         rpc: async (fn: string) => {
-          if (fn === 'tm_reserve_turn_quota') {
+          if (fn === 'tm_reserve_turn_quota_for_plan' || fn === 'tm_reserve_turn_quota') {
             return { data: null, error: { code: 'PGRST202', message: 'Could not find the function tm_reserve_turn_quota' } };
           }
           if (fn === 'tm_turns_last_day') {
@@ -420,7 +420,7 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
       // Other non-missing errors in non-production must NOT fall back
       const mockSbOtherErr = {
         rpc: async (fn: string) => {
-          if (fn === 'tm_reserve_turn_quota') {
+          if (fn === 'tm_reserve_turn_quota_for_plan' || fn === 'tm_reserve_turn_quota') {
             return { data: null, error: { message: 'deadlock detected' } };
           }
           if (fn === 'tm_turns_last_day') {
@@ -678,12 +678,13 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
       let currentCount = 299;
       const mockSb = {
         rpc: async (fnName: string, params: any) => {
-          if (fnName === 'tm_reserve_turn_quota') {
-            if (currentCount >= params.p_daily_limit) {
-              return { data: { allowed: false, used: currentCount, limit: params.p_daily_limit }, error: null };
+          if (fnName === 'tm_reserve_turn_quota_for_plan' || fnName === 'tm_reserve_turn_quota') {
+            const limit = params?.p_daily_limit ?? 300;
+            if (currentCount >= limit) {
+              return { data: { allowed: false, used: currentCount, limit }, error: null };
             }
             currentCount++;
-            return { data: { allowed: true, reservation_id: 'res-1', used: currentCount, limit: params.p_daily_limit }, error: null };
+            return { data: { allowed: true, reservation_id: 'res-1', used: currentCount, limit }, error: null };
           }
           if (fnName === 'tm_apply_turn_tx') {
             return {

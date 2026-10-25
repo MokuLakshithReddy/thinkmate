@@ -1,7 +1,7 @@
 import { expect, type Page } from '@playwright/test';
 
 /** Navigates and waits for the client's first /api/auth/session check, i.e. until React has hydrated. */
-export async function openApp(page: Page, path = '/') {
+export async function openApp(page: Page, path = '/app') {
   const sessionCheck = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/auth/session');
   await page.goto(path);
   await sessionCheck;

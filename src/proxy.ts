@@ -16,8 +16,11 @@ import { checkCsrfOrForbidden } from '@/lib/csrf';
  *    scripts execute while preventing duplicate/conflicting static policies.
  */
 export function proxy(request: NextRequest) {
-  // 1. API Route Handling: Enforce CSRF protection on mutations
+  // 1. API Route Handling: Enforce CSRF protection on mutations (exempting signature-authenticated webhooks)
   if (request.nextUrl.pathname.startsWith('/api')) {
+    if (request.nextUrl.pathname.startsWith('/api/billing/webhook')) {
+      return NextResponse.next();
+    }
     const csrfRejection = checkCsrfOrForbidden(request);
     if (csrfRejection) {
       return csrfRejection;

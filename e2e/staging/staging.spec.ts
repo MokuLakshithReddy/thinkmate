@@ -76,7 +76,7 @@ test.describe('real account', () => {
     expect(replyJson.message.trim().length, 'Assistant reply message must be non-empty').toBeGreaterThan(10);
     const assistantSnippet = replyJson.message.trim().slice(0, 30);
 
-    await openApp(page, `/?session=${sessionId}`);
+    await openApp(page, `/app?session=${sessionId}`);
     await expect(signOutButton(page)).toBeVisible();
     await expect(page.getByText(/E2E staging check/).first()).toBeVisible();
     await expect(page.getByText(assistantSnippet).first()).toBeVisible();

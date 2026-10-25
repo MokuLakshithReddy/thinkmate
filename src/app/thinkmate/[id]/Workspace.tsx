@@ -8,6 +8,9 @@ import type { State } from '@/lib/thinkmate/state';
 import { ThinkingPanel } from './ThinkingPanel';
 import { EvidencePanel } from './EvidencePanel';
 import { STAGES, suggestStage, type Stage, type Counts } from '@/lib/thinkmate/stages';
+import { apiFetch } from '@/lib/thinkmate/api-client';
+import { UsageMeter } from '../UsageMeter';
+import { InviteModal } from './InviteModal';
 
 const MODES = [
   ['guide', 'Guide me'],
@@ -27,7 +30,7 @@ export default function Workspace({
   const [st, setSt] = useState<State>(initial);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
+  const [err, setErr] = useState<React.ReactNode>('');
   const [now, setNow] = useState(0);
   const [activeTab, setActiveTab] = useState<'thinking' | 'evidence'>('thinking');
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -39,18 +42,19 @@ export default function Workspace({
   const [decisionRejectedIds, setDecisionRejectedIds] = useState<string[]>([]);
   const [decisionReconsiderIf, setDecisionReconsiderIf] = useState('');
   const [decisionSubmitting, setDecisionSubmitting] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
 
   const base = `/api/thinkmate/workspaces/${st.ws.id}`;
   const post = (path: string, body: object) =>
-    fetch(base + path, { method: 'POST', headers: J, body: JSON.stringify(body) });
+    apiFetch(base + path, { method: 'POST', headers: J, body: JSON.stringify(body) });
 
   // Refetch full state
   const refetch = async () => {
     try {
-      const res = await fetch(base);
+      const res = await apiFetch(base);
       if (res.ok) {
         const updated = await res.json();
         setSt(updated);
@@ -59,7 +63,7 @@ export default function Workspace({
   };
 
   useEffect(() => {
-    fetch(`${base}/events`, {
+    apiFetch(`${base}/events`, {
       method: 'POST',
       headers: J,
       body: JSON.stringify({ type: 'session_start' }),
@@ -112,13 +116,20 @@ export default function Workspace({
         pendingId.current = null; // Reset on success
       } else {
         const data = await res.json().catch(() => ({}));
-        setErr(
-          data.error === 'daily_cap'
-            ? 'Daily message limit reached (300 turns). Try again tomorrow.'
-            : data.error === 'turn_cap'
-            ? 'Session limit reached (160 turns). Please start a new workspace.'
-            : 'ThinkMate could not answer. Your text is kept, try again.'
-        );
+        if (data.error === 'daily_cap' || data.error === 'plan_limit') {
+          setErr(
+            <span>
+              Daily message limit reached.{' '}
+              <a href="/pricing" className="text-sky-400 underline font-medium hover:text-sky-300">
+                Upgrade for more turns
+              </a>
+            </span>
+          );
+        } else if (data.error === 'turn_cap') {
+          setErr('Session limit reached (160 turns). Please start a new workspace.');
+        } else {
+          setErr('ThinkMate could not answer. Your text is kept, try again.');
+        }
       }
     } catch {
       setErr('Connection error. Please retry sending your message.');
@@ -128,7 +139,7 @@ export default function Workspace({
   }
 
   async function item(id: string, action: string, text?: string) {
-    const res = await fetch(`/api/thinkmate/items/${id}`, {
+    const res = await apiFetch(`/api/thinkmate/items/${id}`, {
       method: 'PATCH',
       headers: J,
       body: JSON.stringify({ action, text }),
@@ -143,7 +154,7 @@ export default function Workspace({
   }
 
   async function frame(action: string, text?: string) {
-    const res = await fetch(`${base}/frame`, {
+    const res = await apiFetch(`${base}/frame`, {
       method: 'PATCH',
       headers: J,
       body: JSON.stringify({
@@ -167,7 +178,7 @@ export default function Workspace({
   }
 
   async function setStage(stage: Stage) {
-    const res = await fetch(`${base}/stage`, {
+    const res = await apiFetch(`${base}/stage`, {
       method: 'PATCH',
       headers: J,
       body: JSON.stringify({ stage }),
@@ -180,7 +191,7 @@ export default function Workspace({
 
   async function handleDelete() {
     if (!confirm('Are you sure you want to permanently delete this workspace?')) return;
-    const res = await fetch(base, { method: 'DELETE' });
+    const res = await apiFetch(base, { method: 'DELETE' });
     if (res.ok) {
       router.push('/thinkmate');
     } else {
@@ -198,7 +209,7 @@ export default function Workspace({
 
     setDecisionSubmitting(true);
     try {
-      const res = await fetch(`${base}/decisions`, {
+      const res = await apiFetch(`${base}/decisions`, {
         method: 'POST',
         headers: J,
         body: JSON.stringify({
@@ -245,8 +256,15 @@ export default function Workspace({
               </h2>
             </div>
 
-            <div className="flex items-center gap-2 text-xs">
+            <div className="flex items-center gap-4 text-xs">
+              <UsageMeter refreshKey={st.messages.length} />
               <span className="text-slate-400 font-mono">{mins}m</span>
+              <button
+                onClick={() => setInviteOpen(true)}
+                className="px-2.5 py-1 rounded-md bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 transition flex items-center gap-1"
+              >
+                + Invite
+              </button>
               <button
                 onClick={handleExport}
                 className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
@@ -607,6 +625,12 @@ export default function Workspace({
           </div>
         </div>
       )}
+
+      <InviteModal
+        workspaceId={st.ws.id}
+        isOpen={inviteOpen}
+        onClose={() => setInviteOpen(false)}
+      />
     </div>
   );
 }

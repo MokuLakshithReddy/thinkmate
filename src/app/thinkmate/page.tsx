@@ -16,7 +16,7 @@ export default async function ThinkMatePage() {
   } = await sb.auth.getUser();
 
   if (!user) {
-    redirect('/login');
+    redirect('/login?next=/thinkmate');
   }
 
   const { data: workspaces } = await sb
@@ -43,9 +43,17 @@ export default async function ThinkMatePage() {
             </div>
           </div>
           <div className="flex items-center gap-4 text-xs">
-            <span className="text-slate-400">{user.email}</span>
+            <Link href="/account" className="text-slate-400 hover:text-sky-400 transition underline underline-offset-2">
+              {user.email} (Account)
+            </Link>
             <Link
-              href="/"
+              href="/pricing"
+              className="px-3 py-1.5 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/30 transition"
+            >
+              Plans & Pricing
+            </Link>
+            <Link
+              href="/app"
               className="px-3 py-1.5 rounded-lg border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-white transition"
             >
               Classic Sessions

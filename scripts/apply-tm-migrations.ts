@@ -11,6 +11,11 @@ const REQUIRED_RLS_TABLES = [
   'tm_events',
   'tm_members',
   'tm_user_quotas',
+  'user_consents',
+  'plan_limits',
+  'billing_subscriptions',
+  'billing_events',
+  'tm_invites',
 ];
 
 const KNOWN_PRODUCTION_REFS = new Set([
@@ -114,6 +119,10 @@ export async function applyMigrations() {
     '007_atomic_turn_rpc.sql',
     '008_atomic_quota_reservation.sql',
     '009_user_level_quota_lock.sql',
+    '010_consents.sql',
+    '011_plans_usage.sql',
+    '012_lock_reserve.sql',
+    '013_invites.sql',
   ];
 
   // 3. Apply pending migrations sequentially
@@ -151,7 +160,8 @@ export async function applyMigrations() {
       from pg_class c
       join pg_namespace n on n.oid = c.relnamespace
       left join pg_policy p on p.polrelid = c.oid
-      where n.nspname = 'public' and c.relkind = 'r' and c.relname like 'tm_%'
+      where n.nspname = 'public' and c.relkind = 'r'
+        and (c.relname like 'tm_%' or c.relname in ('user_consents', 'plan_limits', 'billing_subscriptions', 'billing_events'))
       group by c.relname, c.relrowsecurity
       order by 1;
     `,
@@ -190,7 +200,7 @@ export async function applyMigrations() {
     throw new Error(`RLS Audit Gate rejected deployment: ${failures.length} security condition(s) failed.`);
   }
 
-  console.log('=== RLS Audit Gate PASSED: All 8 required tables have RLS enabled and active policies. ===');
+  console.log(`=== RLS Audit Gate PASSED: All ${REQUIRED_RLS_TABLES.length} required tables have RLS enabled and active policies. ===`);
   console.log('Database migrations completed successfully and safely.');
 }
 
