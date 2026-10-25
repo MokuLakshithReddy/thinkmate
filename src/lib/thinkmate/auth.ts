@@ -7,8 +7,7 @@ export async function createClient(): Promise<SupabaseClient> {
   const store = await cookies();
   const token =
     store.get('thinkmate_auth_token')?.value ||
-    store.get('sb-access-token')?.value ||
-    store.get('sb-ffjgbefnubyjzrlvpdkl-auth-token')?.value;
+    store.get('sb-access-token')?.value;
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co';
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-anon-key';

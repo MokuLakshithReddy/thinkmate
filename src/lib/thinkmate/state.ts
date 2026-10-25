@@ -112,7 +112,11 @@ export async function loadState(sb: SupabaseClient, id: string): Promise<State |
   if (!ws) return null;
 
   const [items, messages, links, decisions, frames, evidence] = await Promise.all([
-    sb.from('tm_items').select('*').eq('workspace_id', id).order('created_at'),
+    sb
+      .from('tm_items')
+      .select('id, workspace_id, kind, text, origin, status, verification, superseded_by, created_by, created_at, updated_at')
+      .eq('workspace_id', id)
+      .order('created_at'),
     sb.from('tm_messages').select('*').eq('workspace_id', id).order('seq'),
     sb.from('tm_item_evidence').select('*').eq('workspace_id', id),
     sb.from('tm_decisions').select('*').eq('workspace_id', id),
@@ -201,7 +205,10 @@ export function ctxFrom(s: State, allowedItemIds?: Set<string> | null) {
         if (allowedItemIds && status === 'confirmed' && !allowedItemIds.has(i.id)) return false;
         return true;
       })
-      .map((i: ItemRow) => i.text);
+      .map(
+        (i: ItemRow) =>
+          `${i.kind}${i.verification && i.verification !== 'unassessed' ? '/' + i.verification : ''}: ${i.text}`
+      );
 
   const evidence = s.evidence.map(
     (e: EvidenceRow) => `${e.title}: ${String(e.summary || '').slice(0, 200)}`

@@ -1,6 +1,7 @@
 import { notFound, redirect } from 'next/navigation';
 import { createClient } from '@/lib/thinkmate/auth';
 import { loadState } from '@/lib/thinkmate/state';
+import { flags } from '@/lib/thinkmate/flags';
 import Workspace from './Workspace';
 
 export const metadata = {
@@ -24,5 +25,10 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
     notFound();
   }
 
-  return <Workspace initial={state} />;
+  return (
+    <Workspace
+      initial={state}
+      features={{ stages: flags.stages, evidence: flags.evidence }}
+    />
+  );
 }

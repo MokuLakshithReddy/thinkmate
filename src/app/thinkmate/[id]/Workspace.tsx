@@ -17,14 +17,21 @@ const MODES = [
 
 const J = { 'Content-Type': 'application/json' };
 
-export default function Workspace({ initial }: { initial: State }) {
+export default function Workspace({
+  initial,
+  features = { stages: true, evidence: false },
+}: {
+  initial: State;
+  features?: { stages?: boolean; evidence?: boolean };
+}) {
   const [st, setSt] = useState<State>(initial);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [now, setNow] = useState(0);
   const [activeTab, setActiveTab] = useState<'thinking' | 'evidence'>('thinking');
-  const [lastMsgId, setLastMsgId] = useState<string>('');
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const pendingId = useRef<{ text: string; id: string } | null>(null);
 
   // Decision Modal State
   const [decisionIdeaId, setDecisionIdeaId] = useState<string | null>(null);
@@ -88,8 +95,10 @@ export default function Workspace({ initial }: { initial: State }) {
     if (!text || busy) return;
 
     // Retain client_msg_id on retry if text hasn't changed (Idempotency)
-    const clientMsgId = lastMsgId || crypto.randomUUID();
-    setLastMsgId(clientMsgId);
+    if (!pendingId.current || pendingId.current.text !== text) {
+      pendingId.current = { text, id: crypto.randomUUID() };
+    }
+    const clientMsgId = pendingId.current.id;
 
     setBusy(true);
     setErr('');
@@ -100,7 +109,7 @@ export default function Workspace({ initial }: { initial: State }) {
         const data = await res.json();
         setSt(data);
         setInput('');
-        setLastMsgId(''); // Reset for next unique turn
+        pendingId.current = null; // Reset on success
       } else {
         const data = await res.json().catch(() => ({}));
         setErr(
@@ -289,63 +298,73 @@ export default function Workspace({ initial }: { initial: State }) {
             {/* Mobile Tab Toggle */}
             <div className="flex lg:hidden rounded-lg bg-slate-800 p-0.5 text-xs">
               <button
-                onClick={() => setActiveTab('thinking')}
+                onClick={() => {
+                  setActiveTab('thinking');
+                  setSheetOpen(true);
+                }}
                 className={`px-3 py-1 rounded-md ${
                   activeTab === 'thinking' ? 'bg-sky-500 text-white' : 'text-slate-400'
                 }`}
               >
                 Thinking ({pendingCount})
               </button>
-              <button
-                onClick={() => setActiveTab('evidence')}
-                className={`px-3 py-1 rounded-md ${
-                  activeTab === 'evidence' ? 'bg-sky-500 text-white' : 'text-slate-400'
-                }`}
-              >
-                Evidence
-              </button>
+              {features.evidence && (
+                <button
+                  onClick={() => {
+                    setActiveTab('evidence');
+                    setSheetOpen(true);
+                  }}
+                  className={`px-3 py-1 rounded-md ${
+                    activeTab === 'evidence' ? 'bg-sky-500 text-white' : 'text-slate-400'
+                  }`}
+                >
+                  Evidence
+                </button>
+              )}
             </div>
           </div>
 
           {/* 8-Stage Workflow Bar */}
-          <div className="space-y-1.5 pt-1">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-slate-400 font-medium">Stage Progress</span>
-              {suggested !== st.ws.stage && (
-                <button
-                  onClick={() => setStage(suggested)}
-                  className="text-sky-400 hover:text-sky-300 font-semibold underline flex items-center gap-1"
-                >
-                  Suggest moving to: <span className="uppercase">{suggested}</span> →
-                </button>
-              )}
-            </div>
-            <div className="flex gap-1 overflow-x-auto pb-1 scrollbar-none">
-              {STAGES.map((s) => {
-                const isCurrent = st.ws.stage === s;
-                return (
+          {features.stages && (
+            <div className="space-y-1.5 pt-1">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-slate-400 font-medium">Stage Progress</span>
+                {suggested !== st.ws.stage && (
                   <button
-                    key={s}
-                    onClick={() => setStage(s)}
-                    className={`relative px-2.5 py-1 rounded-lg text-[11px] font-medium uppercase tracking-wider transition ${
-                      isCurrent
-                        ? 'text-sky-300 bg-sky-950/80 border border-sky-500/50'
-                        : 'text-slate-500 hover:text-slate-300 bg-slate-900/40 border border-slate-800/60'
-                    }`}
+                    onClick={() => setStage(suggested)}
+                    className="text-sky-400 hover:text-sky-300 font-semibold underline flex items-center gap-1"
                   >
-                    {isCurrent && (
-                      <motion.div
-                        layoutId="active-stage"
-                        className="absolute inset-0 rounded-lg bg-sky-500/20"
-                        transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-                      />
-                    )}
-                    <span className="relative z-10">{s}</span>
+                    Suggest moving to: <span className="uppercase">{suggested}</span> →
                   </button>
-                );
-              })}
+                )}
+              </div>
+              <div className="flex gap-1 overflow-x-auto pb-1 scrollbar-none">
+                {STAGES.map((s) => {
+                  const isCurrent = st.ws.stage === s;
+                  return (
+                    <button
+                      key={s}
+                      onClick={() => setStage(s)}
+                      className={`relative px-2.5 py-1 rounded-lg text-[11px] font-medium uppercase tracking-wider transition ${
+                        isCurrent
+                          ? 'text-sky-300 bg-sky-950/80 border border-sky-500/50'
+                          : 'text-slate-500 hover:text-slate-300 bg-slate-900/40 border border-slate-800/60'
+                      }`}
+                    >
+                      {isCurrent && (
+                        <motion.div
+                          layoutId="active-stage"
+                          className="absolute inset-0 rounded-lg bg-sky-500/20"
+                          transition={{ type: 'spring', stiffness: 300, damping: 25 }}
+                        />
+                      )}
+                      <span className="relative z-10">{s}</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          )}
         </header>
 
         {/* Message Stream */}
@@ -439,8 +458,18 @@ export default function Workspace({ initial }: { initial: State }) {
         </footer>
       </main>
 
-      {/* Right Column: Desktop Tabs & Panels */}
-      <aside className="hidden lg:flex flex-col h-screen overflow-hidden">
+      {/* Right Column: Desktop Tabs & Panels / Mobile Sheet */}
+      <aside
+        className={`${
+          sheetOpen ? 'fixed inset-0 z-40 flex bg-slate-950' : 'hidden'
+        } lg:static lg:z-auto lg:flex flex-col h-screen overflow-hidden`}
+      >
+        <button
+          className="lg:hidden self-end m-3 text-xs text-slate-300 underline"
+          onClick={() => setSheetOpen(false)}
+        >
+          Close
+        </button>
         <div className="flex border-b border-slate-800 bg-slate-900/60 px-4 pt-3 gap-2">
           <button
             onClick={() => setActiveTab('thinking')}
@@ -452,27 +481,29 @@ export default function Workspace({ initial }: { initial: State }) {
           >
             Thinking Cards ({pendingCount})
           </button>
-          <button
-            onClick={() => setActiveTab('evidence')}
-            className={`px-4 py-2 text-xs font-bold uppercase tracking-wider rounded-t-lg transition border-t border-x ${
-              activeTab === 'evidence'
-                ? 'bg-slate-950 text-sky-400 border-slate-800'
-                : 'text-slate-400 hover:text-slate-200 border-transparent'
-            }`}
-          >
-            Evidence & Research
-          </button>
+          {features.evidence && (
+            <button
+              onClick={() => setActiveTab('evidence')}
+              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider rounded-t-lg transition border-t border-x ${
+                activeTab === 'evidence'
+                  ? 'bg-slate-950 text-sky-400 border-slate-800'
+                  : 'text-slate-400 hover:text-slate-200 border-transparent'
+              }`}
+            >
+              Evidence & Research
+            </button>
+          )}
         </div>
 
         <div className="flex-1 overflow-hidden">
-          {activeTab === 'thinking' ? (
+          {activeTab === 'thinking' || !features.evidence ? (
             <ThinkingPanel
               st={st}
               onItem={item}
               onFrame={frame}
-              onDecide={(ideaId) => setDecisionIdeaId(ideaId)}
+              onDecide={features.stages ? (ideaId) => setDecisionIdeaId(ideaId) : undefined}
               onCheckExisting={() => {
-                setActiveTab('evidence');
+                if (features.evidence) setActiveTab('evidence');
               }}
             />
           ) : (

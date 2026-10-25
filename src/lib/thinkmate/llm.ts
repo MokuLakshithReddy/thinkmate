@@ -34,6 +34,22 @@ async function generateJson(
   return { text: res.text ?? '', tokens };
 }
 
+function isRetryable(err: unknown): boolean {
+  if (!err) return false;
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.includes('timed out') ||
+    msg.includes('timeout') ||
+    msg.includes('AbortError') ||
+    msg.includes('500') ||
+    msg.includes('502') ||
+    msg.includes('503') ||
+    msg.includes('504') ||
+    msg.includes('INTERNAL') ||
+    msg.includes('UNAVAILABLE')
+  );
+}
+
 export async function runTurn(
   system: string,
   history: Content[],
@@ -54,6 +70,10 @@ export async function runTurn(
       return { output: validated, tokens: raw.tokens };
     } catch (e) {
       last = e;
+      if (!isRetryable(e) || i === retries) {
+        throw e;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
     } finally {
       clearTimeout(timer);
     }
