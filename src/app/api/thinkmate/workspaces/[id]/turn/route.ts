@@ -95,8 +95,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   }
 
   const t0 = Date.now();
+  let output;
+  let tokens: number | undefined;
   try {
-    const { output, tokens } = await runTurn(system, history);
+    const res = await runTurn(system, history);
+    output = res.output;
+    tokens = res.tokens;
+  } catch (e) {
+    await logEvent(sb, id, 'model_error', { message: safeErr(e) });
+    return NextResponse.json({ error: 'model_failed' }, { status: 502 });
+  }
+
+  try {
     const updated = await applyModelOutput(
       sb,
       id,
@@ -110,7 +120,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     );
     return NextResponse.json(updated);
   } catch (e) {
-    await logEvent(sb, id, 'model_error', { message: safeErr(e) });
-    return NextResponse.json({ error: 'model_failed' }, { status: 502 });
+    await logEvent(sb, id, 'persistence_error', { message: safeErr(e) });
+    return NextResponse.json(
+      { error: 'persistence_failed', details: safeErr(e) },
+      { status: 500 }
+    );
   }
 }

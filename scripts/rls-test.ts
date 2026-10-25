@@ -1,36 +1,64 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-function requireEnv(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-  return value;
-}
-
 async function asUser(url: string, key: string, email: string, pass: string): Promise<SupabaseClient> {
-  const c = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
-  const { error } = await c.auth.signInWithPassword({ email, password: pass });
-  if (error) {
+  const authClient = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+  const { data: { session }, error } = await authClient.auth.signInWithPassword({ email, password: pass });
+  if (error || !session) {
     // Sanitize error: never log passwords or auth payload
-    throw new Error(`Authentication failed for test identity: ${error.message}`);
+    throw new Error(`Authentication failed for test identity: ${error?.message ?? 'missing session'}`);
   }
-  return c;
+  return createClient(url, key, {
+    global: { headers: { Authorization: `Bearer ${session.access_token}` } },
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
 }
 
 export async function runRlsTests() {
   console.log('=== ThinkMate PostgreSQL RLS Isolation Verification ===');
 
-  const url = requireEnv('NEXT_PUBLIC_SUPABASE_URL');
-  const key = requireEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY');
-  const emailA = requireEnv('TEST_A_EMAIL');
-  const passA = requireEnv('TEST_A_PASS');
-  const emailB = requireEnv('TEST_B_EMAIL');
-  const passB = requireEnv('TEST_B_PASS');
+  const url = (process.env.STAGING_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL)?.trim();
+  if (!url) throw new Error('Missing required environment variable: NEXT_PUBLIC_SUPABASE_URL');
+  const key = (process.env.STAGING_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)?.trim();
+  if (!key) throw new Error('Missing required environment variable: NEXT_PUBLIC_SUPABASE_ANON_KEY');
+  const serviceKey = (process.env.STAGING_SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY)?.trim();
 
-  // Verify accounts are distinct
-  if (emailA.toLowerCase() === emailB.toLowerCase()) {
-    throw new Error('TEST_A_EMAIL and TEST_B_EMAIL must represent distinct test identities');
+  let emailA = process.env.TEST_A_EMAIL?.trim();
+  let passA = process.env.TEST_A_PASS?.trim();
+  let emailB = process.env.TEST_B_EMAIL?.trim();
+  let passB = process.env.TEST_B_PASS?.trim();
+
+  let adminClient: SupabaseClient | null = null;
+  let ephemeralUserAId: string | null = null;
+  let ephemeralUserBId: string | null = null;
+
+  if (emailA && passA && emailB && passB) {
+    // Verify accounts are distinct
+    if (emailA.toLowerCase() === emailB.toLowerCase()) {
+      throw new Error('TEST_A_EMAIL and TEST_B_EMAIL must represent distinct test identities');
+    }
+  } else if (serviceKey) {
+    // Automated provisioning for staging verification workflows
+    console.log('Explicit test credentials not provided; provisioning ephemeral test identities via service role...');
+    adminClient = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
+    const suffix = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    emailA = `rls-test-a-${suffix}@thinkmate.internal`;
+    passA = `TestPassA_${suffix}!Aa1`;
+    emailB = `rls-test-b-${suffix}@thinkmate.internal`;
+    passB = `TestPassB_${suffix}!Bb1`;
+
+    const resA = await adminClient.auth.admin.createUser({ email: emailA, password: passA, email_confirm: true });
+    if (resA.error || !resA.data.user) {
+      throw new Error(`Failed to create ephemeral User A: ${resA.error?.message}`);
+    }
+    ephemeralUserAId = resA.data.user.id;
+
+    const resB = await adminClient.auth.admin.createUser({ email: emailB, password: passB, email_confirm: true });
+    if (resB.error || !resB.data.user) {
+      throw new Error(`Failed to create ephemeral User B: ${resB.error?.message}`);
+    }
+    ephemeralUserBId = resB.data.user.id;
+  } else {
+    throw new Error('Missing required environment variable: TEST_A_EMAIL (or SUPABASE_SERVICE_ROLE_KEY)');
   }
 
   console.log('Authenticating test identities...');
@@ -114,6 +142,18 @@ export async function runRlsTests() {
       });
     if (decAErr) throw new Error(`User A decision insertion failed: ${decAErr.message}`);
 
+    // User A inserts message
+    const { data: msgA, error: msgAErr } = await a
+      .from('tm_messages')
+      .insert({
+        workspace_id: wsA.id,
+        role: 'user',
+        content: 'Confidential Prompt from User A',
+      })
+      .select()
+      .single();
+    if (msgAErr || !msgA) throw new Error(`User A message insertion failed: ${msgAErr?.message}`);
+
     // 2. User A can read their own records
     console.log('[Test 2] Verify User A can read own workspace and records...');
     const { data: ownWs } = await a.from('tm_workspaces').select('id, title').eq('id', wsA.id).single();
@@ -156,6 +196,11 @@ export async function runRlsTests() {
     const { data: readDecisions } = await b.from('tm_decisions').select('id').eq('workspace_id', wsA.id);
     if ((readDecisions ?? []).length > 0) {
       throw new Error('RLS VIOLATION: User B was able to read User A decisions');
+    }
+
+    const { data: readMessages } = await b.from('tm_messages').select('id').eq('workspace_id', wsA.id);
+    if ((readMessages ?? []).length > 0) {
+      throw new Error('RLS VIOLATION: User B was able to read User A messages');
     }
 
     const { data: readEvents } = await b.from('tm_events').select('id').eq('workspace_id', wsA.id);
@@ -213,6 +258,17 @@ export async function runRlsTests() {
       throw new Error('RLS VIOLATION: User B successfully injected decision into User A workspace');
     }
 
+    const { error: injectMsgErr } = await b
+      .from('tm_messages')
+      .insert({
+        workspace_id: wsA.id,
+        role: 'user',
+        content: 'Malicious Injected Message',
+      });
+    if (!injectMsgErr) {
+      throw new Error('RLS VIOLATION: User B successfully injected message into User A workspace');
+    }
+
     // Unauthorized Updates
     const { data: updateWsData } = await b
       .from('tm_workspaces')
@@ -259,6 +315,15 @@ export async function runRlsTests() {
       throw new Error('RLS VIOLATION: User B successfully mutated User A decision');
     }
 
+    const { data: updateMsgData } = await b
+      .from('tm_messages')
+      .update({ content: 'Tampered Message Content' })
+      .eq('id', msgA.id)
+      .select();
+    if ((updateMsgData ?? []).length > 0) {
+      throw new Error('RLS VIOLATION: User B successfully mutated User A message');
+    }
+
     // 6. Cross-User Deletions (User B cannot delete User A records or workspace)
     console.log('[Test 6] Assert User B cannot delete User A records...');
     const { data: deleteItemData } = await b.from('tm_items').delete().eq('id', itemA.id).select();
@@ -276,6 +341,11 @@ export async function runRlsTests() {
       throw new Error('RLS VIOLATION: User B was able to delete User A decision');
     }
 
+    const { data: deleteMsgData } = await b.from('tm_messages').delete().eq('id', msgA.id).select();
+    if ((deleteMsgData ?? []).length > 0) {
+      throw new Error('RLS VIOLATION: User B was able to delete User A message');
+    }
+
     const { data: deleteWsData } = await b.from('tm_workspaces').delete().eq('id', wsA.id).select();
     if ((deleteWsData ?? []).length > 0) {
       throw new Error('RLS VIOLATION: User B was able to delete User A workspace');
@@ -289,6 +359,10 @@ export async function runRlsTests() {
     const { data: intactItem } = await a.from('tm_items').select('id, text').eq('id', itemA.id).single();
     if (!intactItem || intactItem.text !== 'Confidential Claim A') {
       throw new Error('RLS VIOLATION: User A item was modified or deleted by User B');
+    }
+    const { data: intactMsg } = await a.from('tm_messages').select('id, content').eq('id', msgA.id).single();
+    if (!intactMsg || intactMsg.content !== 'Confidential Prompt from User A') {
+      throw new Error('RLS VIOLATION: User A message was modified or deleted by User B');
     }
 
     // 7. Identity Forgery (User B cannot insert workspace claiming User A is owner)
@@ -336,6 +410,22 @@ export async function runRlsTests() {
       throw new Error(failureMsg);
     }
     console.log('All test-created records cleanly deleted and verified.');
+
+    // Delete ephemeral test users if created
+    if (adminClient) {
+      console.log('Tearing down ephemeral test users...');
+      if (ephemeralUserAId) {
+        await adminClient.auth.admin.deleteUser(ephemeralUserAId).catch((err) => {
+          console.error(`Warning: failed to delete ephemeral test user A: ${err}`);
+        });
+      }
+      if (ephemeralUserBId) {
+        await adminClient.auth.admin.deleteUser(ephemeralUserBId).catch((err) => {
+          console.error(`Warning: failed to delete ephemeral test user B: ${err}`);
+        });
+      }
+      console.log('Ephemeral test users purged.');
+    }
   }
 }
 

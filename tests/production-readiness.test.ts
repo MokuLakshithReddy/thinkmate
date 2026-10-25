@@ -151,6 +151,30 @@ describe('Production Readiness & Operational Safeguards', () => {
         if (origGoogleKey) process.env.GOOGLE_API_KEY = origGoogleKey;
       }
     });
+
+    it('rejects AI responses when probe encounters execution or degraded status during release readiness', async () => {
+      const { NextRequest } = await import('next/server');
+      const { GET: healthGet } = await import('../src/app/api/health/route');
+
+      const origKey = process.env.GEMINI_API_KEY;
+      const origGoogleKey = process.env.GOOGLE_API_KEY;
+      try {
+        process.env.GEMINI_API_KEY = 'invalid-probe-key-123';
+        delete process.env.GOOGLE_API_KEY;
+        const req = new NextRequest('http://localhost:3000/api/health?release_readiness=true');
+        const res = await healthGet(req);
+        const data = await res.json();
+        assert.strictEqual(res.status, 503);
+        assert.strictEqual(data.dependencies.aiProvider.status, 'degraded');
+        assert.strictEqual(data.releaseReadiness, 'degraded');
+        assert.strictEqual(data.dependencies.aiProvider.liveVerified, false);
+      } finally {
+        if (origKey) process.env.GEMINI_API_KEY = origKey;
+        else delete process.env.GEMINI_API_KEY;
+        if (origGoogleKey) process.env.GOOGLE_API_KEY = origGoogleKey;
+        else delete process.env.GOOGLE_API_KEY;
+      }
+    });
   });
 
   describe('P2 Pilot Analysis — Protocol & Milestone Integrity', () => {
