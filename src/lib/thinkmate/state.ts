@@ -98,7 +98,10 @@ export interface State {
 }
 
 export async function loadState(sb: SupabaseClient, id: string): Promise<State | null> {
-  const { data: ws } = await sb.from('tm_workspaces').select('*').eq('id', id).maybeSingle();
+  const { data: ws, error: wsErr } = await sb.from('tm_workspaces').select('*').eq('id', id).maybeSingle();
+  if (wsErr) {
+    throw new Error(`Failed to load workspace ${id}: ${wsErr.message}`);
+  }
   if (!ws) return null;
 
   const [items, messages, links, decisions, frames, evidence] = await Promise.all([
@@ -109,6 +112,13 @@ export async function loadState(sb: SupabaseClient, id: string): Promise<State |
     sb.from('tm_frames').select('*').eq('workspace_id', id).order('version'),
     sb.from('tm_evidence').select('*').eq('workspace_id', id).order('created_at'),
   ]);
+
+  if (items.error) throw new Error(`Failed to load items for workspace ${id}: ${items.error.message}`);
+  if (messages.error) throw new Error(`Failed to load messages for workspace ${id}: ${messages.error.message}`);
+  if (links.error) throw new Error(`Failed to load item evidence links for workspace ${id}: ${links.error.message}`);
+  if (decisions.error) throw new Error(`Failed to load decisions for workspace ${id}: ${decisions.error.message}`);
+  if (frames.error) throw new Error(`Failed to load frames for workspace ${id}: ${frames.error.message}`);
+  if (evidence.error) throw new Error(`Failed to load evidence for workspace ${id}: ${evidence.error.message}`);
 
   return {
     ws: ws as WorkspaceRow,
@@ -125,9 +135,17 @@ export async function logEvent(
   sb: SupabaseClient,
   id: string,
   event_type: string,
-  payload: Record<string, unknown> = {}
+  payload: Record<string, unknown> = {},
+  options: { required?: boolean } = { required: true }
 ) {
-  await sb.from('tm_events').insert({ workspace_id: id, event_type, payload });
+  const { error } = await sb.from('tm_events').insert({ workspace_id: id, event_type, payload });
+  if (error) {
+    const msg = `Failed to log audit event '${event_type}' for workspace ${id}: ${error.message}`;
+    if (options.required) {
+      throw new Error(msg);
+    }
+    console.warn(`[Audit Event Warning]: ${msg}`);
+  }
 }
 
 // Consecutive trailing assistant replies that were question-only
@@ -243,6 +261,49 @@ export async function applyModelOutput(
   clientMsgId?: string,
   userId?: string
 ): Promise<State | null> {
+  const proposedItemsPayload = out.proposed_items.map((i) => ({
+    kind: i.kind,
+    text: i.text,
+    origin:
+      i.kind === 'question'
+        ? ('ai' as const)
+        : i.origin === 'user' && !originLooksRight(i.text, userText)
+        ? ('ai' as const)
+        : i.origin,
+  }));
+
+  // 1. Transactional Database RPC Execution
+  if (typeof (sb as unknown as { rpc?: unknown }).rpc === 'function') {
+    const { error: rpcErr } = await sb.rpc('tm_apply_turn_tx', {
+      p_workspace_id: id,
+      p_user_message: userText,
+      p_assistant_reply: out.reply,
+      p_guidance_mode: out.guidance_mode || null,
+      p_policy_action: action || null,
+      p_proposed_items: proposedItemsPayload,
+      p_proposed_problem_frame: out.proposed_problem_frame || null,
+      p_client_msg_id: clientMsgId || null,
+      p_meta: {
+        user_id: userId,
+        ms,
+        tokens: tokens ?? 0,
+      },
+    });
+
+    if (!rpcErr) {
+      return loadState(sb, id);
+    }
+
+    const isMissingRpc =
+      rpcErr.message.includes('function public.tm_apply_turn_tx') ||
+      rpcErr.message.includes('Could not find') ||
+      rpcErr.code === 'PGRST202';
+    if (!isMissingRpc) {
+      throw new Error(`Failed to apply turn atomically: ${rpcErr.message}`);
+    }
+  }
+
+  // 2. Compensating Fallback for Offline / Mock Environments without Database RPC
   const { data: existing, error: existingErr } = await sb
     .from('tm_items')
     .select('kind,text')
@@ -253,67 +314,79 @@ export async function applyModelOutput(
   const existingRows = (existing ?? []) as { kind: string; text: string }[];
   const seen = new Set(existingRows.map((i) => i.kind + ':' + norm(i.text)));
 
-  const rows = out.proposed_items
-    .map((i) => ({
-      kind: i.kind,
-      text: i.text,
-      origin:
-        i.kind === 'question'
-          ? ('ai' as const)
-          : i.origin === 'user' && !originLooksRight(i.text, userText)
-          ? ('ai' as const)
-          : i.origin,
-    }))
+  const rows = proposedItemsPayload
     .filter((r) => !seen.has(r.kind + ':' + norm(r.text)))
     .map((r) => ({ ...r, workspace_id: id, status: 'proposed' }));
 
-  const { error: msgErr } = await sb.from('tm_messages').insert([
-    {
-      workspace_id: id,
-      role: 'user',
-      content: userText,
-      client_msg_id: clientMsgId || null,
-    },
-    {
-      workspace_id: id,
-      role: 'assistant',
-      content: out.reply,
-      guidance_mode: out.guidance_mode,
-      policy_action: action,
-    },
-  ]);
+  const { data: insertedMsgs, error: msgErr } = await sb
+    .from('tm_messages')
+    .insert([
+      {
+        workspace_id: id,
+        role: 'user',
+        content: userText,
+        client_msg_id: clientMsgId || null,
+      },
+      {
+        workspace_id: id,
+        role: 'assistant',
+        content: out.reply,
+        guidance_mode: out.guidance_mode,
+        policy_action: action,
+      },
+    ])
+    .select('id');
+
   if (msgErr) {
     throw new Error(`Failed to save turn messages: ${msgErr.message}`);
   }
 
-  if (rows.length) {
-    const { error: itemsErr } = await sb.from('tm_items').insert(rows);
-    if (itemsErr) {
-      throw new Error(`Failed to save proposed items: ${itemsErr.message}`);
-    }
-  }
+  const userMsgId = insertedMsgs?.[0]?.id;
+  const astMsgId = insertedMsgs?.[1]?.id;
 
-  if (out.proposed_problem_frame) {
-    const { error: frameErr } = await sb
-      .from('tm_workspaces')
-      .update({
-        proposed_problem_frame: out.proposed_problem_frame,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', id);
-    if (frameErr) {
-      throw new Error(`Failed to update problem frame: ${frameErr.message}`);
+  try {
+    if (rows.length) {
+      const { error: itemsErr } = await sb.from('tm_items').insert(rows);
+      if (itemsErr) {
+        throw new Error(`Failed to save proposed items: ${itemsErr.message}`);
+      }
     }
-  }
 
-  await logEvent(sb, id, 'turn', {
-    user_id: userId,
-    guidance_mode: out.guidance_mode,
-    policy_action: action,
-    proposed: rows.length,
-    ms,
-    tokens: tokens ?? 0,
-  });
+    if (out.proposed_problem_frame) {
+      const { error: frameErr } = await sb
+        .from('tm_workspaces')
+        .update({
+          proposed_problem_frame: out.proposed_problem_frame,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', id);
+      if (frameErr) {
+        throw new Error(`Failed to update problem frame: ${frameErr.message}`);
+      }
+    }
+
+    await logEvent(sb, id, 'turn', {
+      user_id: userId,
+      guidance_mode: out.guidance_mode,
+      policy_action: action,
+      proposed: rows.length,
+      ms,
+      tokens: tokens ?? 0,
+    });
+  } catch (stepErr) {
+    // Compensate inserted messages so no partial turn is retained on failure
+    if (userMsgId) {
+      try {
+        await sb.from('tm_messages').delete().eq('id', userMsgId);
+      } catch {}
+    }
+    if (astMsgId) {
+      try {
+        await sb.from('tm_messages').delete().eq('id', astMsgId);
+      } catch {}
+    }
+    throw stepErr;
+  }
 
   return loadState(sb, id);
 }

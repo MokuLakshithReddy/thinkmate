@@ -102,7 +102,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     output = res.output;
     tokens = res.tokens;
   } catch (e) {
-    await logEvent(sb, id, 'model_error', { message: safeErr(e) });
+    await logEvent(sb, id, 'model_error', { message: safeErr(e) }, { required: false });
     return NextResponse.json({ error: 'model_failed' }, { status: 502 });
   }
 
@@ -120,7 +120,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     );
     return NextResponse.json(updated);
   } catch (e) {
-    await logEvent(sb, id, 'persistence_error', { message: safeErr(e) });
+    await logEvent(sb, id, 'persistence_error', { message: safeErr(e) }, { required: false });
     return NextResponse.json(
       { error: 'persistence_failed', details: safeErr(e) },
       { status: 500 }
