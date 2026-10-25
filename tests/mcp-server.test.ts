@@ -100,6 +100,42 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
         await new Promise((resolve) => server.close(resolve));
       }
     });
+
+    it('returns sanitized internal error with correlation ID on unhandled exception in /mcp', async () => {
+      const origUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const origAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+      process.env.NEXT_PUBLIC_SUPABASE_URL = 'http://[::1]:namedport'; // triggers malformed URL exception in URL parsing
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'test-key';
+
+      const server: Server = await new Promise((resolve) => {
+        const s = app.listen(0, () => resolve(s));
+      });
+      const port = (server.address() as any).port;
+
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer test-bearer-token',
+          },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+        });
+
+        assert.strictEqual(res.status, 500);
+        const json = await res.json();
+        assert.strictEqual(json.jsonrpc, '2.0');
+        assert.strictEqual(json.error.code, -32603);
+        assert.ok(json.error.message.includes('Internal server error (ref: '));
+        assert.strictEqual(json.error.message.includes('namedport'), false);
+      } finally {
+        if (origUrl !== undefined) process.env.NEXT_PUBLIC_SUPABASE_URL = origUrl;
+        else delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+        if (origAnon !== undefined) process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = origAnon;
+        else delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
   });
 
   describe('MCP Tool Registration & Discovery', () => {
@@ -124,7 +160,7 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
   });
 
   describe('Database Failure Safety in MCP Tools', () => {
-    it('list_thinking_workspaces returns tool error on database query failure', async () => {
+    it('list_thinking_workspaces returns sanitized public error code on database query failure', async () => {
       const mockSb = {
         from: () => ({
           select: () => ({
@@ -140,10 +176,12 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
       const result = await handler({});
 
       assert.strictEqual(result.isError, true);
-      assert.ok(result.content[0].text.includes('Failed to list workspaces: connection refused'));
+      assert.ok(result.content[0].text.includes('list_workspaces_failed'));
+      assert.ok(result.content[0].text.includes('(ref: '));
+      assert.strictEqual(result.content[0].text.includes('connection refused'), false);
     });
 
-    it('create_thinking_workspace returns tool error when workspace insert fails', async () => {
+    it('create_thinking_workspace returns sanitized public error code when workspace insert fails', async () => {
       const mockSb = {
         from: () => ({
           insert: () => ({
@@ -159,10 +197,12 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
       const result = await handler({ title: 'Cache Latency' });
 
       assert.strictEqual(result.isError, true);
-      assert.ok(result.content[0].text.includes('Could not create the workspace: disk full'));
+      assert.ok(result.content[0].text.includes('create_workspace_failed'));
+      assert.ok(result.content[0].text.includes('(ref: '));
+      assert.strictEqual(result.content[0].text.includes('disk full'), false);
     });
 
-    it('propose_thinking_update returns tool error when problem frame update fails', async () => {
+    it('propose_thinking_update returns sanitized public error code when problem frame update fails', async () => {
       const validWsId = 'a0000000-0000-0000-0000-000000000001';
       const mockSb = {
         from: (table: string) => ({
@@ -187,10 +227,12 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
       });
 
       assert.strictEqual(result.isError, true);
-      assert.ok(result.content[0].text.includes('Failed to update problem frame: foreign key constraint violation'));
+      assert.ok(result.content[0].text.includes('propose_update_failed'));
+      assert.ok(result.content[0].text.includes('(ref: '));
+      assert.strictEqual(result.content[0].text.includes('foreign key constraint violation'), false);
     });
 
-    it('propose_thinking_update returns tool error when item insert fails', async () => {
+    it('propose_thinking_update returns sanitized public error code when item insert fails', async () => {
       const validWsId = 'a0000000-0000-0000-0000-000000000001';
       const mockSb = {
         from: (table: string) => {
@@ -230,10 +272,12 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
       });
 
       assert.strictEqual(result.isError, true);
-      assert.ok(result.content[0].text.includes('Failed to insert proposed items: unique violation'));
+      assert.ok(result.content[0].text.includes('propose_update_failed'));
+      assert.ok(result.content[0].text.includes('(ref: '));
+      assert.strictEqual(result.content[0].text.includes('unique violation'), false);
     });
 
-    it('propose_thinking_update reports failure when event logging fails', async () => {
+    it('propose_thinking_update reports sanitized public error code when event logging fails', async () => {
       const validWsId = 'a0000000-0000-0000-0000-000000000001';
       const mockSb = {
         from: (table: string) => {
@@ -268,7 +312,9 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
       });
 
       assert.strictEqual(result.isError, true);
-      assert.ok(result.content[0].text.includes('Failed to log audit event: audit table readonly'));
+      assert.ok(result.content[0].text.includes('propose_update_failed'));
+      assert.ok(result.content[0].text.includes('(ref: '));
+      assert.strictEqual(result.content[0].text.includes('audit table readonly'), false);
     });
 
     it('propose_thinking_update reports success only when all writes succeed', async () => {
@@ -312,7 +358,9 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
   describe('execute_thinking_turn Reasoning Tool', () => {
     it('fails closed in production when tm_turns_last_day RPC fails', async () => {
       const origEnv = process.env.NODE_ENV;
+      const origFailClosed = process.env.RATE_LIMIT_FAIL_CLOSED;
       (process.env as any).NODE_ENV = 'production';
+      process.env.RATE_LIMIT_FAIL_CLOSED = 'false';
       try {
         const validWsId = 'a0000000-0000-0000-0000-000000000001';
         const mockSb = {
@@ -324,7 +372,7 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
           },
         } as any;
 
-        const server = buildServer(mockSb, 'user-123');
+        const server = buildServer(mockSb, 'prod-user-1');
         const handler = (server as any)._registeredTools['execute_thinking_turn'].handler;
         const result = await handler({
           workspace_id: validWsId,
@@ -335,12 +383,16 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
         assert.ok(result.content[0].text.includes('quota_service_unavailable'));
       } finally {
         (process.env as any).NODE_ENV = origEnv;
+        if (origFailClosed !== undefined) process.env.RATE_LIMIT_FAIL_CLOSED = origFailClosed;
+        else delete process.env.RATE_LIMIT_FAIL_CLOSED;
       }
     });
 
     it('returns stable error codes in production without leaking safeErr internals on model failure', async () => {
       const origEnv = process.env.NODE_ENV;
+      const origFailClosed = process.env.RATE_LIMIT_FAIL_CLOSED;
       (process.env as any).NODE_ENV = 'production';
+      process.env.RATE_LIMIT_FAIL_CLOSED = 'false';
       try {
         const validWsId = 'a0000000-0000-0000-0000-000000000001';
         const mockWs = { id: validWsId, title: 'Test', stage: 'orient', problem_frame_confirmed: true };
@@ -362,7 +414,7 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
           throw new Error('Google Gemini internal quota exceeded [sensitive-raw-api-key]');
         };
 
-        const server = buildServer(mockSb, 'user-123', failingRunner as any);
+        const server = buildServer(mockSb, 'prod-user-2', failingRunner as any);
         const handler = (server as any)._registeredTools['execute_thinking_turn'].handler;
         const result = await handler({
           workspace_id: validWsId,
@@ -375,6 +427,8 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
         assert.strictEqual(result.content[0].text.includes('sensitive-raw-api-key'), false);
       } finally {
         (process.env as any).NODE_ENV = origEnv;
+        if (origFailClosed !== undefined) process.env.RATE_LIMIT_FAIL_CLOSED = origFailClosed;
+        else delete process.env.RATE_LIMIT_FAIL_CLOSED;
       }
     });
 
@@ -561,6 +615,124 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
 
       // The second concurrent request is identified as an idempotent replay
       assert.ok(res2.content[0].text.includes('[IDEMPOTENT REPLAY]'));
+    });
+
+    it('enforces atomic quota reservation under concurrency at the daily limit boundary', async () => {
+      const validWsId = 'a0000000-0000-0000-0000-000000000001';
+      const mockWs = { id: validWsId, title: 'Quota Boundary Test', stage: 'orient', problem_frame_confirmed: true };
+
+      // Simulate a database where only 1 slot remains before hitting the daily quota of 300
+      let currentCount = 299;
+      const mockSb = {
+        rpc: async (fnName: string, params: any) => {
+          if (fnName === 'tm_reserve_turn_quota') {
+            if (currentCount >= params.p_daily_limit) {
+              return { data: { allowed: false, used: currentCount, limit: params.p_daily_limit }, error: null };
+            }
+            currentCount++;
+            return { data: { allowed: true, reservation_id: 'res-1', used: currentCount, limit: params.p_daily_limit }, error: null };
+          }
+          if (fnName === 'tm_apply_turn_tx') {
+            return {
+              data: {
+                idempotent_replay: false,
+                assistant_reply: 'Processed successfully.',
+                user_message_id: 'u1',
+                assistant_message_id: 'a1',
+              },
+              error: null,
+            };
+          }
+          return { data: null, error: null };
+        },
+        from: (table: string) => ({
+          select: () => ({
+            eq: () => {
+              const res = Promise.resolve({ data: table === 'tm_workspaces' ? mockWs : [], error: null });
+              return Object.assign(res, {
+                maybeSingle: () => Promise.resolve({ data: mockWs, error: null }),
+                order: () => Promise.resolve({ data: [], error: null }),
+              });
+            },
+          }),
+        }),
+      } as any;
+
+      const mockRunner = async () => ({
+        output: {
+          reply: 'Success within quota.',
+          guidance_mode: 'hint' as const,
+          proposed_problem_frame: null,
+          proposed_items: [],
+        },
+        tokens: 30,
+      });
+
+      const server = buildServer(mockSb, 'quota-boundary-user', mockRunner as any);
+      const handler = (server as any)._registeredTools['execute_thinking_turn'].handler;
+
+      // Launch 2 concurrent turns when only 1 slot is remaining
+      const [res1, res2] = await Promise.all([
+        handler({ workspace_id: validWsId, message: 'Turn 1' }),
+        handler({ workspace_id: validWsId, message: 'Turn 2' }),
+      ]);
+
+      const successes = [res1, res2].filter((r) => !r.isError);
+      const rejections = [res1, res2].filter((r) => r.isError && r.content[0].text.includes('daily_cap'));
+
+      // Exactly one request succeeded and reserved the last slot; the other was rejected by the atomic reservation
+      assert.strictEqual(successes.length, 1);
+      assert.strictEqual(rejections.length, 1);
+    });
+
+    it('enforces user-scoped distributed rate limiting on execute_thinking_turn', async () => {
+      const validWsId = 'a0000000-0000-0000-0000-000000000001';
+      const mockWs = { id: validWsId, title: 'Burst Test', stage: 'orient', problem_frame_confirmed: true };
+      const mockSb = {
+        rpc: async () => ({
+          data: {
+            allowed: true,
+            idempotent_replay: false,
+            assistant_reply: 'ok',
+            user_message_id: 'u',
+            assistant_message_id: 'a',
+          },
+          error: null,
+        }),
+        from: () => ({
+          select: () => ({
+            eq: () => ({
+              maybeSingle: () => Promise.resolve({ data: mockWs, error: null }),
+              order: () => Promise.resolve({ data: [], error: null }),
+            }),
+          }),
+          insert: () => Promise.resolve({ error: null }),
+        }),
+      } as any;
+
+      const mockRunner = async () => ({
+        output: {
+          reply: 'ok',
+          guidance_mode: 'hint' as const,
+          proposed_problem_frame: null,
+          proposed_items: [],
+        },
+        tokens: 10,
+      });
+
+      const server = buildServer(mockSb, 'burst-user-id', mockRunner as any);
+      const handler = (server as any)._registeredTools['execute_thinking_turn'].handler;
+
+      // Consume user turns up to limit (20 per min)
+      const results = [];
+      for (let i = 0; i < 21; i++) {
+        results.push(await handler({ workspace_id: validWsId, message: `Burst test msg ${i}` }));
+      }
+
+      // The 21st request should be rejected by user-scoped distributed limiter
+      const last = results[20];
+      assert.strictEqual(last.isError, true);
+      assert.ok(last.content[0].text.includes('rate_limit_exceeded'));
     });
   });
 
