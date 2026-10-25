@@ -1,0 +1,17 @@
+session_id,participant,condition,brief,order,minutes_to_frame,completed,abandoned,would_use,named_situation
+S001,P1,thinkmate,X,1,12,y,n,y,y
+S002,P1,ordinary,Y,2,20,y,n,n,n
+S003,P2,ordinary,X,1,25,y,n,n,n
+S004,P2,thinkmate,Y,2,14,y,n,y,y
+S005,P3,thinkmate,Y,1,10,y,n,y,y
+S006,P3,socratic,X,2,18,y,n,y,n
+S007,P4,socratic,Y,1,22,y,n,n,n
+S008,P4,thinkmate,X,2,15,y,n,y,y
+S009,P5,thinkmate,X,1,11,y,n,y,y
+S010,P5,socratic,Y,2,19,y,n,y,n
+S011,P6,socratic,X,1,24,y,n,n,n
+S012,P6,thinkmate,Y,2,13,y,n,y,y
+S013,P7,thinkmate,Y,1,16,y,n,y,y
+S014,P7,ordinary,X,2,21,y,n,n,n
+S015,P8,ordinary,Y,1,23,y,n,n,n
+S016,P8,thinkmate,X,2,12,y,n,y,y

@@ -10,7 +10,7 @@ import { checkCsrfOrForbidden } from '@/lib/csrf';
 const CreateSessionSchema = z
   .object({
     title: z.string().min(1, 'Title is required').max(120),
-    problemStatement: z.string().min(1, 'Problem statement is required'),
+    problemStatement: z.string().min(1, 'Problem statement is required').max(8000, 'Problem statement cannot exceed 8,000 characters'),
     currentMode: z.enum(['understand', 'explore', 'challenge', 'decide', 'act']).default('understand'),
     currentStage: z
       .enum([
@@ -194,8 +194,8 @@ export async function DELETE(req: NextRequest) {
     await getRepository().deleteSession(id, authUser.id);
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
-    const errorMessage = (err as Error)?.message || '';
-    if (errorMessage.includes('unauthorized') || errorMessage.includes('ownership')) {
+    const errorMessage = ((err as Error)?.message || '').toLowerCase();
+    if (errorMessage.includes('unauthorized') || errorMessage.includes('ownership') || errorMessage.includes('forbidden')) {
       return NextResponse.json({ error: 'Unauthorized session operation' }, { status: 403 });
     }
     return NextResponse.json({ error: 'Failed to delete session' }, { status: 500 });

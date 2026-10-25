@@ -26,7 +26,9 @@ export default async function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const nonce = (await headers()).get('x-nonce') ?? undefined;
+  // Reading headers() opts RootLayout into per-request dynamic server rendering so Next.js
+  // automatically binds the proxy-forwarded x-nonce to internal scripts without static cache collisions.
+  await headers();
 
   return (
     <html

@@ -21,7 +21,7 @@ Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforce
 
 3. **Official Google GenAI Integration**:
    - Powered by `@google/genai` using Gemini 2.5 Flash / Flash Lite.
-   - Server-side streaming via Server-Sent Events (SSE) with structured metadata event protocol (`/api/think/stream`).
+   - Server-side streaming via Server-Sent Events (SSE) with structured metadata event protocol (`/api/think/stream`) for headless or programmatic consumers, while `/api/cothink` serves step-by-step UI workflow sessions.
    - Grounded reasoning: No fabricated citations, statistics, or imaginary benchmarks.
    - Resilient offline simulator fallback for automated tests and offline development.
 
@@ -34,6 +34,11 @@ Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforce
    - Supabase PostgreSQL schema with RLS policies ensuring users only access their own sessions (`auth.uid() = user_id`).
    - IDOR prevention and ownership verification on all session mutation endpoints.
    - Model API keys and privileged credentials strictly contained on the server.
+
+6. **Parallel Pilot MVP (`/thinkmate`)**:
+   - An experimental parallel v0.1 pilot workspace under `/thinkmate` evaluating guided conversation, user-confirmed claim extraction, problem framing, and stage progression.
+   - Designed to validate user behavior without disrupting the existing root application.
+   - Advanced capabilities (evidence linking, automated research, vector retrieval, and teams) are feature-flagged via `src/lib/thinkmate/flags.ts` and default to `false`/`'off'` to maintain a lean MVP scope.
 
 ---
 

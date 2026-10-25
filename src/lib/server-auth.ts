@@ -433,16 +433,16 @@ export async function saveDistributedRotatedSession(
   oldRefreshToken: string,
   session: { access_token: string; refresh_token?: string; expires_at?: number },
   user: { id: string; email?: string }
-): Promise<void> {
+): Promise<boolean> {
   const upstashUrl = process.env.UPSTASH_REDIS_REST_URL;
   const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!upstashUrl || !upstashToken) return;
+  if (!upstashUrl || !upstashToken) return false;
 
   const key = `auth:rotation:${hashTokenKey(oldRefreshToken)}`;
   const encryptedPayload = encryptDistributedPayload({ session, user });
   try {
     const url = upstashUrl.replace(/\/$/, '');
-    await fetch(url, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${upstashToken}`,
@@ -450,8 +450,22 @@ export async function saveDistributedRotatedSession(
       },
       body: JSON.stringify(['SET', key, encryptedPayload, 'EX', 10]),
     });
+
+    if (!res.ok) {
+      console.warn(`[ServerAuth] Redis token-rotation write failed with HTTP status ${res.status}`);
+      return false;
+    }
+
+    const data = (await res.json().catch(() => null)) as { result?: string; error?: string } | null;
+    if (data?.error) {
+      console.warn('[ServerAuth] Redis token-rotation write returned payload error:', data.error);
+      return false;
+    }
+
+    return data?.result === 'OK';
   } catch (err) {
     console.warn('[ServerAuth] Failed to persist distributed rotation record:', err);
+    return false;
   }
 }
 
