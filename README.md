@@ -51,7 +51,7 @@ Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforce
 - **Database & Auth**: Supabase PostgreSQL with Row Level Security (RLS) & GoTrue Auth
 - **Rate Limiting**: Distributed sliding-window limiter via Upstash Redis with bounded in-memory fallback
 - **Validation**: Zod schema validation & strict JSON bounds (64KB payload limits)
-- **Testing**: Node.js Native Test Runner with `tsx` (84 unit tests & live staging database verification suite)
+- **Testing**: Node.js Native Test Runner with `tsx` (220+ unit & protocol tests across 35 suites, mocked browser E2E, live staging database RLS/concurrency verification, and live MCP E2E suites)
 
 ---
 
@@ -156,32 +156,31 @@ npm run dev
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ### 4. Run Automated Test Suites
+
+ThinkMate separates test verification into distinct, isolated tiers to guarantee fast local development, deterministic CI pipelines, and verifiable staging assertions:
+
 ```bash
-# Unit & integration test suite
+# Tier 1: Fast In-Memory Unit & Protocol Tests (220+ tests, 35 suites, 0 network dependencies)
 npm test
 
-# Linter verification (0 errors, 0 warnings)
-npm run lint
+# Tier 2: Static Analysis & Quality Gates
+npm run lint          # ESLint (0 errors, 0 warnings)
+npx tsc --noEmit      # Strict TypeScript typechecking
+npm run build         # Next.js Turbopack production build
+npm run audit:ci      # Full dependency advisory gate
 
-# TypeScript verification
-npx tsc --noEmit
-
-# Production Turbopack build
-npm run build
-
-# Staging database verification suite
-npx tsx scripts/verify-supabase-staging.ts
-
-# Browser E2E (starts `next dev` on :3100; Supabase-backed APIs and Gemini are mocked per test,
-# the guest simulator and CSRF checks hit the real local server)
-npx playwright install chromium   # first run only
+# Tier 3: Browser E2E Tests (Mocked backends, isolated headless browser)
+npx playwright install chromium   # First run only
 npm run test:e2e
 
-# Browser E2E against a deployed app (real Supabase/Redis/Gemini, nothing mocked)
-E2E_BASE_URL=https://staging.example.com E2E_TEST_EMAIL=... E2E_TEST_PASSWORD=... npm run test:e2e
+# Tier 4: Genuine Live Staging Database & RLS Verification (Requires staging Supabase credentials)
+npx tsx scripts/verify-staging-rpc.ts        # Atomic RPCs, idempotency replay, and tenant isolation
+npx tsx scripts/rls-test.ts                  # Multi-tenant cross-user Row Level Security isolation
+npx tsx scripts/verify-supabase-staging.ts   # Concurrency row-locking, duplicate hashes, atomic rollback
 
-# Full dependency audit gate (dev + prod)
-npm run audit:ci
+# Tier 5: Real External MCP Client E2E Verification
+npx tsx scripts/verify-live-mcp-e2e.ts       # Genuine live Gemini AI reasoning & staging DB persistence
+npx tsx scripts/verify-mock-mcp-e2e.ts       # Deterministic mocked runner for offline MCP protocol verification
 ```
 
 ---

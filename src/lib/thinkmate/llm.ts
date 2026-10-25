@@ -1,5 +1,11 @@
 import { GoogleGenAI } from '@google/genai';
 import { ModelOutput } from './schemas';
+import { DEFAULT_GEMINI_MODEL } from '../../config/models';
+import dns from 'node:dns';
+
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch {}
 
 const getAiClient = () => new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
@@ -11,7 +17,7 @@ async function generateJson(
   signal?: AbortSignal
 ): Promise<{ text: string; tokens?: number }> {
   const ai = getAiClient();
-  const model = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
+  const model = process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
   const res = await ai.models.generateContent({
     model,
     contents,

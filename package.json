@@ -13,7 +13,10 @@
     "audit:ci": "tsx scripts/audit-gate.ts",
     "test:e2e": "playwright test",
     "start:mcp": "tsx mcp-server/index.ts",
-    "dev:mcp": "tsx watch mcp-server/index.ts"
+    "dev:mcp": "tsx watch mcp-server/index.ts",
+    "verify:staging": "tsx scripts/verify-staging-rpc.ts",
+    "verify:mcp:mock": "tsx scripts/verify-mock-mcp-e2e.ts",
+    "verify:mcp:live": "tsx scripts/verify-live-mcp-e2e.ts"
   },
   "dependencies": {
     "@google/genai": "^2.28.0",
