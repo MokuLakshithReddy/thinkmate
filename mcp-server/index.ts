@@ -172,41 +172,109 @@ function buildServer(sb: SupabaseClient, userId: string) {
       },
     },
     async ({ workspace_id, problem_frame, items }) => {
+      // 1. Transactional Database RPC Execution
+      if (typeof (sb as any).rpc === 'function') {
+        const { data: rpcData, error: rpcErr } = await sb.rpc('tm_propose_update_tx', {
+          p_workspace_id: workspace_id,
+          p_items: items,
+          p_problem_frame: problem_frame ?? null,
+          p_audit_payload: {},
+        });
+
+        if (!rpcErr) {
+          return ok(
+            `Proposed. Nothing is confirmed until the user reviews it: ${APP}/thinkmate/${workspace_id}`
+          );
+        }
+
+        const isMissingRpc =
+          rpcErr.message.includes('function public.tm_propose_update_tx') ||
+          rpcErr.message.includes('Could not find') ||
+          rpcErr.code === 'PGRST202';
+        if (!isMissingRpc) {
+          return fail(`Failed to propose updates atomically: ${rpcErr.message}`);
+        }
+      }
+
+      // 2. Fallback with Rollback Compensation for Mocks / Offline Environments
       const { data: ws, error: wsErr } = await sb
         .from('tm_workspaces')
-        .select('id')
+        .select('id, proposed_problem_frame')
         .eq('id', workspace_id)
         .maybeSingle();
 
       if (wsErr) return fail(`Database query failed: ${wsErr.message}`);
       if (!ws) return fail('Workspace not found or access denied.');
 
-      if (items.length) {
-        const { error: itemsErr } = await sb.from('tm_items').insert(
-          items.map((i) => ({
-            workspace_id,
-            kind: i.kind,
-            text: i.text,
-            origin: 'ai',
-            status: 'proposed',
-            meta: { via: 'mcp' },
-          }))
-        );
-        if (itemsErr) return fail(`Failed to insert proposed items: ${itemsErr.message}`);
-      }
+      const insertedItemIds: string[] = [];
+      const origFrame = ws.proposed_problem_frame;
 
-      if (problem_frame) {
-        const { error: frameErr } = await sb
-          .from('tm_workspaces')
-          .update({ proposed_problem_frame: problem_frame })
-          .eq('id', workspace_id);
-        if (frameErr) return fail(`Failed to update problem frame: ${frameErr.message}`);
-      }
+      const safeDeleteItem = async (itemId: string) => {
+        try {
+          await sb.from('tm_items').delete().eq('id', itemId);
+        } catch {}
+      };
+      const safeRevertFrame = async () => {
+        try {
+          await sb.from('tm_workspaces').update({ proposed_problem_frame: origFrame }).eq('id', workspace_id);
+        } catch {}
+      };
 
-      const { error: eventErr } = await sb
-        .from('tm_events')
-        .insert({ workspace_id, event_type: 'mcp_propose', payload: { items: items.length } });
-      if (eventErr) return fail(`Failed to log audit event: ${eventErr.message}`);
+      try {
+        if (items.length) {
+          const { data: insertedItems, error: itemsErr } = await sb
+            .from('tm_items')
+            .insert(
+              items.map((i) => ({
+                workspace_id,
+                kind: i.kind,
+                text: i.text,
+                origin: 'ai',
+                status: 'proposed',
+                meta: { via: 'mcp' },
+              }))
+            )
+            .select('id');
+
+          if (itemsErr) return fail(`Failed to insert proposed items: ${itemsErr.message}`);
+          if (insertedItems) {
+            insertedItemIds.push(...insertedItems.map((r: any) => r.id));
+          }
+        }
+
+        if (problem_frame) {
+          const { error: frameErr } = await sb
+            .from('tm_workspaces')
+            .update({ proposed_problem_frame: problem_frame })
+            .eq('id', workspace_id);
+          if (frameErr) {
+            // Compensate inserted items
+            for (const itemId of insertedItemIds) {
+              await safeDeleteItem(itemId);
+            }
+            return fail(`Failed to update problem frame: ${frameErr.message}`);
+          }
+        }
+
+        const { error: eventErr } = await sb
+          .from('tm_events')
+          .insert({ workspace_id, event_type: 'mcp_propose', payload: { items: items.length } });
+        if (eventErr) {
+          // Compensate items and frame update
+          for (const itemId of insertedItemIds) {
+            await safeDeleteItem(itemId);
+          }
+          if (problem_frame) {
+            await safeRevertFrame();
+          }
+          return fail(`Failed to log audit event: ${eventErr.message}`);
+        }
+      } catch (err) {
+        for (const itemId of insertedItemIds) {
+          await safeDeleteItem(itemId);
+        }
+        return fail(`Unexpected error proposing updates: ${safeErr(err)}`);
+      }
 
       return ok(
         `Proposed. Nothing is confirmed until the user reviews it: ${APP}/thinkmate/${workspace_id}`
@@ -263,9 +331,10 @@ function buildServer(sb: SupabaseClient, userId: string) {
       if (client_msg_id) {
         const existing = state.messages.find((m) => m.client_msg_id === client_msg_id);
         if (existing) {
-          const assistant = state.messages
-            .filter((m) => m.role === 'assistant')
-            .pop();
+          // Locate the exact assistant response specifically paired with this user message
+          const assistant = state.messages.find(
+            (m) => m.role === 'assistant' && m.seq > existing.seq
+          );
           return ok(
             `[IDEMPOTENT REPLAY]\n${assistant?.content ?? 'Turn already processed.'}\n\nWorkspace: ${APP}/thinkmate/${workspace_id}`
           );
@@ -421,6 +490,23 @@ app.get('/mcp', (_req, res) => {
   res.status(405).json({ error: 'method_not_allowed' });
 });
 
+export function startMcpServer(port = Number(process.env.PORT ?? 3333)) {
+  const config = validateMcpConfig();
+  if (!config.valid) {
+    console.error(
+      `[MCP Startup Fatal]: Configuration validation failed:\n${config.issues
+        .map((i) => `  - ${i}`)
+        .join('\n')}`
+    );
+    process.exit(1);
+  }
+
+  const server = app.listen(port, () => {
+    console.log(`ThinkMate MCP server running on port ${port}`);
+  });
+  return server;
+}
+
 export { app, buildServer };
 
 const isDirectRun =
@@ -428,8 +514,5 @@ const isDirectRun =
   (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('mcp-server/index.ts'));
 
 if (isDirectRun) {
-  const PORT = Number(process.env.PORT ?? 3333);
-  app.listen(PORT, () => {
-    console.log(`ThinkMate MCP server running on port ${PORT}`);
-  });
+  startMcpServer();
 }

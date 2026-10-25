@@ -270,4 +270,149 @@ describe('Production Readiness & Operational Safeguards', () => {
       }
     });
   });
+
+  describe('P1 & P2 Critical Source Safety — Atomic Persistence, Context Reads, Audit Events', () => {
+    it('loadState throws explicit error when child queries fail, preventing silent context omission', async () => {
+      const { loadState } = await import('../src/lib/thinkmate/state');
+      const wsId = 'a0000000-0000-0000-0000-000000000001';
+      const mockSb = {
+        from: (table: string) => {
+          if (table === 'tm_workspaces') {
+            return {
+              select: () => ({
+                eq: () => ({
+                  maybeSingle: () => Promise.resolve({ data: { id: wsId, title: 'Test WS' }, error: null }),
+                }),
+              }),
+            };
+          }
+          if (table === 'tm_messages') {
+            return {
+              select: () => ({
+                eq: () => ({
+                  order: () => Promise.resolve({ data: null, error: { message: 'connection reset by peer' } }),
+                }),
+              }),
+            };
+          }
+          return {
+            select: () => ({
+              eq: () => {
+                const res = Promise.resolve({ data: [], error: null });
+                return Object.assign(res, {
+                  order: () => Promise.resolve({ data: [], error: null }),
+                });
+              },
+            }),
+          };
+        },
+      } as any;
+
+      await assert.rejects(
+        async () => {
+          await loadState(mockSb, wsId);
+        },
+        /Failed to load messages for workspace a0000000-0000-0000-0000-000000000001: connection reset by peer/
+      );
+    });
+
+    it('logEvent enforces mandatory audit persistence and rejects on database error', async () => {
+      const { logEvent } = await import('../src/lib/thinkmate/state');
+      const wsId = 'a0000000-0000-0000-0000-000000000001';
+      const mockSb = {
+        from: (table: string) => {
+          assert.strictEqual(table, 'tm_events');
+          return {
+            insert: () => Promise.resolve({ error: { message: 'disk quota exceeded' } }),
+          };
+        },
+      } as any;
+
+      await assert.rejects(
+        async () => {
+          await logEvent(mockSb, wsId, 'turn_complete', { ok: true });
+        },
+        /Failed to log audit event 'turn_complete' for workspace a0000000-0000-0000-0000-000000000001: disk quota exceeded/
+      );
+    });
+
+    it('logEvent suppresses rejection when required is explicitly false', async () => {
+      const { logEvent } = await import('../src/lib/thinkmate/state');
+      const wsId = 'a0000000-0000-0000-0000-000000000001';
+      const mockSb = {
+        from: () => ({
+          insert: () => Promise.resolve({ error: { message: 'table locked' } }),
+        }),
+      } as any;
+
+      // Should resolve without throwing
+      await logEvent(mockSb, wsId, 'model_error', { err: 'timeout' }, { required: false });
+    });
+
+    it('applyModelOutput delegates to atomic RPC tm_apply_turn_tx when available', async () => {
+      const { applyModelOutput } = await import('../src/lib/thinkmate/state');
+      const wsId = 'a0000000-0000-0000-0000-000000000001';
+      let rpcCalledWith: any = null;
+
+      const mockSb = {
+        rpc: async (fnName: string, params: any) => {
+          rpcCalledWith = { fnName, params };
+          return { data: { success: true }, error: null };
+        },
+        from: () => ({
+          select: () => ({
+            eq: () => {
+              const res = Promise.resolve({ data: [], error: null });
+              return Object.assign(res, {
+                maybeSingle: () => Promise.resolve({ data: { id: wsId, title: 'Test WS' }, error: null }),
+                order: () => Promise.resolve({ data: [], error: null }),
+              });
+            },
+          }),
+        }),
+      } as any;
+
+      const out = {
+        reply: 'Consider using read-replicas.',
+        guidance_mode: 'hint' as const,
+        proposed_problem_frame: 'High read volume',
+        proposed_items: [{ kind: 'idea' as const, text: 'Deploy read replicas', origin: 'ai' as const }],
+      };
+
+      await applyModelOutput(mockSb, wsId, 'How can we scale reads?', out, 120, 'ideate', 42, 'client-123', 'user-1');
+
+      assert.ok(rpcCalledWith);
+      assert.strictEqual(rpcCalledWith.fnName, 'tm_apply_turn_tx');
+      assert.strictEqual(rpcCalledWith.params.p_workspace_id, wsId);
+      assert.strictEqual(rpcCalledWith.params.p_client_msg_id, 'client-123');
+      assert.strictEqual(rpcCalledWith.params.p_user_message, 'How can we scale reads?');
+      assert.strictEqual(rpcCalledWith.params.p_assistant_reply, 'Consider using read-replicas.');
+    });
+
+    it('applyModelOutput aborts cleanly with error when atomic RPC encounters database failure', async () => {
+      const { applyModelOutput } = await import('../src/lib/thinkmate/state');
+      const wsId = 'a0000000-0000-0000-0000-000000000001';
+
+      const mockSb = {
+        rpc: async () => {
+          return { data: null, error: { message: 'deadlock detected between transactions', code: '40P01' } };
+        },
+      } as any;
+
+      const out = {
+        reply: 'Consider using read-replicas.',
+        guidance_mode: 'hint' as const,
+        proposed_problem_frame: null,
+        proposed_items: [],
+      };
+
+      await assert.rejects(
+        async () => {
+          await applyModelOutput(mockSb, wsId, 'Scaling query', out, 100, 'ideate');
+        },
+        /Failed to apply turn atomically: deadlock detected between transactions/
+      );
+    });
+  });
 });
+

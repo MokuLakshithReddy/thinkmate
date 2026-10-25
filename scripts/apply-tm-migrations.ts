@@ -110,6 +110,7 @@ export async function applyMigrations() {
     '003_fts.sql',
     '005_teams.sql',
     '006_quota_idempotency.sql',
+    '007_atomic_turn_rpc.sql',
   ];
 
   // 3. Apply pending migrations sequentially

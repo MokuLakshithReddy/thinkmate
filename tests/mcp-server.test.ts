@@ -196,7 +196,12 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
         from: (table: string) => {
           if (table === 'tm_items') {
             return {
-              insert: () => Promise.resolve({ error: { message: 'unique violation' } }),
+              insert: () => ({
+                select: () => Promise.resolve({ data: null, error: { message: 'unique violation' } }),
+              }),
+              delete: () => ({
+                eq: () => Promise.resolve({ error: null }),
+              }),
             };
           }
           return {
@@ -209,6 +214,9 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
               eq: () => Promise.resolve({ error: null }),
             }),
             insert: () => Promise.resolve({ error: null }),
+            delete: () => ({
+              eq: () => Promise.resolve({ error: null }),
+            }),
           };
         },
       } as any;
@@ -244,6 +252,9 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
               eq: () => Promise.resolve({ error: null }),
             }),
             insert: () => Promise.resolve({ error: null }),
+            delete: () => ({
+              eq: () => Promise.resolve({ error: null }),
+            }),
           };
         },
       } as any;
@@ -262,6 +273,12 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
 
     it('propose_thinking_update reports success only when all writes succeed', async () => {
       const validWsId = 'a0000000-0000-0000-0000-000000000001';
+      const makeInsert = () => {
+        const p = Promise.resolve({ error: null, data: [{ id: 'item-1' }] });
+        return Object.assign(p, {
+          select: () => Promise.resolve({ data: [{ id: 'item-1' }], error: null }),
+        });
+      };
       const mockSb = {
         from: () => ({
           select: () => ({
@@ -272,7 +289,10 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
           update: () => ({
             eq: () => Promise.resolve({ error: null }),
           }),
-          insert: () => Promise.resolve({ error: null }),
+          insert: makeInsert,
+          delete: () => ({
+            eq: () => Promise.resolve({ error: null }),
+          }),
         }),
       } as any;
 
@@ -346,5 +366,70 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
       assert.ok(result.content[0].text.includes('[IDEMPOTENT REPLAY]'));
       assert.ok(result.content[0].text.includes('Redis provides sub-millisecond lookups.'));
     });
+
+    it('replays the specific assistant response paired to client_msg_id even when later turns completed', async () => {
+      const validWsId = 'a0000000-0000-0000-0000-000000000001';
+      const clientMsgId = 'b0000000-0000-0000-0000-000000000002';
+      const mockWs = { id: validWsId, title: 'Cache Strategy', stage: 'orient', problem_frame_confirmed: true };
+      const mockMessages = [
+        { id: 'm1', seq: 1, role: 'user', content: 'What about Redis?', client_msg_id: clientMsgId },
+        { id: 'm2', seq: 2, role: 'assistant', content: 'Specific Redis response.' },
+        { id: 'm3', seq: 3, role: 'user', content: 'What about Memcached?' },
+        { id: 'm4', seq: 4, role: 'assistant', content: 'Latest Memcached response.' },
+      ];
+
+      const mockSb = {
+        from: (table: string) => ({
+          select: () => ({
+            eq: () => ({
+              maybeSingle: () => Promise.resolve({ data: mockWs, error: null }),
+              order: () => Promise.resolve({ data: table === 'tm_messages' ? mockMessages : [], error: null }),
+            }),
+            order: () => Promise.resolve({ data: [], error: null }),
+          }),
+        }),
+      } as any;
+
+      const server = buildServer(mockSb, 'user-123');
+      const handler = (server as any)._registeredTools['execute_thinking_turn'].handler;
+      const result = await handler({
+        workspace_id: validWsId,
+        message: 'What about Redis?',
+        client_msg_id: clientMsgId,
+      });
+
+      assert.strictEqual(result.isError, undefined);
+      assert.ok(result.content[0].text.includes('[IDEMPOTENT REPLAY]'));
+      assert.ok(result.content[0].text.includes('Specific Redis response.'));
+      assert.strictEqual(result.content[0].text.includes('Latest Memcached response.'), false);
+    });
+  });
+
+  describe('MCP Startup Configuration Validation', () => {
+    it('startMcpServer executes validation and aborts before listening on invalid configuration', async () => {
+      const { startMcpServer } = await import('../mcp-server/index');
+      const origUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const origExit = process.exit;
+      let exitCode: number | null = null;
+      try {
+        delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+        (process as any).exit = (code: number) => {
+          exitCode = code;
+          throw new Error(`process.exit called with ${code}`);
+        };
+
+        assert.throws(
+          () => {
+            startMcpServer(9999);
+          },
+          /process.exit called with 1/
+        );
+        assert.strictEqual(exitCode, 1);
+      } finally {
+        process.exit = origExit;
+        if (origUrl) process.env.NEXT_PUBLIC_SUPABASE_URL = origUrl;
+      }
+    });
   });
 });
+
