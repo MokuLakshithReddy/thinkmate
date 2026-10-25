@@ -310,6 +310,74 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
   });
 
   describe('execute_thinking_turn Reasoning Tool', () => {
+    it('fails closed in production when tm_turns_last_day RPC fails', async () => {
+      const origEnv = process.env.NODE_ENV;
+      (process.env as any).NODE_ENV = 'production';
+      try {
+        const validWsId = 'a0000000-0000-0000-0000-000000000001';
+        const mockSb = {
+          rpc: async (fn: string) => {
+            if (fn === 'tm_turns_last_day') {
+              return { data: null, error: { message: 'RPC service unavailable' } };
+            }
+            return { data: null, error: null };
+          },
+        } as any;
+
+        const server = buildServer(mockSb, 'user-123');
+        const handler = (server as any)._registeredTools['execute_thinking_turn'].handler;
+        const result = await handler({
+          workspace_id: validWsId,
+          message: 'Can you help?',
+        });
+
+        assert.strictEqual(result.isError, true);
+        assert.ok(result.content[0].text.includes('quota_service_unavailable'));
+      } finally {
+        (process.env as any).NODE_ENV = origEnv;
+      }
+    });
+
+    it('returns stable error codes in production without leaking safeErr internals on model failure', async () => {
+      const origEnv = process.env.NODE_ENV;
+      (process.env as any).NODE_ENV = 'production';
+      try {
+        const validWsId = 'a0000000-0000-0000-0000-000000000001';
+        const mockWs = { id: validWsId, title: 'Test', stage: 'orient', problem_frame_confirmed: true };
+        const mockSb = {
+          rpc: async () => ({ data: 0, error: null }),
+          from: () => ({
+            select: () => ({
+              eq: () => ({
+                maybeSingle: () => Promise.resolve({ data: mockWs, error: null }),
+                order: () => Promise.resolve({ data: [], error: null }),
+              }),
+              order: () => Promise.resolve({ data: [], error: null }),
+            }),
+            insert: () => Promise.resolve({ error: null }),
+          }),
+        } as any;
+
+        const failingRunner = async () => {
+          throw new Error('Google Gemini internal quota exceeded [sensitive-raw-api-key]');
+        };
+
+        const server = buildServer(mockSb, 'user-123', failingRunner as any);
+        const handler = (server as any)._registeredTools['execute_thinking_turn'].handler;
+        const result = await handler({
+          workspace_id: validWsId,
+          message: 'Can you help?',
+        });
+
+        assert.strictEqual(result.isError, true);
+        assert.ok(result.content[0].text.includes('model_failed'));
+        assert.ok(result.content[0].text.includes('(ref: '));
+        assert.strictEqual(result.content[0].text.includes('sensitive-raw-api-key'), false);
+      } finally {
+        (process.env as any).NODE_ENV = origEnv;
+      }
+    });
+
     it('returns tool error when workspace is not found', async () => {
       const validWsId = 'a0000000-0000-0000-0000-000000000001';
       const mockSb = {

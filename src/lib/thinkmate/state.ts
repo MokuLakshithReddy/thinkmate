@@ -207,7 +207,7 @@ export function ctxFrom(s: State, allowedItemIds?: Set<string> | null) {
       })
       .map(
         (i: ItemRow) =>
-          `${i.kind}${i.verification && i.verification !== 'unassessed' ? '/' + i.verification : ''}: ${i.text}`
+          `[kind: ${i.kind}, verification: ${i.verification ?? 'unassessed'}, status: ${i.status}] ${i.text}`
       );
 
   const evidence = s.evidence.map(

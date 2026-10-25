@@ -16,6 +16,7 @@ import { runTurn } from '@/lib/thinkmate/llm';
 import { flags } from '@/lib/thinkmate/flags';
 import { relevantIds } from '@/lib/thinkmate/retrieval';
 import { safeErr } from '@/lib/thinkmate/log';
+import { checkRateLimitAsync, createRateLimitErrorResponse } from '@/lib/rate-limiter';
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -23,7 +24,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (!a) return unauthorized();
   const { sb } = a;
 
-  // Daily quota check (Layer 8)
+  // 1. User-scoped distributed per-minute rate limit (burst protection)
+  const rateCheck = await checkRateLimitAsync(`rate_limit:turn:${a.user.id}`, 20, 60000);
+  if (!rateCheck.allowed) {
+    return createRateLimitErrorResponse(
+      rateCheck,
+      'Rate limit exceeded: too many turns in a short period. Please wait a minute before retrying.'
+    );
+  }
+
+  // 2. Daily quota check (Layer 8)
   try {
     const { data: used, error: quotaErr } = await sb.rpc('tm_turns_last_day');
     if (quotaErr) {
