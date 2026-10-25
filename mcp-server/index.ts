@@ -368,7 +368,7 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
         return fail('rate_limit_exceeded: Too many turns in a short period. Please wait a minute before sending more.');
       }
 
-      // 2. Atomic daily quota check & reservation under row lock (prevents concurrency race at boundary)
+      // 2. Atomic daily quota check & reservation under user-level lock (prevents concurrency race at boundary)
       const dailyLimit = Number(process.env.TM_DAILY_TURNS ?? 300);
       try {
         const { data: reserveData, error: reserveErr } = await sb.rpc('tm_reserve_turn_quota', {
@@ -376,28 +376,37 @@ function buildServer(sb: SupabaseClient, userId: string, runner = runTurn) {
           p_daily_limit: dailyLimit,
         });
 
-        if (!reserveErr && reserveData) {
-          if (!reserveData.allowed) {
-            return fail('daily_cap: Daily turn limit reached.');
+        if (reserveErr) {
+          console.error(`[MCP Quota Reservation Error cid=${correlationId}]:`, reserveErr);
+          // In production, treat unexpected reservation failure strictly as a service error (fail closed)
+          if (process.env.NODE_ENV === 'production') {
+            return fail(`quota_service_unavailable: Daily turn quota service unavailable. (ref: ${correlationId})`);
           }
-        } else {
-          // Fallback if migration 008 is not yet applied
-          const { data: used, error: rpcErr } = await sb.rpc('tm_turns_last_day');
-          if (rpcErr) {
-            console.error(`[MCP Quota Check Error cid=${correlationId}]:`, rpcErr);
-            if (process.env.NODE_ENV === 'production') {
-              return fail(`quota_service_unavailable: Daily turn quota service unavailable. (ref: ${correlationId})`);
+
+          // In local dev/mock test environments, fallback only if migration is confirmed missing
+          const isMissingRpc =
+            reserveErr.message?.includes('function public.tm_reserve_turn_quota') ||
+            reserveErr.message?.includes('Could not find') ||
+            reserveErr.code === 'PGRST202';
+
+          if (isMissingRpc) {
+            const { data: used, error: rpcErr } = await sb.rpc('tm_turns_last_day');
+            if (rpcErr) {
+              console.error(`[MCP Quota Fallback Error cid=${correlationId}]:`, rpcErr);
+            } else if ((used ?? 0) >= dailyLimit) {
+              return fail('daily_cap: Daily turn limit reached.');
             }
-          } else if ((used ?? 0) >= dailyLimit) {
-            return fail('daily_cap: Daily turn limit reached.');
+          } else {
+            return fail(`quota_service_unavailable: Daily turn quota service unavailable. (ref: ${correlationId})`);
           }
+        } else if (reserveData && !reserveData.allowed) {
+          return fail('daily_cap: Daily turn limit reached.');
         }
       } catch (err) {
         console.error(`[MCP Quota Check Exception cid=${correlationId}]:`, err);
         if (process.env.NODE_ENV === 'production') {
           return fail(`quota_service_unavailable: Daily turn quota service unavailable. (ref: ${correlationId})`);
         }
-        // Explicit non-production fallback for offline/mock test environments
       }
 
       let state;
