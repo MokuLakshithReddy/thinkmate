@@ -98,9 +98,10 @@ export async function GET(req: NextRequest) {
         const { GoogleGenAI } = await import('@google/genai');
         const apiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) as string;
         const ai = new GoogleGenAI({ apiKey });
-        const timeoutPromise = new Promise<never>((_, rej) =>
-          setTimeout(() => rej(new Error('AI probe timed out')), 6000)
-        );
+        let timer: NodeJS.Timeout | undefined;
+        const timeoutPromise = new Promise<never>((_, rej) => {
+          timer = setTimeout(() => rej(new Error('AI probe timed out')), 6000);
+        });
         const res = await Promise.race([
           ai.models.generateContent({
             model: DEFAULT_GEMINI_MODEL,
@@ -108,14 +109,17 @@ export async function GET(req: NextRequest) {
             config: { maxOutputTokens: 2 },
           }),
           timeoutPromise,
-        ]);
-        if (res && res.text !== undefined) {
+        ]).finally(() => {
+          if (timer) clearTimeout(timer);
+        });
+        const replyText = typeof res?.text === 'string' ? res.text.trim() : '';
+        if (replyText.length > 0) {
           liveVerified = true;
           aiStatus = 'verified';
           liveMessage = 'Live model generation verified successfully';
         } else {
           aiStatus = 'degraded';
-          liveMessage = 'Model responded but returned undefined or empty text';
+          liveMessage = 'Model responded but returned empty text';
         }
       } catch (probeErr) {
         aiStatus = 'degraded';

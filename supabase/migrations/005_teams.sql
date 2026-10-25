@@ -39,7 +39,7 @@ drop policy if exists tm_workspaces_update on public.tm_workspaces;
 drop policy if exists tm_workspaces_delete on public.tm_workspaces;
 
 create policy tm_workspaces_select on public.tm_workspaces for select to authenticated
-  using (public.tm_can_access(id));
+  using (owner_id = (select auth.uid()) or public.tm_can_access(id));
 
 create policy tm_workspaces_insert on public.tm_workspaces for insert to authenticated
   with check (owner_id = (select auth.uid()));

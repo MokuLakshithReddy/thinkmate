@@ -243,7 +243,13 @@ export async function applyModelOutput(
   clientMsgId?: string,
   userId?: string
 ): Promise<State | null> {
-  const { data: existing } = await sb.from('tm_items').select('kind,text').eq('workspace_id', id);
+  const { data: existing, error: existingErr } = await sb
+    .from('tm_items')
+    .select('kind,text')
+    .eq('workspace_id', id);
+  if (existingErr) {
+    throw new Error(`Failed to load existing items: ${existingErr.message}`);
+  }
   const existingRows = (existing ?? []) as { kind: string; text: string }[];
   const seen = new Set(existingRows.map((i) => i.kind + ':' + norm(i.text)));
 
@@ -261,7 +267,7 @@ export async function applyModelOutput(
     .filter((r) => !seen.has(r.kind + ':' + norm(r.text)))
     .map((r) => ({ ...r, workspace_id: id, status: 'proposed' }));
 
-  await sb.from('tm_messages').insert([
+  const { error: msgErr } = await sb.from('tm_messages').insert([
     {
       workspace_id: id,
       role: 'user',
@@ -276,19 +282,28 @@ export async function applyModelOutput(
       policy_action: action,
     },
   ]);
+  if (msgErr) {
+    throw new Error(`Failed to save turn messages: ${msgErr.message}`);
+  }
 
   if (rows.length) {
-    await sb.from('tm_items').insert(rows);
+    const { error: itemsErr } = await sb.from('tm_items').insert(rows);
+    if (itemsErr) {
+      throw new Error(`Failed to save proposed items: ${itemsErr.message}`);
+    }
   }
 
   if (out.proposed_problem_frame) {
-    await sb
+    const { error: frameErr } = await sb
       .from('tm_workspaces')
       .update({
         proposed_problem_frame: out.proposed_problem_frame,
         updated_at: new Date().toISOString(),
       })
       .eq('id', id);
+    if (frameErr) {
+      throw new Error(`Failed to update problem frame: ${frameErr.message}`);
+    }
   }
 
   await logEvent(sb, id, 'turn', {

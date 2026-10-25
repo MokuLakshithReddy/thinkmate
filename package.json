@@ -11,7 +11,9 @@
     "test": "tsx --test",
     "check:env": "tsx scripts/check-production-env.ts",
     "audit:ci": "tsx scripts/audit-gate.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "start:mcp": "tsx mcp-server/index.ts",
+    "dev:mcp": "tsx watch mcp-server/index.ts"
   },
   "dependencies": {
     "@google/genai": "^2.28.0",

@@ -206,6 +206,73 @@ Production authentication **fails closed**: if Upstash Redis is missing or unrea
 
 ---
 
+## 🤖 ThinkMate Model Context Protocol (MCP) Server
+
+ThinkMate includes an official Model Context Protocol (MCP) server under [`mcp-server/index.ts`](mcp-server/index.ts) that allows external AI assistants (such as Claude Desktop, Cursor, or remote agentic clients) to interface directly with ThinkMate workspaces and invoke ThinkMate's guided reasoning workflows.
+
+### Available MCP Tools
+
+| Tool | Purpose |
+|---|---|
+| `list_thinking_workspaces` | Lists accessible ThinkMate workspaces for the authenticated user. |
+| `create_thinking_workspace` | Provisions a new workspace for a problem with owner isolation. |
+| `get_thinking_context` | Retrieves the confirmed problem frame, verified claims, and active items. |
+| `propose_thinking_update` | Proposes new items or problem frame updates for user review (with atomic error checks). |
+| `list_open_questions` | Returns unverified hypotheses, counterarguments, and unresolved questions. |
+| `execute_thinking_turn` | **Direct AI Reasoning**: Invokes ThinkMate's full guided problem-solving workflow (root-cause analysis, solution exploration, trade-off evaluation, assumption testing, action planning) and persists turn outcomes. |
+
+### Running the MCP Server
+
+```bash
+# Start MCP server (port 3333 by default, or set PORT)
+npm run start:mcp
+
+# Development mode with hot reload
+npm run dev:mcp
+```
+
+### Environment Configuration & Origin Security
+
+- **Authentication**: All tool requests require an `Authorization: Bearer <user_access_token>` header verified against Supabase GoTrue Auth.
+- **Origin Policy**:
+  - Desktop clients (Claude Desktop, Cursor, CLI) do not transmit an `Origin` header and are permitted once authenticated.
+  - In production (`NODE_ENV=production`), browser requests with an `Origin` header **fail closed (HTTP 403)** unless the origin is explicitly registered in `ALLOWED_ORIGINS` (comma-separated).
+  - In development, `http://localhost:*` and `http://127.0.0.1:*` origins are allowed.
+
+### Connecting External AI Clients
+
+#### Claude Desktop Configuration (`claude_desktop_config.json`)
+
+```json
+{
+  "mcpServers": {
+    "thinkmate": {
+      "url": "http://localhost:3333/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_SUPABASE_ACCESS_TOKEN"
+      }
+    }
+  }
+}
+```
+
+#### Cursor Configuration (`.cursor/mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "thinkmate": {
+      "url": "http://localhost:3333/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_SUPABASE_ACCESS_TOKEN"
+      }
+    }
+  }
+}
+```
+
+---
+
 ## 🔒 Security & Privacy
 
 - **Server-Side AI Proxy**: API keys are never exposed to the client bundle.
