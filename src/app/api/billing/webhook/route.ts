@@ -4,7 +4,24 @@ import Razorpay from 'razorpay';
 import { adminClient } from '@/lib/supabase-admin';
 import { planFromRazorpayPlanId } from '@/lib/billing/razorpay';
 
+import { z } from 'zod';
+
 export const runtime = 'nodejs';
+
+const WebhookSchema = z.object({
+  event: z.string().min(1),
+  created_at: z.number().optional(),
+  payload: z.object({
+    subscription: z.object({
+      entity: z.object({
+        id: z.string().min(1),
+        status: z.string().min(1),
+        plan_id: z.string().optional(),
+        current_end: z.number().nullable().optional(),
+      }).passthrough().optional(),
+    }).passthrough().optional(),
+  }).passthrough().optional(),
+}).passthrough();
 
 export async function POST(req: Request) {
   const raw = await req.text();
@@ -22,26 +39,18 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'invalid_signature' }, { status: 400 });
   }
 
-  let event: {
-    event?: string;
-    created_at?: number;
-    payload?: {
-      subscription?: {
-        entity?: {
-          id?: string;
-          status?: string;
-          plan_id?: string;
-          current_end?: number;
-        };
-      };
-    };
-  };
-
+  let rawJson: unknown;
   try {
-    event = JSON.parse(raw);
+    rawJson = JSON.parse(raw);
   } catch {
     return NextResponse.json({ error: 'bad_json' }, { status: 400 });
   }
+
+  const parsed = WebhookSchema.safeParse(rawJson);
+  if (!parsed.success) {
+    return NextResponse.json({ error: 'invalid_payload' }, { status: 400 });
+  }
+  const event = parsed.data;
 
   const eventId =
     req.headers.get('x-razorpay-event-id') ??

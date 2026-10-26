@@ -29,30 +29,60 @@ export async function POST(req: Request) {
   });
   if (pwErr) return NextResponse.json({ error: 'wrong_password' }, { status: 403 });
 
-  const admin = adminClient();
-
-  // If user has a live billing subscription, cancel immediately so they aren't billed after deletion
-  const { data: subRow, error: subErr } = await admin
-    .from('billing_subscriptions')
-    .select('provider_subscription_id, status')
-    .eq('user_id', a.user.id)
-    .maybeSingle();
-
-  if (subErr) {
-    console.error('[Account Delete] Failed to look up subscription:', subErr);
+  let admin;
+  try {
+    admin = adminClient();
+  } catch (clientErr) {
+    console.error('[Account Delete] Failed to initialize admin client:', clientErr);
     return NextResponse.json({ error: 'billing_lookup_failed' }, { status: 503 });
   }
 
-  if (
-    subRow?.provider_subscription_id &&
-    ['authenticated', 'active', 'pending', 'halted', 'paused'].includes(subRow.status)
-  ) {
-    try {
-      await razorpay().subscriptions.cancel(subRow.provider_subscription_id, false);
-    } catch (cancelErr) {
-      console.error('[Account Delete] Failed to cancel subscription:', cancelErr);
-      return NextResponse.json({ error: 'subscription_cancel_failed' }, { status: 502 });
+  // If user has a live billing subscription, cancel and confirm before deletion
+  try {
+    const { data: subRow, error: subErr } = await admin
+      .from('billing_subscriptions')
+      .select('provider_subscription_id, status')
+      .eq('user_id', a.user.id)
+      .maybeSingle();
+
+    if (subErr) {
+      console.error('[Account Delete] Failed to look up subscription:', subErr);
+      return NextResponse.json({ error: 'billing_lookup_failed' }, { status: 503 });
     }
+
+    if (
+      subRow?.provider_subscription_id &&
+      ['authenticated', 'active', 'pending', 'halted', 'paused'].includes(subRow.status)
+    ) {
+      let canceled: { id?: string; status?: string } | null = null;
+      try {
+        canceled = await razorpay().subscriptions.cancel(subRow.provider_subscription_id, false);
+      } catch (cancelErr) {
+        console.error('[Account Delete] Provider cancel error:', cancelErr);
+        return NextResponse.json({ error: 'subscription_cancel_failed' }, { status: 502 });
+      }
+
+      if (!canceled || !canceled.id) {
+        console.error('[Account Delete] Provider returned unconfirmed cancellation:', canceled);
+        return NextResponse.json({ error: 'subscription_cancel_failed' }, { status: 502 });
+      }
+
+      const { error: markErr } = await admin
+        .from('billing_subscriptions')
+        .update({
+          status: 'cancelled',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('user_id', a.user.id);
+
+      if (markErr) {
+        console.error('[Account Delete] Failed to record cancellation in database:', markErr);
+        return NextResponse.json({ error: 'subscription_record_failed' }, { status: 500 });
+      }
+    }
+  } catch (err) {
+    console.error('[Account Delete] Unexpected error checking/canceling subscription:', err);
+    return NextResponse.json({ error: 'billing_lookup_failed' }, { status: 503 });
   }
 
   const { error } = await admin.auth.admin.deleteUser(a.user.id);

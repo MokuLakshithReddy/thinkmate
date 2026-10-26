@@ -73,7 +73,7 @@ begin
   end if;
 
   if lower(coalesce(v_caller_email, '')) <> lower(v_invite.email) then
-    return jsonb_build_object('ok', false, 'error', 'email_mismatch');
+    return jsonb_build_object('ok', false, 'error', 'invalid_or_expired');
   end if;
 
   insert into public.tm_members (workspace_id, user_id, role)

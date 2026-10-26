@@ -33,12 +33,6 @@ export async function POST(req: Request) {
   }
 
   if (!data?.ok) {
-    if (data?.error === 'email_mismatch') {
-      return NextResponse.json(
-        { error: 'email_mismatch', message: 'This invitation was sent to a different email address.' },
-        { status: 403 }
-      );
-    }
     return NextResponse.json(
       { error: 'invalid_or_expired', message: 'Invitation is invalid or has expired.' },
       { status: 400 }
