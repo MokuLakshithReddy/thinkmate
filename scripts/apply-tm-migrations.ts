@@ -123,6 +123,7 @@ export async function applyMigrations() {
     '011_plans_usage.sql',
     '012_lock_reserve.sql',
     '013_invites.sql',
+    '014_invites_harden.sql',
   ];
 
   // 3. Apply pending migrations sequentially

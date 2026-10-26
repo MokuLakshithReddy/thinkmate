@@ -3,6 +3,8 @@ import crypto from 'node:crypto';
 import { z } from 'zod';
 import { authed, unauthorized } from '@/lib/thinkmate/auth';
 
+import { checkRateLimitAsync, createRateLimitErrorResponse } from '@/lib/rate-limiter';
+
 const AcceptBody = z.object({
   token: z.string().min(10),
 });
@@ -10,6 +12,9 @@ const AcceptBody = z.object({
 export async function POST(req: Request) {
   const a = await authed();
   if (!a) return unauthorized();
+
+  const rl = await checkRateLimitAsync(`invites:accept:${a.user.id}`, 10, 60 * 60 * 1000);
+  if (!rl.allowed) return createRateLimitErrorResponse(rl, 'Too many acceptance attempts.');
 
   const bodyParsed = AcceptBody.safeParse(await req.json().catch(() => null));
   if (!bodyParsed.success) {
@@ -23,12 +28,19 @@ export async function POST(req: Request) {
   });
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 400 });
+    console.error('[Invite Accept Error]:', error);
+    return NextResponse.json({ error: 'accept_failed', message: 'Failed to process invitation.' }, { status: 400 });
   }
 
   if (!data?.ok) {
+    if (data?.error === 'email_mismatch') {
+      return NextResponse.json(
+        { error: 'email_mismatch', message: 'This invitation was sent to a different email address.' },
+        { status: 403 }
+      );
+    }
     return NextResponse.json(
-      { error: data?.error || 'Invitation is invalid or has expired' },
+      { error: 'invalid_or_expired', message: 'Invitation is invalid or has expired.' },
       { status: 400 }
     );
   }
