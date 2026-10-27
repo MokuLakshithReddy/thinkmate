@@ -94,3 +94,28 @@ end $$;
 
 revoke all on function public.tm_accept_invite(text) from public, anon;
 grant execute on function public.tm_accept_invite(text) to authenticated;
+
+-- Also harden direct member invite function to enforce team plan
+create or replace function public.tm_invite(ws uuid, invitee_email text, member_role text default 'editor')
+returns void language plpgsql security definer set search_path = public, pg_temp as $$
+declare
+  uid uuid;
+begin
+  if not exists (select 1 from public.tm_workspaces w where w.id = ws and w.owner_id = (select auth.uid())) then
+    raise exception 'not_owner';
+  end if;
+  if public.tm_plan_for((select auth.uid())) <> 'team' then
+    raise exception 'plan_required';
+  end if;
+  select id into uid from auth.users where lower(email) = lower(invitee_email);
+  if uid is null then
+    raise exception 'no_such_user';
+  end if;
+  insert into public.tm_members (workspace_id, user_id, role)
+  values (ws, uid, member_role)
+  on conflict (workspace_id, user_id) do update set role = excluded.role;
+end $$;
+
+revoke all on function public.tm_invite(uuid, text, text) from public, anon;
+grant execute on function public.tm_invite(uuid, text, text) to authenticated;
+

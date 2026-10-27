@@ -162,4 +162,17 @@ describe('SaaS Launch Hardening Verifications', () => {
       'Staging E2E must poll exact URL pathname to avoid matching /login?next=/thinkmate'
     );
   });
+
+  it('Item 1: verifies tm_invite also enforces team plan', () => {
+    const migrationPath = path.resolve(process.cwd(), 'supabase/migrations/014_invites_harden.sql');
+    const content = fs.readFileSync(migrationPath, 'utf8');
+    assert.ok(
+      content.includes('create or replace function public.tm_invite'),
+      'Must harden tm_invite RPC'
+    );
+    assert.ok(
+      content.includes("if public.tm_plan_for((select auth.uid())) <> 'team' then"),
+      'tm_invite must enforce team plan'
+    );
+  });
 });
