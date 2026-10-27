@@ -203,6 +203,8 @@ export async function applyMigrations() {
 
   const failures: string[] = [];
 
+  const SERVICE_ROLE_ONLY_TABLES = new Set(['billing_events']);
+
   for (const requiredTable of REQUIRED_RLS_TABLES) {
     const tableInfo = tableMap.get(requiredTable);
     if (!tableInfo) {
@@ -212,7 +214,7 @@ export async function applyMigrations() {
     if (!tableInfo.relrowsecurity) {
       failures.push(`Table "${requiredTable}" has Row Level Security (RLS) DISABLED.`);
     }
-    if (tableInfo.policy_count < 1) {
+    if (!SERVICE_ROLE_ONLY_TABLES.has(requiredTable) && tableInfo.policy_count < 1) {
       failures.push(`Table "${requiredTable}" has RLS enabled but 0 security policies defined.`);
     }
   }
@@ -235,14 +237,15 @@ export async function applyMigrations() {
       join pg_namespace n on n.oid = p.pronamespace
       where n.nspname = 'public'
         and p.proname in (
-          'execute_workflow_transition_tx',
-          'apply_turn_and_insights_tx',
+          'record_workflow_step_tx',
+          'transition_workflow_mode_tx',
           'tm_apply_turn_tx',
           'tm_reserve_turn_quota_for_plan',
           'tm_create_workspace',
           'tm_reserve_research_quota',
           'tm_create_invite',
-          'tm_accept_invite'
+          'tm_accept_invite',
+          'tm_invite'
         );
     `,
     'verify critical functions'
@@ -250,14 +253,15 @@ export async function applyMigrations() {
 
   const foundFunctions = new Set(Array.isArray(funcResult) ? funcResult.map((r: { proname: string }) => r.proname) : []);
   const requiredFunctions = [
-    'execute_workflow_transition_tx',
-    'apply_turn_and_insights_tx',
+    'record_workflow_step_tx',
+    'transition_workflow_mode_tx',
     'tm_apply_turn_tx',
     'tm_reserve_turn_quota_for_plan',
     'tm_create_workspace',
     'tm_reserve_research_quota',
     'tm_create_invite',
     'tm_accept_invite',
+    'tm_invite',
   ];
 
   const schemaFailures: string[] = [];

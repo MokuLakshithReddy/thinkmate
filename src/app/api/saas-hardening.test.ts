@@ -150,7 +150,7 @@ describe('SaaS Launch Hardening Verifications', () => {
     assert.ok(content.includes('20261013000000_concurrency_and_idempotency_hardening.sql'), 'Must include 20261013 concurrency');
     assert.ok(content.includes('20261015000000_enforce_workflow_decision_gate.sql'), 'Must include 20261015 gate');
     assert.ok(content.includes('015_atomic_limits.sql'), 'Must include 015 atomic limits');
-    assert.ok(content.includes('execute_workflow_transition_tx'), 'Must verify workflow transition function');
+    assert.ok(content.includes('record_workflow_step_tx'), 'Must verify workflow transition function');
     assert.ok(content.includes('chk_stage_mode_compatible'), 'Must verify stage-mode constraint');
   });
 
