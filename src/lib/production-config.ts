@@ -154,5 +154,21 @@ export function validateProductionConfig(env: Env = process.env): ProductionConf
     );
   }
 
+  // Subscription Billing (Razorpay)
+  const razorVars = [
+    'RAZORPAY_KEY_ID',
+    'RAZORPAY_KEY_SECRET',
+    'RAZORPAY_WEBHOOK_SECRET',
+    'RAZORPAY_PLAN_PRO',
+    'RAZORPAY_PLAN_TEAM',
+  ];
+  const presentRazor = razorVars.filter((k) => env[k]);
+  if (presentRazor.length > 0 && presentRazor.length < razorVars.length) {
+    const missing = razorVars.filter((k) => !env[k]);
+    for (const v of missing) {
+      error(v, `Billing partially configured. Missing: ${missing.join(', ')}`);
+    }
+  }
+
   return { ok: errors.length === 0, errors, warnings };
 }
