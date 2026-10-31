@@ -1,0 +1,5 @@
+fix: enforce team plan on direct tm_invite and add regression test
+
+- Harden tm_invite security definer RPC to verify that the inviter has an active team plan before inserting workspace members
+- Map plan_required exception to 403 team_plan_required in members route
+- Add unit test in saas-hardening.test.ts verifying team plan requirement on tm_invite

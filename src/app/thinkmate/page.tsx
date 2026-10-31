@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { createClient } from '@/lib/thinkmate/auth';
+import { checkConsent } from '@/lib/legal';
 import CreateWorkspaceForm from './CreateWorkspaceForm';
 import type { WorkspaceRow } from '@/lib/thinkmate/state';
 
@@ -17,6 +18,11 @@ export default async function ThinkMatePage() {
 
   if (!user) {
     redirect('/login?next=/thinkmate');
+  }
+
+  const hasConsent = await checkConsent(user.id);
+  if (!hasConsent) {
+    redirect('/consent?next=/thinkmate');
   }
 
   const { data: workspaces } = await sb
