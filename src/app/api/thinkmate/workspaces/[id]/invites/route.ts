@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { authed, unauthorized } from '@/lib/thinkmate/auth';
+import { checkRateLimitAsync, createRateLimitErrorResponse } from '@/lib/rate-limiter';
 
 const InviteBody = z.object({
   email: z.string().email(),
@@ -22,7 +23,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     .order('created_at', { ascending: false });
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 400 });
+    return NextResponse.json({ error: 'fetch_failed' }, { status: 500 });
   }
 
   return NextResponse.json({ invites: invites ?? [] });
@@ -33,64 +34,48 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const a = await authed();
   if (!a) return unauthorized();
 
+  const rl = await checkRateLimitAsync(`invites:create:${a.user.id}`, 10, 60 * 60 * 1000);
+  if (!rl.allowed) return createRateLimitErrorResponse(rl, 'Too many invitation requests.');
+
   const bodyParsed = InviteBody.safeParse(await req.json().catch(() => null));
   if (!bodyParsed.success) {
     return NextResponse.json({ error: 'invalid_input' }, { status: 400 });
   }
 
-  // 1. Verify workspace ownership
-  const { data: ws, error: wsError } = await a.sb
-    .from('tm_workspaces')
-    .select('id, owner_id, title')
-    .eq('id', id)
-    .single();
-
-  if (wsError || !ws) {
-    return NextResponse.json({ error: 'Workspace not found' }, { status: 404 });
-  }
-
-  if (ws.owner_id !== a.user.id) {
-    return NextResponse.json({ error: 'Only the workspace owner can invite members' }, { status: 403 });
-  }
-
-  // 2. Verify workspace owner has Team plan
-  const { data: sub } = await a.sb
-    .from('billing_subscriptions')
-    .select('plan, status, current_period_end')
-    .eq('user_id', a.user.id)
-    .maybeSingle();
-
-  const now = new Date();
-  const isTeam =
-    sub?.plan === 'team' &&
-    (['active', 'authenticated'].includes(sub.status) ||
-      (sub.status === 'cancelled' && sub.current_period_end && new Date(sub.current_period_end) > now));
-
-  if (!isTeam) {
-    return NextResponse.json(
-      {
-        error: 'team_plan_required',
-        message: 'Shared team workspaces and collaborator invitations require an active Team plan.',
-      },
-      { status: 403 }
-    );
-  }
-
-  // 3. Generate token & hash
+  // Generate token & hash
   const rawToken = crypto.randomBytes(32).toString('hex');
   const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
 
-  const { error: insertError } = await a.sb.from('tm_invites').insert({
-    workspace_id: id,
-    email: bodyParsed.data.email.toLowerCase(),
-    role: bodyParsed.data.role,
-    token_hash: tokenHash,
-    invited_by: a.user.id,
-    expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+  const { error: rpcError } = await a.sb.rpc('tm_create_invite', {
+    p_workspace_id: id,
+    p_email: bodyParsed.data.email.toLowerCase(),
+    p_role: bodyParsed.data.role,
+    p_token_hash: tokenHash,
   });
 
-  if (insertError) {
-    return NextResponse.json({ error: insertError.message }, { status: 400 });
+  if (rpcError) {
+    if (rpcError.message.includes('not_owner')) {
+      return NextResponse.json(
+        { error: 'not_owner', message: 'Only workspace owners can invite members.' },
+        { status: 403 }
+      );
+    }
+    if (rpcError.message.includes('plan_required')) {
+      return NextResponse.json(
+        { error: 'team_plan_required', message: 'An active Team plan is required to invite collaborators.' },
+        { status: 403 }
+      );
+    }
+    if (rpcError.message.includes('too_many_pending')) {
+      return NextResponse.json(
+        { error: 'too_many_pending', message: 'Limit of 20 pending invitations reached.' },
+        { status: 429 }
+      );
+    }
+    return NextResponse.json(
+      { error: 'invite_failed', message: 'Failed to create workspace invitation.' },
+      { status: 500 }
+    );
   }
 
   const origin =

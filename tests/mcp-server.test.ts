@@ -587,6 +587,9 @@ describe('Layer 5: MCP Server Security and Protocol Tests', () => {
 
       const mockSb = {
         rpc: async (fnName: string, params: any) => {
+          if (fnName === 'tm_reserve_turn_quota_for_plan' || fnName === 'tm_reserve_turn_quota') {
+            return { data: { allowed: true, used: 1, limit: 300 }, error: null };
+          }
           assert.strictEqual(fnName, 'tm_apply_turn_tx');
           rpcCallCount++;
           if (seenMsgIds.has(params.p_client_msg_id)) {

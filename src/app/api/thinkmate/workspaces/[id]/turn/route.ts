@@ -36,43 +36,52 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   }
 
   // 2. Atomic daily quota check & reservation (limit comes from user's active plan)
-  try {
-    const { data: reserveData, error: reserveErr } = await sb.rpc('tm_reserve_turn_quota_for_plan', {
-      p_workspace_id: id,
-    });
+  if (typeof sb?.rpc === 'function') {
+    try {
+      const { data: reserveData, error: reserveErr } = await sb.rpc('tm_reserve_turn_quota_for_plan', {
+        p_workspace_id: id,
+      });
 
-    if (reserveErr) {
-      console.error('[Turn Quota Reservation RPC Error]:', reserveErr);
-      // In production, treat unexpected reservation failure strictly as a service error (fail closed)
-      if (process.env.NODE_ENV === 'production') {
-        return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
-      }
-
-      // In non-production, fallback is ONLY permitted for positively identified missing RPC migrations
-      const isMissingRpc =
-        reserveErr.message?.includes('function public.tm_reserve_turn_quota') ||
-        reserveErr.message?.includes('Could not find') ||
-        reserveErr.code === 'PGRST202';
-
-      if (isMissingRpc) {
-        const dailyLimit = Number(process.env.TM_DAILY_TURNS ?? 300);
-        const { data: used, error: quotaErr } = await sb.rpc('tm_turns_last_day');
-        if (quotaErr) {
-          console.error('[Turn Quota Fallback Error]:', quotaErr);
-        } else if ((used ?? 0) >= dailyLimit) {
-          return NextResponse.json({ error: 'daily_cap' }, { status: 429 });
+      if (reserveErr) {
+        console.error('[Turn Quota Reservation RPC Error]:', reserveErr);
+        // In production, treat unexpected reservation failure strictly as a service error (fail closed)
+        if (process.env.NODE_ENV === 'production') {
+          return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
         }
+
+        // In non-production, fallback is ONLY permitted for positively identified missing RPC migrations
+        const isMissingRpc =
+          reserveErr.message?.includes('function public.tm_reserve_turn_quota') ||
+          reserveErr.message?.includes('Could not find') ||
+          reserveErr.code === 'PGRST202';
+
+        if (isMissingRpc) {
+          const dailyLimit = Number(process.env.TM_DAILY_TURNS ?? 300);
+          const { data: used, error: quotaErr } = await sb.rpc('tm_turns_last_day');
+          if (quotaErr) {
+            console.error('[Turn Quota Fallback Error]:', quotaErr);
+            return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
+          } else if ((used ?? 0) >= dailyLimit) {
+            return NextResponse.json({ error: 'daily_cap' }, { status: 429 });
+          }
+        } else {
+          return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
+        }
+      } else if (reserveData?.allowed === true) {
+        // Affirmative quota approval granted
+      } else if (reserveData?.allowed === false) {
+        return NextResponse.json({ error: 'daily_cap' }, { status: 429 });
       } else {
+        // Null, missing allowed, or malformed payload - fail closed
+        console.error('[Turn Quota Reservation Malformed Response]:', reserveData);
         return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
       }
-    } else if (reserveData && !reserveData.allowed) {
-      return NextResponse.json({ error: 'daily_cap' }, { status: 429 });
-    }
-  } catch (err) {
-    console.error('[Turn Quota Reservation Catch Error]:', err);
-    if (process.env.NODE_ENV === 'production') {
+    } catch (err) {
+      console.error('[Turn Quota Reservation Catch Error]:', err);
       return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
     }
+  } else if (process.env.NODE_ENV === 'production') {
+    return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
   }
 
   const rawJson = await req.json().catch(() => null);

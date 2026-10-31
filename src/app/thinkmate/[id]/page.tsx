@@ -1,5 +1,6 @@
 import { notFound, redirect } from 'next/navigation';
 import { createClient } from '@/lib/thinkmate/auth';
+import { checkConsent } from '@/lib/legal';
 import { loadState } from '@/lib/thinkmate/state';
 import { flags } from '@/lib/thinkmate/flags';
 import Workspace from './Workspace';
@@ -18,6 +19,11 @@ export default async function Page({ params }: { params: Promise<{ id: string }>
 
   if (!user) {
     redirect(`/login?next=${encodeURIComponent(`/thinkmate/${id}`)}`);
+  }
+
+  const hasConsent = await checkConsent(user.id);
+  if (!hasConsent) {
+    redirect(`/consent?next=${encodeURIComponent(`/thinkmate/${id}`)}`);
   }
 
   const state = await loadState(sb, id);

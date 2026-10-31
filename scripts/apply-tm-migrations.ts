@@ -2,6 +2,11 @@ import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 
 const REQUIRED_RLS_TABLES = [
+  'thinking_sessions',
+  'session_messages',
+  'session_insights',
+  'workflow_transitions',
+  'workflow_idempotency_keys',
   'tm_workspaces',
   'tm_items',
   'tm_frames',
@@ -111,6 +116,9 @@ export async function applyMigrations() {
   );
 
   const migrationFiles = [
+    '20261012000000_thinkmate_schema.sql',
+    '20261013000000_concurrency_and_idempotency_hardening.sql',
+    '20261015000000_enforce_workflow_decision_gate.sql',
     '001_mvp.sql',
     '002_full_domain.sql',
     '003_fts.sql',
@@ -123,6 +131,8 @@ export async function applyMigrations() {
     '011_plans_usage.sql',
     '012_lock_reserve.sql',
     '013_invites.sql',
+    '014_invites_harden.sql',
+    '015_atomic_limits.sql',
   ];
 
   // 3. Apply pending migrations sequentially
@@ -161,7 +171,20 @@ export async function applyMigrations() {
       join pg_namespace n on n.oid = c.relnamespace
       left join pg_policy p on p.polrelid = c.oid
       where n.nspname = 'public' and c.relkind = 'r'
-        and (c.relname like 'tm_%' or c.relname in ('user_consents', 'plan_limits', 'billing_subscriptions', 'billing_events'))
+        and (
+          c.relname like 'tm_%'
+          or c.relname in (
+            'user_consents',
+            'plan_limits',
+            'billing_subscriptions',
+            'billing_events',
+            'thinking_sessions',
+            'session_messages',
+            'session_insights',
+            'workflow_transitions',
+            'workflow_idempotency_keys'
+          )
+        )
       group by c.relname, c.relrowsecurity
       order by 1;
     `,
@@ -180,6 +203,8 @@ export async function applyMigrations() {
 
   const failures: string[] = [];
 
+  const SERVICE_ROLE_ONLY_TABLES = new Set(['billing_events']);
+
   for (const requiredTable of REQUIRED_RLS_TABLES) {
     const tableInfo = tableMap.get(requiredTable);
     if (!tableInfo) {
@@ -189,7 +214,7 @@ export async function applyMigrations() {
     if (!tableInfo.relrowsecurity) {
       failures.push(`Table "${requiredTable}" has Row Level Security (RLS) DISABLED.`);
     }
-    if (tableInfo.policy_count < 1) {
+    if (!SERVICE_ROLE_ONLY_TABLES.has(requiredTable) && tableInfo.policy_count < 1) {
       failures.push(`Table "${requiredTable}" has RLS enabled but 0 security policies defined.`);
     }
   }
@@ -201,6 +226,75 @@ export async function applyMigrations() {
   }
 
   console.log(`=== RLS Audit Gate PASSED: All ${REQUIRED_RLS_TABLES.length} required tables have RLS enabled and active policies. ===`);
+
+  // 5. Schema Functions & Constraints Verification Gate
+  console.log('[Schema Gate] Verifying critical functions and workflow constraints...');
+  const funcResult = await executeSql(
+    projectRef,
+    token,
+    `
+      select proname from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public'
+        and p.proname in (
+          'record_workflow_step_tx',
+          'transition_workflow_mode_tx',
+          'tm_apply_turn_tx',
+          'tm_reserve_turn_quota_for_plan',
+          'tm_create_workspace',
+          'tm_reserve_research_quota',
+          'tm_create_invite',
+          'tm_accept_invite',
+          'tm_invite'
+        );
+    `,
+    'verify critical functions'
+  );
+
+  const foundFunctions = new Set(Array.isArray(funcResult) ? funcResult.map((r: { proname: string }) => r.proname) : []);
+  const requiredFunctions = [
+    'record_workflow_step_tx',
+    'transition_workflow_mode_tx',
+    'tm_apply_turn_tx',
+    'tm_reserve_turn_quota_for_plan',
+    'tm_create_workspace',
+    'tm_reserve_research_quota',
+    'tm_create_invite',
+    'tm_accept_invite',
+    'tm_invite',
+  ];
+
+  const schemaFailures: string[] = [];
+  for (const fn of requiredFunctions) {
+    if (!foundFunctions.has(fn)) {
+      schemaFailures.push(`Required function "${fn}" is missing from public schema.`);
+    }
+  }
+
+  const constraintResult = await executeSql(
+    projectRef,
+    token,
+    `
+      select conname from pg_constraint c
+      join pg_namespace n on n.oid = c.connamespace
+      where n.nspname = 'public'
+        and c.conname in ('chk_stage_mode_compatible');
+    `,
+    'verify critical constraints'
+  );
+
+  const foundConstraints = new Set(Array.isArray(constraintResult) ? constraintResult.map((r: { conname: string }) => r.conname) : []);
+  if (!foundConstraints.has('chk_stage_mode_compatible')) {
+    schemaFailures.push('Required workflow constraint "chk_stage_mode_compatible" is missing from thinking_sessions.');
+  }
+
+  if (schemaFailures.length > 0) {
+    console.error('=== SCHEMA VERIFICATION GATE FAILED ===');
+    schemaFailures.forEach((f) => console.error(`  - ${f}`));
+    throw new Error(`Schema Verification Gate rejected deployment: ${schemaFailures.length} condition(s) failed.`);
+  }
+
+  console.log('=== Schema Verification Gate PASSED: All critical functions and constraints verified. ===');
   console.log('Database migrations completed successfully and safely.');
 }
 
