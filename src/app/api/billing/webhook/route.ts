@@ -4,7 +4,24 @@ import Razorpay from 'razorpay';
 import { adminClient } from '@/lib/supabase-admin';
 import { planFromRazorpayPlanId } from '@/lib/billing/razorpay';
 
+import { z } from 'zod';
+
 export const runtime = 'nodejs';
+
+const WebhookSchema = z.object({
+  event: z.string().min(1),
+  created_at: z.number().optional(),
+  payload: z.object({
+    subscription: z.object({
+      entity: z.object({
+        id: z.string().min(1),
+        status: z.string().min(1),
+        plan_id: z.string().optional(),
+        current_end: z.number().nullable().optional(),
+      }).passthrough().optional(),
+    }).passthrough().optional(),
+  }).passthrough().optional(),
+}).passthrough();
 
 export async function POST(req: Request) {
   const raw = await req.text();
@@ -22,7 +39,19 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'invalid_signature' }, { status: 400 });
   }
 
-  const event = JSON.parse(raw);
+  let rawJson: unknown;
+  try {
+    rawJson = JSON.parse(raw);
+  } catch {
+    return NextResponse.json({ error: 'bad_json' }, { status: 400 });
+  }
+
+  const parsed = WebhookSchema.safeParse(rawJson);
+  if (!parsed.success) {
+    return NextResponse.json({ error: 'invalid_payload' }, { status: 400 });
+  }
+  const event = parsed.data;
+
   const eventId =
     req.headers.get('x-razorpay-event-id') ??
     createHash('sha256').update(raw).digest('hex');
@@ -31,14 +60,23 @@ export async function POST(req: Request) {
 
   if (sub?.id) {
     const eventAt = new Date((event.created_at ?? Math.floor(Date.now() / 1000)) * 1000);
-    const { data: row } = await admin
+    const { data: row, error: lookupErr } = await admin
       .from('billing_subscriptions')
       .select('user_id, last_event_at')
       .eq('provider_subscription_id', sub.id)
       .maybeSingle();
 
+    if (lookupErr) {
+      console.error('[billing] lookup failed for subscription', sub.id, lookupErr);
+      return NextResponse.json({ error: 'lookup_failed' }, { status: 500 });
+    }
+
+    if (!row) {
+      console.error('[billing] event for unknown subscription', sub.id);
+    }
+
     if (row && (!row.last_event_at || new Date(row.last_event_at) <= eventAt)) {
-      await admin
+      const { error: upErr } = await admin
         .from('billing_subscriptions')
         .update({
           status: sub.status,
@@ -50,10 +88,15 @@ export async function POST(req: Request) {
           updated_at: new Date().toISOString(),
         })
         .eq('provider_subscription_id', sub.id);
+
+      if (upErr) {
+        console.error('[billing] update failed for subscription', sub.id, upErr);
+        return NextResponse.json({ error: 'update_failed' }, { status: 500 });
+      }
     }
   }
 
-  await admin.from('billing_events').upsert(
+  const { error: eventErr } = await admin.from('billing_events').upsert(
     {
       id: eventId,
       event_type: String(event.event),
@@ -65,6 +108,11 @@ export async function POST(req: Request) {
     },
     { onConflict: 'id', ignoreDuplicates: true }
   );
+
+  if (eventErr) {
+    console.error('[billing] event recording failed', eventId, eventErr);
+    return NextResponse.json({ error: 'event_record_failed' }, { status: 500 });
+  }
 
   return NextResponse.json({ ok: true });
 }

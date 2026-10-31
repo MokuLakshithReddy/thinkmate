@@ -77,6 +77,18 @@ describe('validateProductionConfig', () => {
     }
   });
 
+  test('rejects partially configured billing', () => {
+    const report = validateProductionConfig({
+      ...validEnv,
+      RAZORPAY_KEY_ID: 'rzp_test_123',
+      // missing secret, webhook secret, plans
+    });
+    assert.strictEqual(report.ok, false);
+    const errs = variables(report.errors);
+    assert.ok(errs.includes('RAZORPAY_KEY_SECRET'));
+    assert.ok(errs.includes('RAZORPAY_WEBHOOK_SECRET'));
+  });
+
   test('warns about degraded or ambiguous settings without failing', () => {
     const report = validateProductionConfig({ ...validEnv, VERCEL: undefined, RATE_LIMIT_FAIL_CLOSED: 'false' });
     assert.strictEqual(report.ok, true);

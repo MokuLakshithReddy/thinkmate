@@ -34,7 +34,7 @@ export default function PrivacyPage() {
           <p>We transmit necessary data to the following vetted third-party service providers solely to operate ThinkMate:</p>
           <ul className="list-disc list-inside space-y-1 text-slate-400">
             <li><strong>Supabase:</strong> Managed database storage, Row-Level Security enforcement, and user authentication.</li>
-            <li><strong>Google Cloud (Gemini API):</strong> Natural language model inference to process your reasoning turns and research requests. Prompts sent via enterprise API are governed by Google&apos;s API data commitments and are not used to train public foundational models.</li>
+            <li><strong>Google Cloud (Gemini API):</strong> Natural language model inference to process your reasoning turns and research requests. Your prompts are sent to Google&apos;s Gemini API to generate replies. Google&apos;s handling of API data is governed by Google&apos;s Gemini API terms for the plan we use.</li>
             <li><strong>Vercel:</strong> Edge hosting, serverless functions, and web serving infrastructure.</li>
             <li><strong>Upstash:</strong> Distributed in-memory Redis used exclusively for rate limiting and brute-force protection.</li>
             <li><strong>Razorpay:</strong> PCI-DSS compliant subscription billing and payment processing.</li>
@@ -44,7 +44,7 @@ export default function PrivacyPage() {
         <section className="space-y-3 text-sm text-slate-300 leading-relaxed">
           <h2 className="text-lg font-semibold text-white">3. Cookies and Ambient Authentication</h2>
           <p>
-            ThinkMate uses strictly necessary <code>HttpOnly</code>, <code>SameSite=Lax</code> session cookies (<code>thinkmate_auth_token</code>, <code>sb-access-token</code>) to authenticate API requests and defend against Cross-Site Scripting (XSS). We do not use third-party tracking or advertising cookies.
+            ThinkMate uses strictly necessary <code>HttpOnly</code>, <code>SameSite=Lax</code> session cookies (<code>thinkmate_auth_token</code>, <code>sb-access-token</code>) to authenticate API requests and limit token theft in the event of client-side vulnerabilities. We do not use third-party tracking or advertising cookies.
           </p>
         </section>
 

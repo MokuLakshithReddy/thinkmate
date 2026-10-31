@@ -1,57 +1,64 @@
-# ThinkMate — Personal AI Thinking Partner
+# ThinkMate — Personal AI Thinking Partner & SaaS Platform
 
-**ThinkMate** is a production-minded personal AI thinking partner inspired by the collaborative problem-understanding experience of co-thinking. It helps individuals think through difficult technical, strategic, and architectural dilemmas by clarifying goals, decomposing problems, exploring distinct alternatives, challenging unproven assumptions, and turning user-approved conclusions into concrete action plans.
+**ThinkMate** is a production-grade personal AI thinking partner and collaborative reasoning SaaS platform inspired by the problem-understanding experience of co-thinking. It helps individuals and teams navigate difficult technical, strategic, and architectural decisions by clarifying root problems, decomposing constraints, exploring distinct alternatives, challenging unproven assumptions, and turning user-approved conclusions into concrete action plans.
 
-Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforces an adaptive, stateful 5-mode cognitive workflow.
+Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforces an adaptive, stateful cognitive workflow with structured insight synthesis, plan-aware metered quotas, team collaboration, and defense-in-depth security.
 
 ---
 
 ## 🚀 Key Features
 
-1. **Stateful 5-Mode Thinking Workflow**:
-   - **Understand**: Clarifies the true goal, separates surface symptoms from root constraints, and asks targeted probing questions.
-   - **Explore**: Divergent ideation. Generates genuinely distinct architectural approaches with explicit principles, trade-offs, risks, and required dependencies.
-   - **Challenge**: Adversarial stress-testing. Audits assumptions, categorizing them as `[VERIFIED FACT]` vs `[UNPROVEN ASSUMPTION]`, modeling failure modes.
-   - **Decide**: Convergent evaluation. Weighs alternatives against explicit user criteria and requests explicit acceptance, rejection, or modification.
-   - **Act**: Execution planning. Formulates immediate next actions (24–48h), verifiable milestones, stop conditions, and definition of done.
+### 1. Multi-Surface User Experience
+- **Public SaaS Landing Page (`/`)**: Modern high-converting marketing shell featuring an interactive `HeroDemo` visualizing ThinkMate's guided reasoning cycle in real time.
+- **Classic Co-Thinker Workbench (`/app`)**: The full-fidelity 5-mode interactive workbench with real-time SSE streaming, options-matrix comparison, and decision export.
+- **Guided Workspaces (`/thinkmate`, `/thinkmate/[id]`)**: Problem-frame-centric workspaces with stage progression (8 stages), evidence linking, live usage meters, and collaborator invites.
+- **Self-Service Account & Billing (`/account`, `/pricing`)**: Transparent plan tiers, real-time usage meters, subscription management, and complete self-service account deletion.
+- **Team Collaboration (`/invite/[token]`)**: Secure token-based workspace invitations for Team-tier workspaces with 7-day expiration and atomic member enrollment.
 
-2. **Server-Side Guardrails & State Machine**:
-   - Prevents premature convergence (e.g., jumping from *Understand* directly to *Act* without exploring alternatives or securing user approval).
-   - Validates state transitions via server-side Zod schemas (`/api/workflow/transition`).
+### 2. Stateful Cognitive Workflow & Guardrails
+- **Understand**: Clarifies the true goal, separates surface symptoms from root constraints, and asks targeted probing questions.
+- **Explore**: Divergent ideation. Generates genuinely distinct architectural approaches with explicit principles, trade-offs, and required dependencies.
+- **Challenge**: Adversarial stress-testing. Audits assumptions, categorizing them as `[VERIFIED FACT]` vs `[UNPROVEN ASSUMPTION]`, modeling failure modes.
+- **Decide**: Convergent evaluation. Weighs alternatives against explicit user criteria and requests explicit acceptance, rejection, or modification.
+- **Act**: Execution planning. Formulates immediate next actions (24–48h), verifiable milestones, stop conditions, and definition of done.
+- **Workflow State Machine**: Server-side Zod validation prevents premature convergence (e.g. jumping from *Understand* directly to *Act* without exploring alternatives).
 
-3. **Official Google GenAI Integration**:
-   - Powered by `@google/genai` using Gemini 3.5 Flash Lite (default: `gemini-3.5-flash-lite`, with support for `gemini-3.8-flash` and `gemini-2.5-pro`).
-   - Server-side streaming via Server-Sent Events (SSE) with structured metadata event protocol (`/api/think/stream`) for headless or programmatic consumers, while `/api/cothink` serves step-by-step UI workflow sessions.
-   - Grounded reasoning: No fabricated citations, statistics, or imaginary benchmarks.
-   - Resilient offline simulator fallback for automated tests and offline development.
+### 3. Tiered Plans & Plan-Aware Metered Quotas
+- **Tier Entitlements**:
+  - **Free**: 30 turns/day, 3 workspaces, 3 research searches/day.
+  - **Pro**: 300 turns/day, 100 workspaces, 30 research searches/day, export & evidence tracking.
+  - **Team**: 1000 turns/day, 500 workspaces, 100 research searches/day, shared workspaces & collaborator invitations.
+- **Atomic User-Level Lock Serialization**: Quota reservation (`tm_reserve_turn_quota_for_plan`) acquires an explicit row lock (`FOR UPDATE` on `tm_user_quotas`) across all workspaces owned by the user, preventing concurrent requests across different workspaces from racing past the daily cap.
+- **Fail-Closed Quota Protection**: In production, reservation failures fail closed (`503 Service Unavailable`) rather than bypassing limits via legacy counts.
 
-4. **Structured Insight & Decision Panel**:
-   - Collapsible artifact panel categorizing Goals, Assumptions, Options, Decisions, and Action Items.
-   - Interactive options-matrix comparison view with side-by-side trade-off inspection.
-   - Decision synthesis generator exporting full markdown reports.
+### 4. Razorpay Subscription Billing
+- Fully integrated server-side Razorpay subscriptions (`/api/billing/checkout`).
+- Idempotent, signature-verified webhook handler (`/api/billing/webhook`) tracking events in `billing_events` and updating `billing_subscriptions`.
+- Out-of-order event protection and self-service cancellation with grace period retention (`/api/billing/cancel`).
 
-5. **Security & Row Level Security (RLS)**:
-   - Supabase PostgreSQL schema with RLS policies ensuring users only access their own sessions (`auth.uid() = user_id`).
-   - IDOR prevention and ownership verification on all session mutation endpoints.
-   - Model API keys and privileged credentials strictly contained on the server.
+### 5. Legal & Privacy Compliance (DPDP Act 2023)
+- Explicit user consent tracking table (`user_consents`, migration `010_consents.sql`).
+- Terms & Age Confirmation checkboxes enforced on signup.
+- Comprehensive, legally compliant [`/terms`](src/app/terms/page.tsx) and [`/privacy`](src/app/privacy/page.tsx) documentation detailing subprocessors, cookie policies, and data rights.
+- Self-service account deletion (`/api/account/delete`) verifying credentials, canceling active billing subscriptions, purging database rows via cascade, and clearing session cookies.
 
-6. **Parallel Pilot MVP (`/thinkmate`)**:
-   - An experimental parallel v0.1 pilot workspace under `/thinkmate` evaluating guided conversation, user-confirmed claim extraction, problem framing, and stage progression.
-   - Designed to validate user behavior without disrupting the existing root application.
-   - Advanced capabilities (evidence linking, automated research, vector retrieval, and teams) are feature-flagged via `src/lib/thinkmate/flags.ts` and default to `false`/`'off'` to maintain a lean MVP scope.
+### 6. Official Google GenAI SDK & MCP Server
+- Powered by `@google/genai` (Gemini 3.5 Flash Lite default, with support for `gemini-3.8-flash` and `gemini-2.5-pro`).
+- Official **Model Context Protocol (MCP)** server (`mcp-server/index.ts`) providing 6 tools (including `execute_thinking_turn`) allowing external agents (Cursor, Claude Desktop) to operate directly against ThinkMate workspaces.
 
 ---
 
 ## 🛠️ Tech Stack
 
 - **Framework**: Next.js 16 (App Router with Turbopack)
-- **Language**: TypeScript (Strict type checking across core application and domain modules)
-- **Styling**: Tailwind CSS v4 with dark workspace aesthetic (deep navy `#090D16`, subtle cyan accents, slate borders)
-- **AI SDK**: `@google/genai` (Official Google GenAI SDK, defaulting to Gemini 3.5 Flash Lite)
+- **Language**: TypeScript (Strict type checking with 0 compilation errors)
+- **Styling**: Tailwind CSS v4 with curated dark workspace palette (`#090D16` slate/navy) & Framer Motion
+- **AI SDK**: `@google/genai` (Official Google GenAI SDK)
 - **Database & Auth**: Supabase PostgreSQL with Row Level Security (RLS) & GoTrue Auth
-- **Rate Limiting**: Distributed sliding-window limiter via Upstash Redis with bounded in-memory fallback
-- **Validation**: Zod schema validation & strict JSON bounds (64KB payload limits)
-- **Testing**: Node.js Native Test Runner with `tsx` (220+ unit & protocol tests across 35 suites, mocked browser E2E, live staging database RLS/concurrency verification, and live MCP E2E suites)
+- **Billing**: Razorpay Node SDK
+- **Rate Limiting**: Distributed sliding-window limiter via Upstash Redis with fail-closed production semantics
+- **Validation**: Zod schema validation & strict JSON payload limits
+- **Testing**: Node.js Native Test Runner (`tsx --test`), Playwright E2E, and live PostgreSQL staging verification suites
 
 ---
 
@@ -60,71 +67,78 @@ Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforce
 ```
 thinkmate/
 ├── .github/
+│   ├── dependabot.yml                 # Automated weekly security updates
 │   └── workflows/
-│       ├── ci.yml                     # Automated Lint, Typecheck, Test & Build CI
-│       └── staging-verification.yml   # Live PostgreSQL concurrency & RLS verification
+│       ├── ci.yml                     # PR verification (Lint, Typecheck, Test, Build, Browser E2E)
+│       └── staging-verification.yml   # Live PostgreSQL concurrency, RPC, and RLS verification
+├── e2e/
+│   ├── local/                         # Local Playwright suites (auth, session, refresh-race, cloud-recovery)
+│   ├── staging/                       # Live staging suites (staging.spec.ts, thinkmate.spec.ts)
+│   └── support/                       # MockBackend, test helpers, and app fixture
+├── mcp-server/
+│   └── index.ts                       # Model Context Protocol (MCP) server & reasoning tools
 ├── scripts/
-│   └── verify-supabase-staging.ts     # Live staging verification suite (concurrency, rollback, RLS)
+│   ├── apply-tm-migrations.ts         # Fail-safe database migration runner with RLS audit gate
+│   ├── check-production-env.ts        # Production environment validator with Redis ping
+│   ├── verify-staging-rpc.ts          # Cross-workspace concurrency & user-level lock suite
+│   ├── verify-supabase-staging.ts     # Staging database verification suite
+│   └── verify-billing-webhook.ts      # Billing webhook verification script
 ├── src/
 │   ├── app/
-│   │   ├── api/
-│   │   │   ├── auth/
-│   │   │   │   ├── login/route.ts     # Secure credential authentication & HttpOnly cookie issuance
-│   │   │   │   ├── logout/route.ts    # Authoritative GoTrue server-side revocation & cookie purge
-│   │   │   │   ├── refresh/route.ts   # Distributed rate-limited token rotation & race recovery
-│   │   │   │   ├── session/route.ts   # Pure read-only session state inspection (GET)
-│   │   │   │   └── signup/route.ts    # Email confirmation verification
-│   │   │   ├── cothink/route.ts       # Authoritative server-side 8-step workflow engine
-│   │   │   ├── demo/cothink/route.ts  # Isolated reasoning simulator for guests
-│   │   │   ├── health/route.ts        # Dependency probing & readiness checks without secret leakage
-│   │   │   ├── insights/route.ts      # Decision, assumption, and tradeoff records
-│   │   │   ├── sessions/route.ts      # Cloud session CRUD with strict user ownership validation
-│   │   │   ├── think/stream/route.ts  # SSE streaming endpoint with mode & decision gates
-│   │   │   └── workflow/transition/route.ts # Mode transition state machine
-│   │   ├── globals.css                # Dark workspace theme tokens
-│   │   ├── layout.tsx                 # App shell layout
-│   │   └── page.tsx                   # Main workbench container with offline guest segregation
+│   │   ├── page.tsx                   # Public marketing SaaS landing page with HeroDemo
+│   │   ├── app/page.tsx               # Classic interactive cothinker workbench
+│   │   ├── login/page.tsx             # Standalone login page with ?next= redirect preservation
+│   │   ├── forgot-password/page.tsx   # Password reset request page
+│   │   ├── reset-password/page.tsx    # Password reset completion page
+│   │   ├── pricing/page.tsx           # SaaS subscription pricing tiers (Free, Pro, Team)
+│   │   ├── account/page.tsx           # User account & subscription dashboard
+│   │   ├── invite/[token]/page.tsx    # Workspace invitation acceptance page
+│   │   ├── terms/page.tsx             # Terms of Service (DPDP Act 2023 compliant)
+│   │   ├── privacy/page.tsx           # Privacy Policy & Subprocessor disclosures
+│   │   ├── robots.ts & sitemap.ts     # Dynamic search engine discovery metadata
+│   │   ├── thinkmate/                 # Workspaces list, CreateWorkspaceForm, UsageMeter
+│   │   │   └── [id]/                  # Workspace, ThinkingPanel, EvidencePanel, InviteModal
+│   │   └── api/
+│   │       ├── account/               # Usage inspection & account deletion endpoints
+│   │       ├── auth/                  # login, signup, refresh, logout, forgot, reset
+│   │       ├── billing/               # checkout, webhook, cancel
+│   │       ├── cothink/               # 8-step cognitive engine
+│   │       ├── thinkmate/             # workspaces, turns, frames, evidence, decisions, invites
+│   │       └── health/                # Liveness & readiness probes
 │   ├── components/
-│   │   ├── layout/                    # AppHeader, SessionSidebar, InsightPanel
-│   │   ├── thinking/                  # ModeSelector, ThinkingWorkspace, OptionsMatrix, SuggestedQuestions
-│   │   ├── modals/                    # NewSessionModal, SettingsModal, DecisionSummaryModal, AuthModal
-│   │   ├── home/                      # HomeDashboard
-│   │   └── ui/                        # Button, Card, Badge, Modal
-│   ├── services/
-│   │   ├── ai/                        # GeminiThinkingService, prompts, schemas
-│   │   ├── db/                        # SupabaseThinkingRepository, repository.ts, client
-│   │   └── workflow/                  # WorkflowStateMachine, stage derivation, guardrails
-│   ├── lib/                           # server-auth, rate-limiter, csrf, request-utils
-│   ├── config/                        # models.ts (supported Gemini models allowlist)
-│   ├── proxy.ts                       # CSRF defense middleware & Nonce-based CSP
-│   └── types/                         # Domain types, workflow stages, and mode definitions
+│   │   ├── marketing/                 # HeroDemo interactive card
+│   │   ├── modals/                    # AuthModal, SettingsModal, DecisionSummaryModal
+│   │   └── thinking/                  # ModeSelector, OptionsMatrix, Workspace
+│   └── lib/
+│       ├── billing/                   # Razorpay client & plan tier definitions
+│       ├── legal.ts                   # User consent recording helper
+│       ├── supabase-admin.ts          # Guarded service-role client (server only, whitelist tested)
+│       └── thinkmate/api-client.ts    # Client fetch wrapper with transparent session refresh
 └── supabase/
-    └── migrations/
-        ├── 20261012000000_thinkmate_schema.sql # Core schema, RLS policies, tables
-        └── 20261013000000_concurrency_and_idempotency_hardening.sql # OCC, FOR UPDATE RPCs
+    └── migrations/                    # Numbered migrations (001–013) with tracking table
 ```
 
 ---
 
 ## 🔒 Security Architecture
 
-1. **Defense-in-Depth Authentication**:
-   - Authentication tokens are maintained strictly in `HttpOnly`, `Secure`, `SameSite=Lax` cookies.
-   - Session inspection (`GET /api/auth/session`) is purely read-only and never sets cookies or rotates tokens.
-   - Token rotation is executed exclusively via dedicated, CSRF-validated `POST /api/auth/refresh`.
-   - In-memory token rotation grace windows are indexed via SHA-256 hashes (`hashTokenKey`), preventing plaintext tokens from resting in process memory.
-   - Logout invokes authoritative server-side session termination against GoTrue via admin APIs or authenticated HTTP endpoints before clearing client cookies.
-   - Refresh race recovery only reports success when it can issue the rotated cookies (recovered from the shared Redis rotation record). Otherwise it returns `401` (`REFRESH_ROTATION_UNRECOVERABLE` when the access token is still valid, without clearing cookies a concurrent response may have just rotated).
-   - Login, signup, and refresh rate limits use the distributed Upstash limiter (`checkRateLimitAsync`). In production, missing Redis configuration or a Redis outage rejects these requests with `503`; there is no per-instance fallback for auth.
+1. **Guarded Service-Role Isolation**:
+   - `src/lib/supabase-admin.ts` provides a guarded admin client strictly disabled from persisting browser sessions.
+   - Guarded by an automated test (`src/lib/supabase-admin.test.ts`) that scans all TypeScript files and fails if `supabase-admin` is imported outside the strict server whitelist.
 
-2. **CSRF Policy**:
-   - Cookie-authenticated mutations (`/api/*` POST/PUT/PATCH/DELETE) require `Sec-Fetch-Site` not `cross-site` and an `Origin` (or `Referer`) matching the request host or a configured origin (`APP_URL`, `NEXT_PUBLIC_APP_URL`, `TRUSTED_ORIGINS`, Vercel URLs). Enforced by `src/proxy.ts` and each mutating route.
-   - Credential-entry routes (`POST /api/auth/login`, `POST /api/auth/signup`) enforce the same origin check **even without cookies** (login CSRF), and require `Content-Type: application/json` (`415` otherwise), which HTML forms and no-preflight cross-origin fetches cannot send.
+2. **Defense-in-Depth Authentication**:
+   - Authentication tokens are maintained in `HttpOnly`, `Secure`, `SameSite=Lax` cookies.
+   - Session inspection (`GET /api/auth/session`) is strictly read-only. Token rotation occurs exclusively via `POST /api/auth/refresh`.
+   - Inflight promise deduplication in `apiFetch` transparently handles access token expiration without dropping active user turns.
+   - Login endpoints enforce per-email rate limiting (8 attempts per 15 minutes) and sanitized, non-leaking error responses.
 
-3. **Database Concurrency & PostgreSQL RLS**:
-   - Optimistic concurrency control (OCC) is enforced inside PostgreSQL via `record_workflow_step_tx` and `transition_workflow_mode_tx` with row-level `FOR UPDATE` locking.
-   - Idempotency is enforced by persistent composite keys `(user_id, session_id, client_request_id)` with request-payload SHA-256 validation.
-   - Strict Row Level Security policies guarantee multi-tenant isolation across `thinking_sessions`, `session_messages`, `session_insights`, `workflow_transitions`, and `workflow_idempotency_keys`.
+3. **HTTP Security Headers & CSRF**:
+   - `Strict-Transport-Security: max-age=31536000; includeSubDomains` enforced in production.
+   - Mutating routes verify `Origin` / `Referer` and reject cross-site `Sec-Fetch-Site` requests (`src/proxy.ts`), with explicit exemptions only for verified payment webhooks (`/api/billing/webhook`).
+
+4. **Database Row Level Security (RLS)**:
+   - All 14 database tables (`tm_workspaces`, `tm_items`, `tm_frames`, `tm_evidence`, `tm_decisions`, `tm_events`, `tm_members`, `tm_user_quotas`, `user_consents`, `plan_limits`, `billing_subscriptions`, `billing_events`, `tm_invites`) have Row Level Security enabled with explicit tenant policies.
+   - CI gating ensures no migration can disable RLS or omit active policies.
 
 ---
 
@@ -140,108 +154,93 @@ Copy `.env.example` to `.env.local`:
 ```bash
 cp .env.example .env.local
 ```
-Add your credentials:
+
+Populate the required credentials:
 ```env
+# AI Provider
 GEMINI_API_KEY=your_gemini_api_key_here
+
+# Supabase (Database & Auth)
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
 SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+
+# Distributed Rate Limiting (Upstash Redis)
+UPSTASH_REDIS_REST_URL=https://your-upstash-instance.upstash.io
+UPSTASH_REDIS_REST_TOKEN=your_upstash_rest_token
+
+# Session Encryption Key (min 32 bytes)
+SESSION_ENCRYPTION_KEY=your_random_32_byte_base64_string
+
+# Razorpay Billing (Test or Live)
+NEXT_PUBLIC_RAZORPAY_KEY_ID=rzp_test_xxxx
+RAZORPAY_KEY_ID=rzp_test_xxxx
+RAZORPAY_KEY_SECRET=your_razorpay_secret
+RAZORPAY_WEBHOOK_SECRET=your_webhook_secret
+RAZORPAY_PLAN_PRO=plan_pro_xxxx
+RAZORPAY_PLAN_TEAM=plan_team_xxxx
 ```
-That is enough for local development: without Redis the rate limiter uses per-process memory, and the token-rotation key is derived locally. Production needs more; see [Deployment Checklist](#-deployment-checklist).
 
 ### 3. Run Development Server
 ```bash
 npm run dev
 ```
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Open [http://localhost:3000](http://localhost:3000) for the SaaS landing page, or [http://localhost:3000/app](http://localhost:3000/app) for the workbench.
 
-### 4. Run Automated Test Suites
+---
 
-ThinkMate separates test verification into distinct, isolated tiers to guarantee fast local development, deterministic CI pipelines, and verifiable staging assertions:
+## 🧪 Testing & Verification Suites
+
+ThinkMate features a comprehensive 5-tier test architecture:
 
 ```bash
-# Tier 1: Fast In-Memory Unit & Protocol Tests (220+ tests, 35 suites, 0 network dependencies)
+# Tier 1: Unit, Security & Protocol Tests (234 tests across 37 suites, zero network dependencies)
 npm test
 
-# Tier 2: Static Analysis & Quality Gates
-npm run lint          # ESLint (0 errors, 0 warnings)
-npx tsc --noEmit      # Strict TypeScript typechecking
-npm run build         # Next.js Turbopack production build
-npm run audit:ci      # Full dependency advisory gate
+# Tier 2: Static Code Quality & Build Verification
+npm run lint             # ESLint (0 errors, 0 warnings enforced)
+npx tsc --noEmit         # Strict TypeScript type check
+npm run build            # Next.js Turbopack production compilation
+npm run audit:ci         # Dependency advisory gate
 
-# Tier 3: Browser E2E Tests (Mocked backends, isolated headless browser)
-npx playwright install chromium   # First run only
-npm run test:e2e
+# Tier 3: Browser E2E Tests (Playwright with mocked Supabase/Gemini)
+npx playwright install chromium    # First time setup
+npm run test:e2e                   # Runs all local browser E2E specs
 
-# Tier 4: Genuine Live Staging Database & RLS Verification (Requires staging Supabase credentials)
-npx tsx scripts/verify-staging-rpc.ts        # Atomic RPCs, idempotency replay, and tenant isolation
-npx tsx scripts/rls-test.ts                  # Multi-tenant cross-user Row Level Security isolation
-npx tsx scripts/verify-supabase-staging.ts   # Concurrency row-locking, duplicate hashes, atomic rollback
+# Tier 4: Live Staging Database & RLS Concurrency Verification
+npx tsx scripts/verify-staging-rpc.ts        # Quota serialization under concurrency & user-level locks
+npx tsx scripts/verify-supabase-staging.ts   # Staging OCC, duplicate hashes & atomic rollback
+npx tsx scripts/apply-tm-migrations.ts       # Fail-safe migration runner & 14-table RLS gate
 
-# Tier 5: Real External MCP Client E2E Verification
-npx tsx scripts/verify-live-mcp-e2e.ts       # Genuine live Gemini AI reasoning & staging DB persistence
-npx tsx scripts/verify-mock-mcp-e2e.ts       # Deterministic mocked runner for offline MCP protocol verification
+# Tier 5: External Model Context Protocol (MCP) Verification
+npm run verify:mcp:mock  # Mocked MCP protocol assertions
+npm run verify:mcp:live  # Live MCP client turn execution against Gemini & staging DB
 ```
 
 ---
 
-## 🚢 Deployment Checklist
+## 🤖 Model Context Protocol (MCP) Server
 
-Production authentication **fails closed**: if Upstash Redis is missing or unreachable, `/api/auth/login`, `/api/auth/signup` and `/api/auth/refresh` return `503` rather than falling back to per-instance limits. Every variable below is documented in [`.env.example`](.env.example).
+ThinkMate includes an official Model Context Protocol (MCP) server under [`mcp-server/index.ts`](mcp-server/index.ts) allowing external AI clients (Claude Desktop, Cursor) to manage workspaces and run reasoning turns.
 
-1. **Supabase**: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`. *(Note on migration naming: numbered migrations `001`–`007` are tracked via `_tm_schema_migrations` and applied via `scripts/apply-migration-direct.ts`, while timestamped files exist for standard Supabase CLI migrations. Run `npm run verify:staging` to verify active database schema).* Do not set any `STAGING_SUPABASE_*` variable in production.
-2. **Gemini**: `GEMINI_API_KEY` (or `GOOGLE_API_KEY`).
-3. **Upstash Redis**: `UPSTASH_REDIS_REST_URL` (https) and `UPSTASH_REDIS_REST_TOKEN`. Shared by every instance for rate limits and refresh-token rotation recovery.
-4. **Token-rotation key**: `SESSION_ENCRYPTION_KEY`, a dedicated secret of at least 32 bytes (`openssl rand -base64 48`), identical on every instance.
-5. **Canonical URL and origins**: `APP_URL` / `NEXT_PUBLIC_APP_URL` set to the public `https://` origin. Add any other domains that legitimately send mutations to `TRUSTED_ORIGINS` (comma-separated, no wildcards).
-6. **Client IP / proxies**: on Vercel the defaults are correct. Behind Cloudflare set `TRUSTED_PROXY_PROVIDER=cloudflare`; behind nginx set `TRUSTED_PROXY_PROVIDER=nginx` (or `TRUSTED_PROXY_HEADER=x-real-ip`); with extra proxy hops set `TRUSTED_PROXY_DEPTH`.
-7. **Validate the configuration** with the production values before releasing. This exits non-zero on any error, never prints values, and `--ping` checks the Redis credentials:
-   ```bash
-   npx tsx --env-file=.env.production.local scripts/check-production-env.ts --ping
-   # or, with variables already exported: npm run check:env -- --ping
-   ```
-8. **After deploying**, point the platform's readiness probe at `GET /api/health?readiness=true`. It returns `503` unless the database, AI provider and auth infrastructure (Redis reachable and `SESSION_ENCRYPTION_KEY` present) are all ready. Only statuses are reported, never URLs or credentials. `GET /api/health` without the parameter is the liveness probe and stays `200` while the process is up.
-9. **Run the staging E2E suite** (`Staging E2E` workflow, or `npm run test:e2e` with `E2E_BASE_URL` and a confirmed test account).
-
----
-
-## 🤖 ThinkMate Model Context Protocol (MCP) Server
-
-ThinkMate includes an official Model Context Protocol (MCP) server under [`mcp-server/index.ts`](mcp-server/index.ts) that allows external AI assistants (such as Claude Desktop, Cursor, or remote agentic clients) to interface directly with ThinkMate workspaces and invoke ThinkMate's guided reasoning workflows.
-
-### Available MCP Tools
+### Available Tools
 
 | Tool | Purpose |
 |---|---|
 | `list_thinking_workspaces` | Lists accessible ThinkMate workspaces for the authenticated user. |
-| `create_thinking_workspace` | Provisions a new workspace for a problem with owner isolation. |
+| `create_thinking_workspace` | Provisions a new workspace for a problem frame with tenant isolation. |
 | `get_thinking_context` | Retrieves the confirmed problem frame, verified claims, and active items. |
-| `propose_thinking_update` | Proposes new items or problem frame updates for user review (with atomic error checks). |
+| `propose_thinking_update` | Proposes new items or problem frame updates for user review with atomic error checks. |
 | `list_open_questions` | Returns unverified hypotheses, counterarguments, and unresolved questions. |
-| `execute_thinking_turn` | **Direct AI Reasoning**: Invokes ThinkMate's full guided problem-solving workflow (root-cause analysis, solution exploration, trade-off evaluation, assumption testing, action planning) and persists turn outcomes. |
+| `execute_thinking_turn` | **Direct AI Reasoning**: Runs ThinkMate's guided problem-solving workflow and records outputs atomically under plan quotas. |
 
-### Running the MCP Server
-
+### Running the Server
 ```bash
-# Start MCP server (port 3333 by default, or set PORT)
-npm run start:mcp
-
-# Development mode with hot reload
-npm run dev:mcp
+npm run start:mcp        # Port 3333 by default
+npm run dev:mcp          # Watch mode with hot reloading
 ```
 
-### Environment Configuration & Origin Security
-
-- **Authentication**: All tool requests require an `Authorization: Bearer <user_access_token>` header verified against Supabase GoTrue Auth.
-- **Origin Policy**:
-  - Desktop clients (Claude Desktop, Cursor, CLI) do not transmit an `Origin` header and are permitted once authenticated.
-  - In production (`NODE_ENV=production`), browser requests with an `Origin` header **fail closed (HTTP 403)** unless the origin is explicitly registered in `ALLOWED_ORIGINS` (comma-separated).
-  - In development, `http://localhost:*` and `http://127.0.0.1:*` origins are allowed.
-
-### Connecting External AI Clients
-
-#### Claude Desktop Configuration (`claude_desktop_config.json`)
-
+### Claude Desktop Integration (`claude_desktop_config.json`)
 ```json
 {
   "mcpServers": {
@@ -254,37 +253,22 @@ npm run dev:mcp
   }
 }
 ```
-
-#### Cursor Configuration (`.cursor/mcp.json`)
-
-```json
-{
-  "mcpServers": {
-    "thinkmate": {
-      "url": "http://localhost:3333/mcp",
-      "headers": {
-        "Authorization": "Bearer YOUR_SUPABASE_ACCESS_TOKEN"
-      }
-    }
-  }
-}
-```
-
-> **Note on Token Expiration**: Supabase user access tokens (JWTs) have a default lifetime of 1 hour (3600s). For prolonged MCP client usage, refresh the access token via Supabase Auth or acquire a dedicated service token for headless automation.
 
 ---
 
-## 🔒 Security & Privacy
+## 🚢 Production Deployment
 
-- **Server-Side AI Proxy**: API keys are never exposed to the client bundle.
-- **Row Level Security**: Database rows are protected with PostgreSQL RLS policies in `supabase/migrations/20261012000000_thinkmate_schema.sql`.
-- **Ownership Verification**: Endpoints enforce user ownership to block insecure direct-object references (IDOR).
-- **Data Erasure**: Built-in "Wipe All Data" action in Settings allows users to clear all sessions and insights immediately.
-- **Dependency Audit**: CI runs two gates. `npm audit --omit=dev --audit-level=high` fails on any high-severity production advisory. `npm run audit:ci` (`scripts/audit-gate.ts`) audits the full tree, dev dependencies included, and fails on any high or critical advisory not listed in [`audit-allowlist.json`](audit-allowlist.json). Each allowlist entry is pinned to an exact advisory ID and package and has a `reviewBy` date; the gate fails once that date passes. The only accepted entry is `braces@3.0.3` ([GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm), stack-exhaustion DoS through deeply nested brace patterns), reached via `eslint-config-next` → `@next/eslint-plugin-next` → `fast-glob` → `micromatch` → `braces`. npm reports this one advisory as 5 high findings, one for each package in the chain. No patched `braces` release exists, and npm's suggested fix (downgrading `eslint-config-next` to 14.x) is incompatible with Next.js 16. It only runs inside ESLint on repository-controlled glob patterns, never user input, and is not in the production bundle.
+1. **Environment Audit**: Validate production configuration with `--ping` to verify Redis connectivity without printing secrets:
+   ```bash
+   npm run check:env -- --ping
+   ```
+2. **Database Migrations**: Numbered migrations `001` through `013` are managed by `scripts/apply-tm-migrations.ts`. To apply to a target database, provide `SUPABASE_PROJECT_REF` and `SUPABASE_ACCESS_TOKEN`.
+3. **Health & Readiness Checks**:
+   - `GET /api/health` — Basic liveness probe (200 OK while process is up).
+   - `GET /api/health?readiness=true` — Deep readiness probe verifying database connectivity, AI service availability, and Redis auth infrastructure (returns 503 if any dependency is degraded).
 
 ---
 
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).
-
