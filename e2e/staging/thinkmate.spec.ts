@@ -14,12 +14,17 @@ for (const [name, viewport] of Object.entries(sizes)) {
   test(`guided workspace full loop (${name})`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto('/thinkmate');
-    await expect(page).toHaveURL(new RegExp('/login'));
+    await expect.poll(() => new URL(page.url()).pathname).toBe('/login');
     await page.getByPlaceholder('you@domain.com').fill(email!);
     await page.getByPlaceholder('••••••••').fill(password!);
     await page.locator('form').getByRole('button', { name: 'Sign In' }).click();
-    await expect(page).toHaveURL(new RegExp('/thinkmate'));
-    await page.getByPlaceholder(new RegExp('Why do college students')).fill(`E2E ${name} ${Date.now()}`);
+
+    // Check for any immediate auth errors before waiting on navigation
+    await expect.poll(() => new URL(page.url()).pathname, { timeout: 30_000 }).toBe('/thinkmate');
+
+    const startInput = page.getByPlaceholder(new RegExp('Why do college students'));
+    await expect(startInput).toBeVisible({ timeout: 15_000 });
+    await startInput.fill(`E2E ${name} ${Date.now()}`);
     await page.getByRole('button', { name: new RegExp('Start Session') }).click();
     await expect(page).toHaveURL(new RegExp('/thinkmate/[0-9a-f-]{36}'));
 

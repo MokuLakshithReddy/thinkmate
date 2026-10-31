@@ -13,10 +13,7 @@ values
   ('free', 30, 3, 3),
   ('pro', 300, 30, 100),
   ('team', 1000, 100, 500)
-on conflict (plan) do update set
-  turns_per_day = excluded.turns_per_day,
-  research_per_day = excluded.research_per_day,
-  workspaces_max = excluded.workspaces_max;
+on conflict (plan) do nothing;
 
 alter table public.plan_limits enable row level security;
 
