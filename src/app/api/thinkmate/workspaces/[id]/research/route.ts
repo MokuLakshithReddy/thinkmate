@@ -29,9 +29,32 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   if (!ws) return NextResponse.json({ error: 'not_found' }, { status: 404 });
 
-  const { data: usage } = await a.sb.rpc('tm_my_usage');
-  if (usage && (usage?.research_used ?? 0) >= (usage?.research_limit ?? 3)) {
-    return NextResponse.json({ error: 'plan_limit', upgrade: true }, { status: 429 });
+  const { data: resData, error: resErr } = await a.sb.rpc('tm_reserve_research_quota', {
+    p_workspace_id: id,
+  });
+
+  if (!resErr && resData) {
+    if (resData.allowed === true) {
+      // Affirmative quota approval granted
+    } else if (resData.allowed === false) {
+      return NextResponse.json({ error: 'plan_limit', upgrade: true }, { status: 429 });
+    } else {
+      console.error('[Research Quota Malformed Response]:', resData);
+      return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
+    }
+  } else if (resErr && (resErr.code === 'PGRST202' || resErr.message?.includes('Could not find'))) {
+    // Non-production fallback
+    const { data: usage, error: usageErr } = await a.sb.rpc('tm_my_usage');
+    if (usageErr || !usage || typeof usage.research_limit !== 'number') {
+      console.error('[Research Quota Fallback Error]:', usageErr);
+      return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
+    }
+    if ((usage.research_used ?? 0) >= usage.research_limit) {
+      return NextResponse.json({ error: 'plan_limit', upgrade: true }, { status: 429 });
+    }
+  } else {
+    console.error('[Research Quota RPC Error]:', resErr);
+    return NextResponse.json({ error: 'quota_service_unavailable' }, { status: 503 });
   }
 
   const r = await research(b.data.question, ws.problem_frame ?? 'not framed yet').catch(() => null);

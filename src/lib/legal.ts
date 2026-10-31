@@ -21,3 +21,26 @@ export async function recordConsent(userId: string) {
     console.warn('[Legal] Consent recording skipped or admin client not configured:', err);
   }
 }
+
+export async function checkConsent(userId: string): Promise<boolean> {
+  try {
+    const { data, error } = await adminClient()
+      .from('user_consents')
+      .select('document, version')
+      .eq('user_id', userId);
+
+    if (error || !data) return false;
+
+    const hasTerms = data.some(
+      (r) => r.document === 'terms' && r.version === LEGAL_VERSION.terms
+    );
+    const hasPrivacy = data.some(
+      (r) => r.document === 'privacy' && r.version === LEGAL_VERSION.privacy
+    );
+
+    return hasTerms && hasPrivacy;
+  } catch {
+    return false;
+  }
+}
+

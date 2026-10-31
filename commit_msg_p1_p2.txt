@@ -1,0 +1,9 @@
+fix: harden quota fail-closed, atomic workspace/research limits, account deletion, and E2E test
+
+- P1 Quota Fail-Closed: accept turn reservations only when allowed === true, reject allowed: false with 429, and treat malformed/missing responses as 503 across web turn and MCP server
+- P1 Account Deletion: confirm provider subscription cancellation before deletion, update database status to cancelled, and fail closed on any lookup, client, or provider outage
+- P1 Invite Token Security: return generic invalid_or_expired on email mismatch to avoid leaking token existence across tenant boundaries
+- P2 Atomic Limits: add 015_atomic_limits.sql implementing tm_create_workspace and tm_reserve_research_quota under advisory transaction lock, eliminating check-then-insert race conditions
+- P2 Migration Runner: include timestamped migrations (20261012, 20261013, 20261015) and 015, add classic tables to REQUIRED_RLS_TABLES, and add function & constraint verification gate
+- Staging E2E Test: assert on exact URL pathname using expect.poll to prevent false positive match on /login?next=/thinkmate
+- Billing Webhook: add Zod schema validation for webhook payload shape and reject malformed payloads with 400

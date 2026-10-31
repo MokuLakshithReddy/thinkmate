@@ -1,9 +1,13 @@
-fix(core): mandatory live staging tests, safety guard, mcp sanitization & atomic quota reservation
+fix: harden SaaS launch blockers across billing, invites, auth, and consent
 
-- Enforce mandatory live verification in staging-verification.yml with pre-flight secret validation
-- Add explicit staging ref safety checks and blacklist production project IDs in verify-live-mcp-e2e.ts
-- Fully sanitize MCP error handling with stable error codes and correlation IDs across all tools and routes
-- Add shared authenticated-user distributed rate limiting to /mcp (60 req/min) and execute_thinking_turn (20 req/min)
-- Add migration 008_atomic_quota_reservation.sql with tm_reserve_turn_quota under row lock to eliminate daily quota race condition
-- Update src/config/models.ts comments to document gemini-3.5-flash-lite as active default model
-- Add unit tests verifying atomic quota reservation concurrency and sanitized error responses
+- Fix 1: Billing webhook: validate JSON parse, handle lookup error with 500, warn on unknown subscription, and return 500 on update/event errors so Razorpay retries
+- Fix 2: Billing checkout: rate limit checkout requests, check lookup errors (503), prevent concurrent subscriptions (409), and reuse active created checkout links
+- Fix 3: Account deletion: cancel subscriptions across all live statuses (authenticated, active, pending, halted, paused), fail closed on error (502/503), and rate limit attempts
+- Fix 4: Production config: add Razorpay variables to .env.example and enforce full billing configuration if any Razorpay variable is set
+- Fix 5: Team invites hardening: drop client direct insert policy on tm_invites, introduce tm_create_invite security definer RPC with team plan verification, add email mismatch guard to tm_accept_invite, and rate limit endpoints
+- Fix 6: User consent enforcement: add checkConsent, /api/auth/consent endpoints, and /consent interstitial page for accepting Terms and Privacy updates
+- Fix 7: Privacy page: align Gemini API terms and data commitments, clarify HttpOnly token theft mitigation, and configure grievance contact
+- Fix 8: Open redirect prevention: disallow backslash characters in login next parameter
+- Fix 9: Silent session refresh: automatically attempt background session refresh on /login
+- Fix 10: Migration 011: use ON CONFLICT DO NOTHING for plan limits seed to preserve tuned values
+- Add saas-hardening.test.ts unit test suite covering all 10 fixes
