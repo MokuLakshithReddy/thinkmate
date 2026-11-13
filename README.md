@@ -6,6 +6,36 @@ Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforce
 
 ---
 
+## Visual workflow: a thinking partner, not an answer generator
+
+```mermaid
+flowchart TD
+    A["User frames a problem"] --> B["Understand: clarify goal and constraints"]
+    B --> C["Explore: generate distinct options"]
+    C --> D["Challenge: test assumptions and failure modes"]
+    D --> E["Decide: compare against user criteria"]
+    E --> F{"User accepts a direction?"}
+    F -->|No| C
+    F -->|Yes| G["Act: create a bounded execution plan"]
+    G --> H["Evidence, workspace history and reviewable decisions"]
+```
+
+### What makes the workflow different
+
+| Stage | Visitor should expect |
+|---|---|
+| Understand | Separate the actual objective from symptoms and missing context |
+| Explore | Compare alternatives with explicit trade-offs |
+| Challenge | Label verified facts separately from unproven assumptions |
+| Decide | Let the user accept, reject, or modify the direction |
+| Act | Produce concrete next steps and a definition of done |
+
+The repository includes workflow-state validation, authorization and isolation tests, quota/billing hardening, and evidence/research workspace flows. See the [workflow implementation](src/services/workflow/state-machine.ts), [CI workflow](.github/workflows/ci.yml), and [production-readiness tests](tests/production-readiness.test.ts). No independently reproduced reasoning-quality benchmark is published yet; the table above describes the product workflow, not a measured accuracy claim.
+
+**Why it matters:** slows down premature answers and gives users a structured way to inspect trade-offs before committing to a decision.
+
+---
+
 ## 🚀 Key Features
 
 ### 1. Multi-Surface User Experience
