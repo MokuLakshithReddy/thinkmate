@@ -6,6 +6,37 @@ Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforce
 
 ---
 
+## At a glance
+
+![GitHub stars](https://img.shields.io/github/stars/MokuLakshithReddy/thinkmate?style=flat-square&label=stars)
+![GitHub forks](https://img.shields.io/github/forks/MokuLakshithReddy/thinkmate?style=flat-square&label=forks)
+![Open issues](https://img.shields.io/github/issues/MokuLakshithReddy/thinkmate?style=flat-square&label=open%20issues)
+![Last commit](https://img.shields.io/github/last-commit/MokuLakshithReddy/thinkmate?style=flat-square)
+
+**Why it matters:** Important decisions are rarely solved by a single confident answer. ThinkMate makes the reasoning process inspectable: it frames the problem, compares alternatives, challenges assumptions, asks the user to choose, and only then turns an accepted decision into next steps.
+
+## The decision workflow
+
+```mermaid
+flowchart TD
+    U["User problem and constraints"] --> A["Understand"]
+    A --> B["Explore distinct options"]
+    B --> C["Challenge assumptions and failure modes"]
+    C --> D["Decide against user criteria"]
+    D --> E{"User accepts a direction?"}
+    E -->|"No: revise"| B
+    E -->|"Yes"| F["Act: milestones and stop conditions"]
+    A -.-> G["Server-side workflow state validation"]
+    B -.-> G
+    C -.-> G
+    D -.-> G
+    F -.-> G
+    G --> H[("Workspace state and evidence")]
+```
+
+**Proof surface:** The verification section below documents unit/security/protocol tests, static checks, browser tests, and staging database/RLS checks. See [Testing & Verification Suites](#-testing--verification-suites).
+
+---
 ## 🚀 Key Features
 
 ### 1. Multi-Surface User Experience
