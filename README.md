@@ -1,5 +1,8 @@
 # ThinkMate — Personal AI Thinking Partner & SaaS Platform
 
+[![Stars](https://img.shields.io/github/stars/MokuLakshithReddy/thinkmate?style=flat-square)](https://github.com/MokuLakshithReddy/thinkmate/stargazers) [![Forks](https://img.shields.io/github/forks/MokuLakshithReddy/thinkmate?style=flat-square)](https://github.com/MokuLakshithReddy/thinkmate/forks) [![Open Issues](https://img.shields.io/github/issues/MokuLakshithReddy/thinkmate?style=flat-square)](https://github.com/MokuLakshithReddy/thinkmate/issues) [![Last Commit](https://img.shields.io/github/last-commit/MokuLakshithReddy/thinkmate?style=flat-square)](https://github.com/MokuLakshithReddy/thinkmate/commits/main)
+
+
 **ThinkMate** is a production-grade personal AI thinking partner and collaborative reasoning SaaS platform inspired by the problem-understanding experience of co-thinking. It helps individuals and teams navigate difficult technical, strategic, and architectural decisions by clarifying root problems, decomposing constraints, exploring distinct alternatives, challenging unproven assumptions, and turning user-approved conclusions into concrete action plans.
 
 Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforces an adaptive, stateful cognitive workflow with structured insight synthesis, plan-aware metered quotas, team collaboration, and defense-in-depth security.
