@@ -13,14 +13,18 @@ Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforce
 
 ```mermaid
 flowchart TD
-    A["User frames a problem"] --> B["Understand: clarify goal and constraints"]
+    A["User frames a problem and constraints"] --> B["Understand: clarify goal and constraints"]
     B --> C["Explore: generate distinct options"]
     C --> D["Challenge: test assumptions and failure modes"]
     D --> E["Decide: compare against user criteria"]
     E --> F{"User accepts a direction?"}
-    F -->|No| C
+    F -->|No: revise| C
     F -->|Yes| G["Act: create a bounded execution plan"]
-    G --> H["Evidence, workspace history and reviewable decisions"]
+    B -.-> S["Server-side workflow state validation"]
+    C -.-> S
+    D -.-> S
+    G -.-> S
+    S --> H[("Evidence, workspace history and reviewable decisions")]
 ```
 
 ### What makes the workflow different
@@ -35,10 +39,11 @@ flowchart TD
 
 The repository includes workflow-state validation, authorization and isolation tests, quota/billing hardening, and evidence/research workspace flows. See the [workflow implementation](src/services/workflow/state-machine.ts), [CI workflow](.github/workflows/ci.yml), and [production-readiness tests](tests/production-readiness.test.ts). No independently reproduced reasoning-quality benchmark is published yet; the table above describes the product workflow, not a measured accuracy claim.
 
-**Why it matters:** slows down premature answers and gives users a structured way to inspect trade-offs before committing to a decision.
+**Why it matters:** Important decisions are rarely solved by a single confident answer. ThinkMate slows down premature answers and gives users a structured way to inspect trade-offs, assumptions, and validation gates before committing to an execution plan.
+
+**Proof surface:** The verification section below documents unit/security/protocol tests, static checks, browser tests, and staging database/RLS checks. See [Testing & Verification Suites](#-testing--verification-suites).
 
 ---
-
 ## 🚀 Key Features
 
 ### 1. Multi-Surface User Experience
