@@ -49,5 +49,8 @@
     "tailwindcss": "^4",
     "tsx": "^4.23.15",
     "typescript": "^5"
+  },
+  "overrides": {
+    "follow-redirects": "^1.16.3"
   }
 }

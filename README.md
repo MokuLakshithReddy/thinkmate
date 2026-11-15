@@ -1,8 +1,41 @@
 # ThinkMate — Personal AI Thinking Partner & SaaS Platform
 
+[![Stars](https://img.shields.io/github/stars/MokuLakshithReddy/thinkmate?style=flat-square)](https://github.com/MokuLakshithReddy/thinkmate/stargazers) [![Forks](https://img.shields.io/github/forks/MokuLakshithReddy/thinkmate?style=flat-square)](https://github.com/MokuLakshithReddy/thinkmate/forks) [![Open Issues](https://img.shields.io/github/issues/MokuLakshithReddy/thinkmate?style=flat-square)](https://github.com/MokuLakshithReddy/thinkmate/issues) [![Last Commit](https://img.shields.io/github/last-commit/MokuLakshithReddy/thinkmate?style=flat-square)](https://github.com/MokuLakshithReddy/thinkmate/commits/main)
+
+
 **ThinkMate** is a production-grade personal AI thinking partner and collaborative reasoning SaaS platform inspired by the problem-understanding experience of co-thinking. It helps individuals and teams navigate difficult technical, strategic, and architectural decisions by clarifying root problems, decomposing constraints, exploring distinct alternatives, challenging unproven assumptions, and turning user-approved conclusions into concrete action plans.
 
 Unlike generic chatbots that rush to generate shallow answers, ThinkMate enforces an adaptive, stateful cognitive workflow with structured insight synthesis, plan-aware metered quotas, team collaboration, and defense-in-depth security.
+
+---
+
+## Visual workflow: a thinking partner, not an answer generator
+
+```mermaid
+flowchart TD
+    A["User frames a problem"] --> B["Understand: clarify goal and constraints"]
+    B --> C["Explore: generate distinct options"]
+    C --> D["Challenge: test assumptions and failure modes"]
+    D --> E["Decide: compare against user criteria"]
+    E --> F{"User accepts a direction?"}
+    F -->|No| C
+    F -->|Yes| G["Act: create a bounded execution plan"]
+    G --> H["Evidence, workspace history and reviewable decisions"]
+```
+
+### What makes the workflow different
+
+| Stage | Visitor should expect |
+|---|---|
+| Understand | Separate the actual objective from symptoms and missing context |
+| Explore | Compare alternatives with explicit trade-offs |
+| Challenge | Label verified facts separately from unproven assumptions |
+| Decide | Let the user accept, reject, or modify the direction |
+| Act | Produce concrete next steps and a definition of done |
+
+The repository includes workflow-state validation, authorization and isolation tests, quota/billing hardening, and evidence/research workspace flows. See the [workflow implementation](src/services/workflow/state-machine.ts), [CI workflow](.github/workflows/ci.yml), and [production-readiness tests](tests/production-readiness.test.ts). No independently reproduced reasoning-quality benchmark is published yet; the table above describes the product workflow, not a measured accuracy claim.
+
+**Why it matters:** slows down premature answers and gives users a structured way to inspect trade-offs before committing to a decision.
 
 ---
 
